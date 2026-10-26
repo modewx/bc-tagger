@@ -18,6 +18,7 @@ import { statsLine } from "./importTab";
 import { playableItem } from "./statusFilter";
 
 const batchId = new URLSearchParams(location.search).get("batch");
+document.body.classList.add("import-page");
 const bridge = new ExtensionBridge();
 const events = new ServerEvents();
 const jobs = new Jobs(events);
@@ -492,7 +493,7 @@ async function discard(statusEl) {
     topBarStart: top,
     colWidthKey: "bc_import_col_widths_v2",
     baseToolbar: false,
-    hideColumns: ["date"], // nothing is added yet
+    hideColumns: ["date", "thumb"], // nothing is added yet; no art is fetched here
     extraColumns: [selectColumn(), { ...sourceColumn(), after: "index" }, releaseColumn(), matchColumn(), locatedColumn(), notesColumn()],
     filterItem: showFilter,
     clearExtraFilters: () => (showSel.value = "all"),

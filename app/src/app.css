@@ -154,6 +154,10 @@ button.chip:hover { filter: brightness(0.95); border-color: #bbb; }
 .import-stats { font-size: 13px; color: #444; }
 .import-process { font-size: 12px; color: #777; flex-basis: 100%; }
 #collectionTable .col-sel { width: 30px; text-align: center; }
+/* More columns than the collection: a shorter player, and Title/Artist keep
+   ~140 px each (the table scrolls sideways in narrower windows). */
+.import-page #collectionTable { min-width: 1500px; }
+.import-page #collectionTable .col-player { width: 300px; }
 #collectionTable .col-match { width: 112px; }
 #collectionTable .col-notes { width: 96px; }
 #collectionTable .col-release { width: 150px; }
