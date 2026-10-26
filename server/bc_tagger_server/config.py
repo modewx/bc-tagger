@@ -142,7 +142,9 @@ def check_playlist_name(name: str) -> None:
 def _validate(merged: dict[str, Any]) -> dict[str, Any]:
     out = dict(merged)
     out["settings_version"] = SETTINGS_VERSION
-    if not isinstance(out.get("last_browse_dir"), str):
+    if out.get("last_browse_dir") is None:
+        out["last_browse_dir"] = ""  # cleared
+    if not isinstance(out["last_browse_dir"], str):
         raise SettingsError("last_browse_dir must be a string path")
     if not isinstance(out.get("owned_root"), str):
         raise SettingsError("owned_root must be a string path")

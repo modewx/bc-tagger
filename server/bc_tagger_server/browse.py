@@ -32,7 +32,8 @@ def _within(path: Path, roots: list[Path]) -> bool:
 
 
 def list_dir(store: Store, roots_cfg: list[dict[str, Any]], path: str | None = None) -> dict[str, Any]:
-    """``{path, parent, dirs: [{name, path}], files: [{name, path, ext, size, mtime, indexed, title?, artist?}]}``.
+    """``{path, parent, dirs: [{name, path}], files: [{name, path, ext, size, mtime, indexed, title?, artist?,
+    album?, format?}]}``.
     Without ``path``: the mounted roots. Symlinks and ``..`` are resolved first; anything outside the
     roots raises ``OutsideRoots``."""
     roots = _mounted_roots(roots_cfg)
@@ -61,9 +62,10 @@ def list_dir(store: Store, roots_cfg: list[dict[str, Any]], path: str | None = N
     if files:
         marks = ",".join("?" * len(files))
         known = {r["path"]: r for r in store.query(
-            f"SELECT path, title, artist FROM files WHERE path IN ({marks})", [f["path"] for f in files])}
+            f"SELECT path, title, artist, album, format FROM files WHERE path IN ({marks})", [f["path"] for f in files])}
         for f in files:
             if f["path"] in known:
-                f.update(indexed=True, title=known[f["path"]]["title"], artist=known[f["path"]]["artist"])
+                k = known[f["path"]]
+                f.update(indexed=True, title=k["title"], artist=k["artist"], album=k["album"], format=k["format"])
     parent = here.parent if here not in roots and _within(here.parent, roots) else None
     return {"path": str(here), "parent": str(parent) if parent else None, "dirs": dirs, "files": files}
