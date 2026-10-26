@@ -13,7 +13,7 @@ import { Jobs, progressText } from "./jobs";
 import { buildNav } from "./nav";
 import { sourceColumn, localPlayUrl } from "./columns";
 import { openPopover, closePopover } from "./popover";
-import { getBatch, updateRow, commitBatch, discardBatch, rowToItem, matchSource, bandcampSearchUrl, openOnBandcampUrl, cleanBandcampUrl } from "./importApi";
+import { getBatch, updateRow, commitBatch, discardBatch, resumeLookups, rowToItem, matchSource, bandcampSearchUrl, openOnBandcampUrl, cleanBandcampUrl } from "./importApi";
 import { statsLine } from "./importTab";
 import { playableItem } from "./statusFilter";
 
@@ -33,10 +33,10 @@ function el(tag, cls, text) {
   if (text != null) e.textContent = text;
   return e;
 }
-const rowOf = (item) => item._row;
+const rowOf = (item) => item.importRow;
 // The batch's current row for an item (a reload replaces the row objects that
 // event handlers of other rows captured).
-const rowNow = (item) => (batch && batch.rows.find((r) => r.n === item._row.n)) || item._row;
+const rowNow = (item) => (batch && batch.rows.find((r) => r.n === item.importRow.n)) || item.importRow;
 const pct = (c) => (typeof c === "number" ? `${Math.round(c <= 1 ? c * 100 : c)}%` : "");
 
 // Rows of the batch as table items. Edits go to the batch, not the collection.
@@ -122,17 +122,40 @@ function renderInfo() {
   const blockedRows = batch.rows.filter((r) => r.lookupUnavailable && r.source !== "bandcamp");
   const blocked = blockedRows.length;
   const lookups = batch.lookups || {};
-  const why =
-    lookups.reason === "challenge" || blockedRows.some((r) => r.lookupReason === "challenge")
+  const paused = lookups.state === "paused";
+  const why = paused
+    ? "Bandcamp is rate-limiting, so the lookup paused. Resume it later, or"
+    : lookups.reason === "challenge" || blockedRows.some((r) => r.lookupReason === "challenge")
       ? `Bandcamp showed its bot check (“Client Challenge”) to the server${lookups.at ? ` at ${new Date(lookups.at).toLocaleTimeString()}` : ""}, so it stopped looking rows up`
       : lookups.state === "off" || blockedRows.some((r) => r.lookupReason === "off")
       ? "Bandcamp lookups are turned off on this server"
       : "the lookup failed";
   unavailable.hidden = !blocked;
-  unavailable.textContent = blocked
-    ? `Bandcamp lookup unavailable for ${blocked} row${blocked > 1 ? "s" : ""}: ${why}. ` +
-      "For those rows: Open on Bandcamp, then Link to import on the page (or paste its URL)."
-    : "";
+  unavailable.textContent = !blocked
+    ? ""
+    : paused
+    ? `Bandcamp lookup paused with ${blocked} row${blocked > 1 ? "s" : ""} left: ${why} for those rows: Open on Bandcamp, ` +
+      "then Link to import on the page (or paste its URL). "
+    : `Bandcamp lookup unavailable for ${blocked} row${blocked > 1 ? "s" : ""}: ${why}. ` +
+      "For those rows: Open on Bandcamp, then Link to import on the page (or paste its URL).";
+  if (blocked && paused) {
+    const resume = el("button", "mini-btn", "Resume lookups");
+    resume.id = "resumeLookups";
+    resume.addEventListener("click", async () => {
+      resume.disabled = true;
+      try {
+        const res = await resumeLookups(batch.id);
+        const est = res.estimate && res.estimate.text ? ` (${res.estimate.text})` : "";
+        proc.textContent = `Looking up again${est}…`;
+        await jobs.watch(res.job_id, (j) => (proc.textContent = `Looking up again${est}: ${progressText(j)}`));
+      } catch (e) {
+        proc.textContent = `Couldn't resume: ${e.message}`;
+      }
+      await page.reload();
+      renderInfo();
+    });
+    unavailable.appendChild(resume);
+  }
   const pr = batch.pendingReleases;
   pending.hidden = !pr.length;
   pending.textContent = pr.length ? `${pr.length} release${pr.length > 1 ? "s" : ""} not importable yet (no tracklist): ` : "";
@@ -149,7 +172,7 @@ function renderInfo() {
     : batch.status === "error"
     ? `Import failed: ${batch.error || "unknown error"}`
     : batch.status && !/done|ready|resolved|complete/.test(batch.status)
-    ? `Processing: ${batch.status}`
+    ? `Processing: ${batch.status}${batch.estimate && batch.estimate.text ? ` (${batch.estimate.text})` : ""}`
     : "Review the rows, fix matches and tags, then Import selected. Rows matched on Bandcamp are added to the tagger; " +
       "the rest to Other. For a row without a match: Open on Bandcamp, then link the page (the tagger's button on it) or paste its URL in Match.";
 }
@@ -253,6 +276,7 @@ const SOURCES = {
 };
 const UNAVAILABLE_WHY = {
   challenge: "Bandcamp showed its bot check (“Client Challenge”) to the server, which stopped looking rows up.",
+  rate_limited: "Bandcamp is rate-limiting, so the lookup paused (Resume lookups at the top, later).",
   off: "Bandcamp lookups are turned off on this server.",
   error: "The lookup failed (no answer from Bandcamp).",
 };

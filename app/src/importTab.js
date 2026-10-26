@@ -150,7 +150,9 @@ export function createImportTab(container) {
     try {
       const res = await startImport(fileData, fileName, defaultTags ? defaultTags.get() : []);
       batchId = res.batch_id;
-      const job = await jobs.watch(res.job_id, (j) => (progress.textContent = `Looking up rows on Bandcamp and locating files: ${progressText(j)}`));
+      const est = res.estimate && res.estimate.text ? ` (${res.estimate.text})` : "";
+      progress.textContent = `Looking up rows on Bandcamp${est}…`;
+      const job = await jobs.watch(res.job_id, (j) => (progress.textContent = `Looking up rows on Bandcamp and locating files${est}: ${progressText(j)}`));
       if (job.status === "error") throw new Error(job.error || "import failed");
       progress.textContent = `Done: ${resultText(job)}`;
     } catch (e) {

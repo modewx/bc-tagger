@@ -8,7 +8,7 @@
 // `unavailable`, which get the bot-check error A's resolver reports; "Maybe
 // Track" gets candidates; the rest are unmatched.
 
-export function importStub(file, { located = [], unavailable = [] } = {}) {
+export function importStub(file, { located = [], unavailable = [], paused = [] } = {}) {
   const calls = [];
   let unknown = { ...file.unknown_tags };
   let status = "ready";
@@ -55,6 +55,8 @@ export function importStub(file, { located = [], unavailable = [] } = {}) {
       r.source = "bandcamp";
     } else if (unavailable.includes(it.line)) {
       Object.assign(r.match, { status: "error", error: UNAVAILABLE });
+    } else if (paused.includes(it.line)) {
+      Object.assign(r.match, { status: "unavailable", reason: "rate_limited", error: "Bandcamp is rate-limiting; try again later" });
     } else if (it.bandcamp_url) {
       resolveFromHint(r);
     } else if (it.title === "Maybe Track") {
@@ -77,7 +79,9 @@ export function importStub(file, { located = [], unavailable = [] } = {}) {
     checked: rows.filter((r) => r.checked).length,
     needs_pick: rows.filter((r) => r.match.status === "candidates").length,
   });
+  let lookups = paused.length ? { state: "paused", reason: "rate_limited", error: "Bandcamp is rate-limiting; try again later" } : { state: "on" };
   const batch = () => ({
+    bandcamp_lookups: lookups,
     batch_id: "e2e-b1",
     name: file.source,
     created_at: "2026-10-26T08:00:00Z",
@@ -102,6 +106,12 @@ export function importStub(file, { located = [], unavailable = [] } = {}) {
       if (p === "/api/import") return json(route, [{ batch_id: "e2e-b1", name: file.source, created_at: "2026-10-26T08:00:00Z", status, stats: stats() }]);
       if (p === "/api/import/e2e-b1" && req.method() === "DELETE") return json(route, { deleted: true });
       if (p === "/api/import/e2e-b1") return json(route, batch());
+      if (p === "/api/import/e2e-b1/resume") {
+        if (lookups.state !== "paused") return json(route, { detail: "not paused" }, 400);
+        lookups = { state: "on" };
+        rows.forEach((r) => r.match.reason === "rate_limited" && Object.assign(r.match, { status: "none", reason: null, error: null }));
+        return json(route, { job_id: "e2e-import-1", estimate: { lookups: 1, text: "~1 lookup ≈ 3 s" } });
+      }
       if (p === "/api/import/e2e-b1/tags") {
         rows.forEach((r) => {
           r.tags = [...new Set(r.tags.flatMap((t) => (body.map[t] ? body.map[t] : unknown[t] && body.unmapped === "ignore" ? [] : [t])))];

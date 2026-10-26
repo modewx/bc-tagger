@@ -1167,6 +1167,21 @@ test("import: file → tag mapping → preview (tints, release, to confirm, matc
   await page.close();
 });
 
+test("import: lookups paused by Bandcamp's rate limiting resume from the preview (stubbed API)", async () => {
+  const stub = importStub(JSON.parse(fs.readFileSync(IMPORT_SAMPLE, "utf8")), { paused: [3, 6] });
+  const page = await context.newPage();
+  await stub.install(page);
+  await page.goto(SERVER + "/import/?batch=e2e-b1");
+  await page.waitForFunction(() => document.querySelectorAll("#collectionTable tbody tr").length === 7);
+  assert.match(await page.textContent("#lookupUnavailable"), /Bandcamp lookup paused with 2 rows left: Bandcamp is rate-limiting/);
+  assert.equal(await page.$eval("tr[data-key='r2'] .match-cell .chip", (c) => c.dataset.source), "unavailable");
+  await page.click("#resumeLookups");
+  await waitFor(() => stub.calls.some((c) => c.path.endsWith("/resume")), { what: "the resume call" });
+  await page.waitForFunction(() => document.getElementById("lookupUnavailable").hidden);
+  assert.equal(await page.$eval("tr[data-key='r2'] .match-cell .chip", (c) => c.dataset.source), "none");
+  await page.close();
+});
+
 // --- Bandcamp's bot check ("Client Challenge") ---------------------------------------
 // Whatever gets it stops fetching from Bandcamp and says so; nothing retries it.
 

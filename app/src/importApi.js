@@ -102,7 +102,8 @@ export function normBatch(b) {
     newTags: b.new_tags || [],
     defaultTags: b.default_tags || [],
     pendingReleases: Array.isArray(b.pending_releases) ? b.pending_releases : [],
-    lookups: b.bandcamp_lookups || null, // {state: "on" | "off" | "stopped", reason, error, at}
+    lookups: b.bandcamp_lookups || null, // {state: "on" | "off" | "stopped" | "paused", reason, error, at}
+    estimate: b.estimate || null, // {lookups, cached, requests, seconds, interval_s, text}
     rows,
   };
 }
@@ -118,6 +119,8 @@ export const updateRow = (id, n, patch) =>
 export const applyTagMap = (id, map, unmapped) =>
   apiJson(`/api/import/${enc(id)}/tags`, { method: "POST", body: { map, unmapped } });
 export const commitBatch = (id) => apiJson(`/api/import/${enc(id)}/commit`, { method: "POST", body: {} });
+// Lookups paused by Bandcamp's rate limiting: carry on (→ {job_id, estimate}).
+export const resumeLookups = (id) => apiJson(`/api/import/${enc(id)}/resume`, { method: "POST", body: {} });
 export const discardBatch = (id) => apiJson(`/api/import/${enc(id)}`, { method: "DELETE" });
 
 // Where a row's Bandcamp match came from, for the preview's Match column.
@@ -182,6 +185,6 @@ export function rowToItem(row) {
     url: base.url || base.item_url || (row.match.chosen && row.match.chosen.url) || null,
     links: row.links,
     local: row.local || base.local || null,
-    _row: row,
+    importRow: row, // not "_row": the table compares items without _ fields, and row-only changes must show
   };
 }
