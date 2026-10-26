@@ -394,10 +394,20 @@ def test_estimate_and_pace(svc):
     with svc.store.tx() as c:
         c.execute("DELETE FROM http_cache")
     svc.settings.update({"bandcamp_request_interval_s": 3})
-    assert svc.default_bandcamp_fetcher().min_interval == 3.0
+    live = svc.default_bandcamp_fetcher()
+    assert live.min_interval == 3.0
+    svc.settings.update({"bandcamp_request_interval_s": 0.5})
+    assert live.min_interval == 0.5  # read before every request: a change applies to the next one
+    svc.settings.update({"bandcamp_request_interval_s": 3})
     svc.bandcamp_fetcher = svc.default_bandcamp_fetcher
-    with pytest.raises(Exception, match="at least 1"):
-        svc.settings.update({"bandcamp_request_interval_s": 0.5})
+    with pytest.raises(Exception, match="at least 0.5"):
+        svc.settings.update({"bandcamp_request_interval_s": 0.4})
+    assert svc.settings.get("bandcamp_browser_concurrency") == 2 and svc.settings.get("bandcamp_browser_spacing_ms") == 400
+    svc.settings.update({"bandcamp_browser_concurrency": 4, "bandcamp_browser_spacing_ms": 100})
+    for bad in ({"bandcamp_browser_concurrency": 5}, {"bandcamp_browser_concurrency": 1.5},
+                {"bandcamp_browser_spacing_ms": 99}):
+        with pytest.raises(Exception, match="whole number"):
+            svc.settings.update(bad)
     batch = importer.create_batch(svc, {"format": "bc-tagger-import/1", "items": recorded_rows()}, ["must"])
     est = batch["estimate"]
     looked_up = len(recorded_rows()) - 2  # Elhwah and Atacama are in the collection
@@ -409,3 +419,25 @@ def test_estimate_and_pace(svc):
         r = c.post("/api/import", json={"file": {"format": "bc-tagger-import/1", "items": recorded_rows()}}).json()
         assert r["estimate"]["lookups"] >= 0 and "text" in r["estimate"]
         svc.jobs.wait(r["job_id"], timeout=30)
+
+
+def test_pasted_bandcamp_url_and_offline_switch(svc, monkeypatch):
+    from bc_tagger_server import bandcamp
+
+    batch = run(svc, recorded_rows())
+    bid, n = batch["batch_id"], row_at(batch, 1)["n"]
+    url = "https://superdrama.bandcamp.com/album/select-edits-2017-2020"
+    row = importer.update_row(svc, bid, n, {"bandcamp_url": "", "re_resolve": True})  # cleared: a search instead
+    assert row["bandcamp_url"] is None and row["hints"]["bandcamp_url"] is None
+    assert row["match"]["status"] == "unavailable" and row["match"]["reason"] == "error"  # that search isn't recorded
+    row = importer.update_row(svc, bid, n, {"bandcamp_url": url + "/?from=search", "re_resolve": True})
+    assert row["hints"]["bandcamp_url"] == url and row["match"]["source"] == "file"
+    assert row["source"] == "bandcamp" and row["bandcamp"]["item"]["title"] == "Take It As A Game (Super Drama Mix)"
+    with pytest.raises(importer.ImportError_, match="bandcamp_url must look like"):
+        importer.update_row(svc, bid, n, {"bandcamp_url": "https://superdrama.bandcamp.com/"})
+    # BC_TAGGER_BANDCAMP_OFFLINE=1: the server's cache only
+    monkeypatch.setenv("BC_TAGGER_BANDCAMP_OFFLINE", "1")
+    f = bandcamp.make_fetcher(svc.store)
+    assert f.offline and f.request("GET", url)[0] == 200
+    with pytest.raises(bandcamp.Unavailable):
+        f.request("GET", "https://superdrama.bandcamp.com/album/not-recorded")

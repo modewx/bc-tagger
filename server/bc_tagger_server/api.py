@@ -81,6 +81,7 @@ class RowChanges(BaseModel):
     album: Optional[str] = None
     re_resolve: bool = False
     match_url: Optional[str] = None  # a Bandcamp page the user found (stored, not fetched)
+    bandcamp_url: Optional[str] = None  # a pasted Bandcamp page: the row's hint, read by re_resolve
     link_item: Optional[dict] = None  # the item the extension saved from the open Bandcamp page
 
 

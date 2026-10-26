@@ -554,6 +554,13 @@ def update_row(svc, batch_id: str, n: int, changes: dict) -> dict:
         if key in changes:
             row[key] = (changes[key] or "").strip() or None
             identity = True
+    if "bandcamp_url" in changes:  # a pasted Bandcamp page: the row's hint (then re_resolve reads it)
+        url = _clean_page_url(changes["bandcamp_url"])
+        row["bandcamp_url"] = url or None
+        if (_own(row) or {}).get("via") in ("resolved", "chosen"):
+            row["bandcamp"] = None  # the pasted page replaces what the search found
+            row["match"] = _empty_match()
+        identity = True
     if changes.get("re_resolve") and _own(row) is None:
         stop = _stop_reason(svc, batch)
         if stop:  # stopped or off: the same state, no request
@@ -576,9 +583,7 @@ def update_row(svc, batch_id: str, n: int, changes: dict) -> dict:
         row["match"] = match
         identity = True
     if "match_url" in changes:  # a Bandcamp page the user found; nothing is fetched
-        url = (changes["match_url"] or "").strip().split("?")[0].split("#")[0].rstrip("/")
-        if url and not _PAGE_URL.match(url):
-            raise ImportError_("match_url must look like https://host/track/slug or https://host/album/slug")
+        url = _clean_page_url(changes["match_url"], "match_url")
         if url:
             row["match"] = {**_empty_match(), "status": "manual", "source": "url", "url": url}
         else:
@@ -595,6 +600,14 @@ def update_row(svc, batch_id: str, n: int, changes: dict) -> dict:
     _refresh_stats(store, batch, rows)
     _row_event(svc, batch_id, n, len(rows))
     return row
+
+
+def _clean_page_url(value: str | None, key: str = "bandcamp_url") -> str:
+    """https://host/(track|album)/slug, query and fragment dropped; "" clears; 400 for anything else."""
+    url = (value or "").strip().split("?")[0].split("#")[0].rstrip("/")
+    if url and not _PAGE_URL.match(url):
+        raise ImportError_(f"{key} must look like https://host/track/slug or https://host/album/slug")
+    return url
 
 
 def _row_event(svc, batch_id: str, n: int, total: int) -> None:

@@ -100,27 +100,22 @@ def test_resolve_readings():
     assert f.queries == ["Front 242 Controversy Between", "Controversy Between"]
 
 
-CLASSIC_HTML = """<ul class="result-items">
-<li class="searchresult data-search" data-search="{&quot;id&quot;:3244411361,&quot;type&quot;:&quot;t&quot;}">
-  <div class="result-info"><div class="itemtype">TRACK</div>
-  <div class="heading"><a href="https://gilbartemusic.bandcamp.com/track/elhwah?from=search">Elhwah</a></div>
-  <div class="subhead">from Claviceps Purpurea by Gil.Barte</div></div>
-</li></ul>"""
+def test_search_errors_say_what_happened():
+    class Site(FakeSite):
+        def __init__(self, status, body=""):
+            super().__init__({})
+            self.status, self.body = status, body
 
-
-def test_html_fallback_parser_and_bot_check():
-    hits = bandcamp.parse_html_search(CLASSIC_HTML, "t")
-    assert [(h.id, h.title, h.artist, h.album, h.url) for h in hits] == [
-        ("t3244411361", "Elhwah", "Gil.Barte", "Claviceps Purpurea", "https://gilbartemusic.bandcamp.com/track/elhwah")]
-
-    class BotCheck(FakeSite):
         def request(self, method, url, *, json_body=None, params=None):
-            if url == bandcamp.SEARCH_URL:
-                return 503, ""
-            return 200, "<html><script>challenge()</script></html>"  # the bot-check page
+            self.queries.append(url)
+            return self.status, self.body
 
-    with pytest.raises(Unavailable, match="bot-check"):
-        bandcamp.search(BotCheck({}), "x", "t")
+    for site, message in ((Site(599, "ConnectError: refused"), "unreachable"), (Site(503), "HTTP 503"),
+                          (Site(200, "<html>not json</html>"), "isn't its JSON")):
+        with pytest.raises(Unavailable, match=message) as e:
+            bandcamp.search(site, "x", "t")
+        assert not isinstance(e.value, bandcamp.Challenged) and "bot" not in str(e.value)
+        assert site.queries == [bandcamp.SEARCH_URL]  # no HTML-search fallback
 
 
 TRALBUM = {
@@ -280,3 +275,30 @@ def test_fetcher_backs_off_politely_on_429(tmp_path):
     with pytest.raises(RateLimited):
         always.request("GET", "https://bandcamp.com/b")
     assert always.network_requests == 4
+
+
+def test_one_honest_product_user_agent():
+    from bc_tagger_server import USER_AGENT, ownership
+
+    assert bandcamp.USER_AGENT is USER_AGENT and ownership.USER_AGENT is USER_AGENT
+    assert USER_AGENT.startswith("bc-tagger/0.1 (") and "github.com/modewx/bc-tagger" in USER_AGENT
+    assert not any(s in USER_AGENT for s in ("dev", "Mozilla", "Java", "Node", "Chrome", "Safari"))
+
+
+def test_interval_default_and_migration(tmp_path):
+    from bc_tagger_server.config import Settings
+
+    fresh = Settings(path=tmp_path / "a" / "settings.json")
+    assert fresh.get("bandcamp_request_interval_s") == 1.0
+    # a file written before the default changed, holding the old default: moved to 1.0
+    old = tmp_path / "b" / "settings.json"
+    old.parent.mkdir()
+    old.write_text(json.dumps({"bandcamp_request_interval_s": 2.5, "server_port": 8765}))
+    assert Settings(path=old).get("bandcamp_request_interval_s") == 1.0
+    # chosen after the change (the file says so): kept
+    s = Settings(path=old)
+    s.update({"bandcamp_request_interval_s": 2.5})
+    assert json.loads(old.read_text())["settings_version"] == 2
+    assert Settings(path=old).get("bandcamp_request_interval_s") == 2.5
+    old.write_text(json.dumps({"bandcamp_request_interval_s": 3}))  # not the old default: kept
+    assert Settings(path=old).get("bandcamp_request_interval_s") == 3

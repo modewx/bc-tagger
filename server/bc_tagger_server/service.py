@@ -637,7 +637,7 @@ class Service:
         """Paced by the ``bandcamp_request_interval_s`` setting (and the BC_TAGGER_BANDCAMP_* switches)."""
         from .bandcamp import make_fetcher
 
-        return make_fetcher(self.store, min_interval=float(self.settings.get("bandcamp_request_interval_s")))
+        return make_fetcher(self.store, min_interval=lambda: float(self.settings.get("bandcamp_request_interval_s")))
 
     def start_import(self, file_obj: dict, default_tags: list[str], name: str | None = None):
         from . import importer

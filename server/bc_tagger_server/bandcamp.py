@@ -1,12 +1,13 @@
 """Find imported rows on Bandcamp, and build tagger items from Bandcamp pages.
 
 * Search: the public autocomplete JSON (``bcsearch_public_api/1/autocomplete_elastic``), from the
-  local server with the honest User-Agent below (never a browser's), at most one request per
-  second, cached (see ``fetcher``). Fallback: the HTML search page.
+  local server with the app's own User-Agent (``bc_tagger_server.USER_AGENT``, never a browser's), one request at a time at the
+  ``bandcamp_request_interval_s`` pace, cached (see ``fetcher``). No HTML-search fallback.
 * Bandcamp's bot check ("Client Challenge") raises ``Challenged``: the import stops its Bandcamp
   lookups and marks the rest of the rows unavailable. Never retried, never worked around.
 * ``BC_TAGGER_BANDCAMP=off``: no requests at all (rows not in the collection end unavailable).
   ``BC_TAGGER_BANDCAMP_FIXTURES=<file or dir>``: recorded responses only (tests, e2e).
+  ``BC_TAGGER_BANDCAMP_OFFLINE=1``: the server's own cache only, no requests.
 * A Bandcamp URL in the import file (``bandcamp_url``, often a release page) is read directly:
   the row's track is picked from the page's tracklist, no search needed.
 * Accepted matches: the track/album page's ``data-tralbum`` gives the full item in the content
@@ -24,13 +25,13 @@ from dataclasses import dataclass
 from typing import Any
 from urllib.parse import urlencode, urljoin, urlsplit
 
+from . import USER_AGENT
 from .fetcher import Challenged, Fetcher, RateLimited, Unavailable, load_fixtures
 from .rowmatch import ACCEPT_AT, score_row
 from .store import Store
 
 SEARCH_URL = "https://bandcamp.com/api/bcsearch_public_api/1/autocomplete_elastic"
-HTML_SEARCH_URL = "https://bandcamp.com/search"
-USER_AGENT = "bc-tagger-dev/0.1 (personal collection tool; not used for AI training; https://github.com/modewx/bc-tagger)"
+HTML_SEARCH_URL = "https://bandcamp.com/search"  # opened in the user's browser, never fetched
 ITEM_FIELDS = ("id", "raw_id", "tralbum_type", "item_type", "title", "artist", "album_title", "album_id",
                "album_url", "item_url", "url", "art_url", "band_id", "track_num", "publish_date", "file")
 _ID = re.compile(r"^[at]\d+$")
@@ -46,6 +47,8 @@ def make_fetcher(store: Store, **kw) -> Fetcher:
     fixtures = os.environ.get("BC_TAGGER_BANDCAMP_FIXTURES")
     if fixtures and "fixtures" not in kw:
         kw["fixtures"] = load_fixtures(fixtures)
+    if os.environ.get("BC_TAGGER_BANDCAMP_OFFLINE", "").strip().lower() in ("1", "true", "yes", "on"):
+        kw["offline"] = True
     return Fetcher(store, USER_AGENT, **kw)
 
 
@@ -93,18 +96,18 @@ def _first_query(row: dict) -> tuple[str, str]:
 
 
 def search(fetcher: Fetcher, text: str, kind: str = "t") -> tuple[list[Hit], str]:
-    """Search tracks (``kind="t"``) or albums (``"a"``). Returns (hits, method)."""
+    """Search tracks (``kind="t"``) or albums (``"a"``) with the autocomplete JSON. Returns (hits, method).
+    No HTML-search fallback: that page only ever answers scripted clients with the bot check."""
     status, body = fetcher.request("POST", SEARCH_URL, json_body=_search_body(text, kind))
-    if status == 200:
-        try:
-            results = json.loads(body).get("auto", {}).get("results", [])
-            return [h for h in (_hit_from_json(r) for r in results) if h and h.id[0] == kind], "autocomplete"
-        except (ValueError, AttributeError):
-            pass
-    status, body = fetcher.request("GET", HTML_SEARCH_URL, params={"q": text, "item_type": kind})
-    if status != 200 or "searchresult" not in body:
-        raise Unavailable("Bandcamp search unavailable (the HTML search returns a bot-check page)")
-    return parse_html_search(body, kind), "html"
+    if status == 599:
+        raise Unavailable(f"Bandcamp unreachable ({body})")
+    if status != 200:
+        raise Unavailable(f"Bandcamp search answered HTTP {status}")
+    try:
+        results = json.loads(body).get("auto", {}).get("results", [])
+    except (ValueError, AttributeError):
+        raise Unavailable("Bandcamp search answered something that isn't its JSON") from None
+    return [h for h in (_hit_from_json(r) for r in results) if h and h.id[0] == kind], "autocomplete"
 
 
 def _hit_from_json(r: dict) -> Hit | None:
@@ -116,43 +119,6 @@ def _hit_from_json(r: dict) -> Hit | None:
         artist=r.get("band_name"), album=r.get("album_name") if t == "t" else r.get("name"),
         url=r.get("item_url_path"), art_url=_art_url(r.get("art_id")) or r.get("img"), raw=r,
     )
-
-
-_RESULT = re.compile(r'<li class="searchresult[^"]*"(?P<attrs>[^>]*)>(?P<body>.*?)</li>', re.S)
-_HEADING = re.compile(r'class="heading">\s*<a href="(?P<url>[^"]+)"[^>]*>(?P<title>.*?)</a>', re.S)
-_SUBHEAD = re.compile(r'class="subhead">(?P<text>.*?)</div>', re.S)
-_SEARCH_DATA = re.compile(r'data-search="(?P<json>[^"]+)"')
-
-
-def parse_html_search(body: str, kind: str) -> list[Hit]:
-    """Classic Bandcamp search markup: li.searchresult > .heading a, .subhead ("from X by Y")."""
-    hits = []
-    for m in _RESULT.finditer(body):
-        b = m.group("body")
-        h = _HEADING.search(b)
-        if not h:
-            continue
-        data = {}
-        ds = _SEARCH_DATA.search(m.group("attrs"))
-        if ds:
-            try:
-                data = json.loads(html.unescape(ds.group("json")))
-            except ValueError:
-                data = {}
-        sub = _SUBHEAD.search(b)
-        sub_text = " ".join(html.unescape(re.sub(r"<[^>]+>", " ", sub.group("text"))).split()) if sub else ""
-        artist = album = None
-        if " by " in f" {sub_text}":
-            before, _, artist = f" {sub_text}".rpartition(" by ")
-            album = before.strip()[5:].strip() if before.strip().startswith("from ") else None
-        item_id = data.get("id")
-        t = (data.get("type") or kind)[:1]
-        hits.append(Hit(
-            id=f"{t}{item_id}" if item_id else f"{t}?{h.group('url')}", type="track" if t == "t" else "album",
-            title=" ".join(html.unescape(re.sub(r"<[^>]+>", "", h.group("title"))).split()),
-            artist=(artist or "").strip() or None, album=album, url=h.group("url").split("?")[0], art_url=None, raw=data,
-        ))
-    return hits
 
 
 # -- resolve ------------------------------------------------------------------------------------
