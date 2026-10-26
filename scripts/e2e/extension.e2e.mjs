@@ -312,10 +312,19 @@ test("local app: the Show filter narrows by status and explains an empty result"
 });
 
 test("Fix album IDs reads the real album from track pages (Bandcamp)", async () => {
-  // Two tracks tagged on their own pages: one stored "a" + its own id, one none.
-  const targets = { t1004723757: "a1994132225", t1011914860: null };
+  // Two tracks tagged on their own pages (one stored "a" + its own id, one
+  // none), plus one whose page is gone (404) that must not stop the run.
+  const targets = { t1004723757: "a1994132225", t1011914860: null, t999000404: null };
   await probe.evaluate(async (ids) => {
     const { taggedItems } = await chrome.storage.local.get("taggedItems");
+    taggedItems.t999000404 = {
+      id: "t999000404",
+      title: "Removed track",
+      tralbum_type: "t",
+      raw_id: 999000404,
+      tags: ["must"],
+      url: "https://joaquincornejomusic.bandcamp.com/track/this-track-does-not-exist-e2e",
+    };
     Object.entries(taggedItems).forEach(([id, it]) => {
       if (it.tralbum_type === "t" && !ids.includes(id)) it.album_checked = true; // keep the run short
     });
@@ -325,15 +334,19 @@ test("Fix album IDs reads the real album from track pages (Bandcamp)", async () 
   await page.goto(extPage("collection.html"));
   await page.waitForFunction(() => document.querySelectorAll("#collectionTable tbody tr").length > 0);
   await page.click("#fixAlbumIds");
-  await page.waitForFunction(() => /Album IDs: \d+ fixed/.test(document.getElementById("refreshStatus").textContent), null, {
-    timeout: 60000,
+  await page.waitForFunction(() => /Album IDs: \d+ fixed, \d+ singles(\.|,)/.test(document.getElementById("refreshStatus").textContent), null, {
+    timeout: 90000,
   });
+  assert.match(await page.textContent("#refreshStatus"), /1 pages not reachable/);
+  assert.equal(await page.isDisabled("#fixAlbumIds"), false);
   const items = (await storage("taggedItems")).taggedItems;
   assert.equal(items.t1004723757.album_id, targets.t1004723757);
   assert.match(String(items.t1011914860.album_id), /^a\d+$/);
   assert.equal(items.t1011914860.album_checked, true);
   // album_url becomes the real (absolute) album page.
   assert.match(items.t1004723757.album_url, /^https:\/\/[a-z0-9-]+\.bandcamp\.com\/album\//);
+  assert.equal(items.t999000404.album_checked, undefined); // not reachable: retried next time
+  await probe.evaluate(() => chrome.runtime.sendMessage({ type: "removeTaggedItem", id: "t999000404" }));
   await page.close();
 });
 

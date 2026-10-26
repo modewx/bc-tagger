@@ -315,7 +315,12 @@ export function createBandcampFetcher(fetchFn) {
   // The data-tralbum of a track's own page. Ignores the stored album_id (it may
   // be the wrong one this is used to repair) when resolving custom domains.
   function resolveTrackTralbum(item) {
-    return pageDocForItem({ ...item, album_id: null }, true).then((doc) => (doc ? tralbumOf(doc) : null));
+    return pageDocForItem({ ...item, album_id: null }, true)
+      .then((doc) => (doc ? tralbumOf(doc) : null))
+      .catch((e) => {
+        console.warn("[track page] failed", item.id, (e && e.message) || e); // e.g. 404: track removed
+        return null;
+      });
   }
 
   return { fetchFreshStream, resolveAlbumDoc, resolveItemArt, resolveTrackTralbum };
