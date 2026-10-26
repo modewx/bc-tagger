@@ -1248,6 +1248,81 @@ test("import: Add default tags to all tracks, at the start and on an open batch'
   await page.close();
 });
 
+// --- Locate again, and setting a row's file by hand -------------------------------------
+// A folder of the test server's own (.e2e/music, an extra root) gets a file
+// after the batch exists; nothing touches the user's music folders.
+
+const E2E_MUSIC = path.join(E2E, "music");
+const PYTHON = process.env.E2E_PYTHON || "/Users/alvaroh/Projects/auto-rekordbox/.venv/bin/python"; // the server's (has mutagen)
+function writeAiff(file, title, artist, album) {
+  execFileSync(PYTHON, [
+    "-c",
+    "import sys; sys.path[:0] = sys.argv[1:3]; from pathlib import Path; from conftest import write_aiff; write_aiff(Path(sys.argv[3]), sys.argv[4], sys.argv[5], sys.argv[6], 1)",
+    path.join(ROOT, "server/tests"),
+    path.join(ROOT, "server"),
+    file,
+    title,
+    artist,
+    album,
+  ]);
+}
+
+test("import preview: Locate again finds a file added later; Set file by search; a hand-set file survives Locate again (real server)", async () => {
+  fs.rmSync(E2E_MUSIC, { recursive: true, force: true });
+  fs.mkdirSync(E2E_MUSIC, { recursive: true });
+  await put({ extra_roots: [{ path: E2E_MUSIC, kind: "not_owned" }] });
+  const items = [
+    { line: 1, raw: "E2E Late Artist - E2E Late File", artist: "E2E Late Artist", title: "E2E Late File", album: "E2E Late Album", tags: ["must"] },
+    { line: 2, raw: "Nobody - Picked By Hand", artist: "Nobody", title: "Picked By Hand", tags: ["must"] },
+  ];
+  const res = await post("/api/import", { file: { format: "bc-tagger-import/1", source: "e2e-locate.txt", items }, default_tags: [], name: "e2e-locate" });
+  const batchId = res.batch_id;
+  const page = await context.newPage();
+  try {
+    await waitFor(() => api(`/api/import/${batchId}`).then((b) => b.status === "ready"), { what: "the batch", timeout: 30000 });
+    await page.goto(`${SERVER}/import/?batch=${batchId}`);
+    await page.waitForFunction(() => document.querySelectorAll("#collectionTable tbody tr").length === 2);
+    const loc = (k) => page.$eval(`tr[data-key='${k}'] .located-cell .chip`, (c) => c.dataset.status);
+    assert.equal(await loc("r0"), "missing");
+    assert.ok(await page.$eval("tr[data-key='r0']", (tr) => tr.classList.contains("row-missing")));
+
+    // The file shows up after the batch was made: Locate again (missing rows).
+    const late = path.join(E2E_MUSIC, "E2E Late Artist - E2E Late File.aiff");
+    writeAiff(late, "E2E Late File", "E2E Late Artist", "E2E Late Album");
+    await page.click("#locateAgain");
+    await page.waitForFunction(() => /^Locate again: 1 newly located/.test(document.getElementById("refreshStatus").textContent), null, { timeout: 60000 });
+    await page.waitForFunction(() => document.querySelector("tr[data-key='r0'] .located-cell .chip").dataset.status === "located");
+    assert.ok(!(await page.$eval("tr[data-key='r0']", (tr) => tr.classList.contains("row-missing"))), "no longer light red");
+
+    // Set file… for the other row, by searching the index.
+    await page.click("tr[data-key='r1'] .located-cell .chip");
+    await page.click(".popover button:has-text('Set file…')");
+    assert.equal(await page.inputValue(".popover .set-file-q"), "Nobody Picked By Hand");
+    await page.fill(".popover .set-file-q", "e2e late file");
+    await page.click(".popover .set-file button:has-text('Search')");
+    await page.waitForSelector(".popover .set-file-results .pop-file");
+    assert.match(await page.textContent(".popover .set-file-results"), /E2E Late File/);
+    await page.click(".popover .set-file-results .pop-file button.primary");
+    await page.waitForFunction(() => document.querySelector("tr[data-key='r1'] .located-cell .chip").dataset.status === "located-manual");
+    assert.equal(await page.textContent("tr[data-key='r1'] .located-cell .chip"), "✓ set manually");
+
+    // Locate again on all rows keeps the hand-set file.
+    await page.check("#locateAllRows");
+    await page.click("#locateAgain");
+    await page.waitForFunction(() => /^Locate again: /.test(document.getElementById("refreshStatus").textContent) && !document.getElementById("locateAgain").disabled, null, { timeout: 60000 });
+    await page.waitForTimeout(300);
+    assert.equal(await loc("r1"), "located-manual");
+    const row1 = (await api(`/api/import/${batchId}`)).rows[1];
+    assert.equal(row1.located.best.path, late);
+    assert.equal(row1.located.manual, true);
+  } finally {
+    await api(`/api/import/${batchId}`, { method: "DELETE" });
+    await put({ extra_roots: [] });
+    fs.rmSync(E2E_MUSIC, { recursive: true, force: true });
+    await page.close();
+  }
+});
+
 // --- An open import survives navigation and reloads ---------------------------------
 
 test("import: a reload during lookups follows the same job on to the mapping step (stubbed API)", async () => {

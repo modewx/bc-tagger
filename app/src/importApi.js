@@ -134,6 +134,13 @@ export const updateRow = (id, n, patch) =>
 export const applyTagMap = (id, map, unmapped) =>
   apiJson(`/api/import/${enc(id)}/tags`, { method: "POST", body: { map, unmapped } });
 export const commitBatch = (id) => apiJson(`/api/import/${enc(id)}/commit`, { method: "POST", body: {} });
+// Locate rows again after files were added: "missing" | "all" | [n] (→ {job_id};
+// the job's result has newly_located, still_missing). Hand-set files stay.
+export const relocateRows = (id, rows = "missing") =>
+  apiJson(`/api/import/${enc(id)}/locate`, { method: "POST", body: { rows, scan: "quick" } });
+export const relocateRow = (id, n) => apiJson(`/api/import/${enc(id)}/rows/${enc(n)}/locate`, { method: "POST", body: {} }).then((r) => normRow(r, n));
+// Files in the index matching every word of `q` (artist, title, album, path).
+export const searchFiles = (q) => apiJson(`/api/index/search?q=${enc(q)}&limit=25`);
 // Lookups paused by Bandcamp's rate limiting: carry on (→ {job_id, estimate}).
 export const resumeLookups = (id) => apiJson(`/api/import/${enc(id)}/resume`, { method: "POST", body: {} });
 export const discardBatch = (id) => apiJson(`/api/import/${enc(id)}`, { method: "DELETE" });

@@ -13,7 +13,7 @@ import { Jobs, progressText } from "./jobs";
 import { buildNav } from "./nav";
 import { sourceColumn, localPlayUrl } from "./columns";
 import { openPopover, closePopover } from "./popover";
-import { getBatch, updateRow, commitBatch, discardBatch, resumeLookups, setDefaultTags, rowToItem, matchSource, bandcampSearchUrl, openOnBandcampUrl, cleanBandcampUrl } from "./importApi";
+import { getBatch, updateRow, commitBatch, discardBatch, resumeLookups, setDefaultTags, relocateRows, relocateRow, searchFiles, rowToItem, matchSource, bandcampSearchUrl, openOnBandcampUrl, cleanBandcampUrl } from "./importApi";
 import { statsLine } from "./importTab";
 import { rememberImport } from "./openImport";
 import { playableItem } from "./statusFilter";
@@ -492,6 +492,105 @@ function matchColumn() {
   };
 }
 
+// --- Located: where the row's file is; locate again, pick, or set it by hand -----------
+
+const fmtSize = (f) => [String(f.format || "").toUpperCase(), f.root_kind === "owned" ? "owned folder" : null].filter(Boolean).join(" · ");
+const fileLine = (f) => [f.title, f.artist, f.album].filter(Boolean).join(" — ") || (f.path || "").split("/").pop();
+
+function fileRow(f, actions) {
+  const r = el("div", "pop-file");
+  r.append(el("div", "pop-file-name", fileLine(f)), el("div", "pop-file-meta", [fmtSize(f), f.path].filter(Boolean).join(" · ")));
+  if (actions.length) {
+    const btns = el("div", "pop-actions");
+    actions.forEach(([label, cls, run]) => {
+      const b = el("button", cls, label);
+      b.addEventListener("click", run);
+      btns.appendChild(b);
+    });
+    r.appendChild(btns);
+  }
+  return r;
+}
+
+function setFileForm(pop, row) {
+  const box = el("div", "pop-url set-file");
+  box.appendChild(el("div", "pop-label", "Set file: search your music folders"));
+  const q = document.createElement("input");
+  q.className = "pop-input set-file-q";
+  q.value = [row.artist, row.title].filter(Boolean).join(" ");
+  const results = el("div", "set-file-results");
+  const search = async () => {
+    results.textContent = "Searching…";
+    let found = [];
+    try {
+      found = await searchFiles(q.value.trim());
+    } catch (e) {
+      results.textContent = e.status === 404 ? "This server can't search the files yet." : `Search failed: ${e.message}`;
+      return;
+    }
+    results.innerHTML = "";
+    if (!found.length) results.appendChild(el("div", "pop-meta", "No files match."));
+    found.forEach((f) => results.appendChild(fileRow(f, [["Use this", "primary", () => patchRow(row, { path: f.path }, "Setting the file…")]])));
+  };
+  q.addEventListener("keydown", (e) => e.key === "Enter" && search());
+  const go = el("button", "", "Search");
+  go.addEventListener("click", search);
+  const paste = document.createElement("input");
+  paste.className = "pop-input set-file-path";
+  paste.placeholder = "…or paste a full path to the file";
+  const use = el("button", "", "Use path");
+  use.addEventListener("click", () => paste.value.trim() && patchRow(row, { path: paste.value.trim() }, "Setting the file…"));
+  const a1 = el("div", "pop-actions");
+  a1.appendChild(go);
+  const a2 = el("div", "pop-actions");
+  a2.appendChild(use);
+  box.append(q, a1, results, paste, a2);
+  pop.appendChild(box);
+  q.focus();
+  search();
+}
+
+function locatedPopover(anchor, row) {
+  openPopover(anchor, (pop) => {
+    const local = row.local || { status: "unknown" };
+    const best = local.best || null;
+    const head = local.status === "located" ? (local.manual ? "Located (set manually)" : "Located") : local.status === "candidates" ? "Possible files" : "Not found on your drive";
+    pop.appendChild(el("div", "pop-head", head));
+    if (best) {
+      const files = Array.isArray(best.tracks) && best.tracks.length ? best.tracks : [best];
+      files.forEach((f) => pop.appendChild(fileRow(f, [])));
+    }
+    (local.candidates || []).forEach((c) => pop.appendChild(fileRow(c, [["Use this", "primary", () => patchRow(row, { path: c.path }, "Setting the file…")]])));
+    const foot = el("div", "pop-actions");
+    const again = el("button", "", "Locate again");
+    again.title = "Look for new files on your drive and match this row again";
+    again.addEventListener("click", async () => {
+      closePopover();
+      page.statusEl.textContent = "Locating again…";
+      try {
+        const r = await relocateRow(batchId, row.n);
+        page.statusEl.textContent = r.local && r.local.status === "located" ? "Located." : "Still not found.";
+      } catch (e) {
+        page.statusEl.textContent = `Couldn't locate: ${e.message}`;
+      }
+      await page.reload();
+      page.refreshRow(`r${row.n}`);
+    });
+    const setFile = el("button", "", "Set file…");
+    setFile.addEventListener("click", () => {
+      foot.remove();
+      setFileForm(pop, row);
+    });
+    foot.append(again, setFile);
+    if (local.manual) {
+      const auto = el("button", "", "Back to automatic");
+      auto.addEventListener("click", () => patchRow(row, { path: null }, "Locating…"));
+      foot.appendChild(auto);
+    }
+    pop.appendChild(foot);
+  });
+}
+
 function locatedColumn() {
   return {
     id: "located",
@@ -500,13 +599,24 @@ function locatedColumn() {
     sortKey: "located",
     compare: (a, b) => Number(!!(a.local && a.local.status === "located")) - Number(!!(b.local && b.local.status === "located")),
     render(cell, key, item) {
-      cell.classList.add("status-cell");
+      cell.classList.add("status-cell", "no-row-play", "located-cell");
       const local = item.local || { status: "unknown" };
       const best = local.best || {};
       const files = Array.isArray(best.tracks) && best.tracks.length ? best.tracks : best.path ? [best] : [];
-      const label = local.status === "located" ? `✓ ${files.length > 1 ? files.length + " files" : String(best.format || "file").toUpperCase()}` : local.status === "missing" ? "✗" : "–";
-      const chip = el("span", `chip loc-${local.status}`, label);
-      chip.title = files.map((f) => f.path).join("\n") || (local.status === "missing" ? "Not found in the local folders" : "Not located");
+      const label =
+        local.status === "located"
+          ? local.manual
+            ? "✓ set manually"
+            : `✓ ${files.length > 1 ? files.length + " files" : String(best.format || "file").toUpperCase()}`
+          : local.status === "candidates"
+          ? `? ${(local.candidates || []).length}`
+          : local.status === "missing"
+          ? "✗"
+          : "–";
+      const chip = el("button", `chip loc-${local.status}`, label);
+      chip.dataset.status = local.status + (local.manual ? "-manual" : "");
+      chip.title = local.manual ? `Set manually: ${best.path}` : files.map((f) => f.path).join("\n") || "Not found in your music folders: click to locate again or set the file";
+      chip.addEventListener("click", () => locatedPopover(chip, rowNow(item)));
       cell.appendChild(chip);
     },
   };
@@ -575,6 +685,28 @@ async function importSelected(statusEl, button) {
   renderInfo();
 }
 
+// Look for files added since (a quick scan), then locate the missing rows
+// again, or every row. Hand-set files stay.
+async function locateAgain(statusEl, button) {
+  const all = document.getElementById("locateAllRows").checked;
+  button.disabled = true;
+  statusEl.textContent = "Locating again…";
+  try {
+    const { job_id } = await relocateRows(batchId, all ? "all" : "missing");
+    const job = await jobs.watch(job_id, (j) => (statusEl.textContent = `Locating again: ${progressText(j)}`));
+    const r = job.result || {};
+    statusEl.textContent =
+      job.status === "error"
+        ? `Locate again failed: ${job.error || "error"}`
+        : `Locate again: ${(r.newly_located || []).length} newly located, ${r.still_missing ?? "?"} still missing (${r.checked ?? 0} checked).`;
+  } catch (e) {
+    statusEl.textContent = e.status === 404 || e.status === 405 ? "This server can't locate import rows again yet." : `Locate again failed: ${e.message}`;
+  }
+  button.disabled = false;
+  await page.reload();
+  renderInfo();
+}
+
 async function discard(statusEl) {
   if (!confirm("Discard this import? Nothing is added to your collection.")) return;
   await discardBatch(batchId).catch((e) => (statusEl.textContent = e.message));
@@ -605,6 +737,7 @@ async function discard(statusEl) {
     clearExtraFilters: () => (showSel.value = "all"),
     extraToolbarButtons: [
       { id: "importSelected", label: "Import selected", className: "job-btn", run: importSelected },
+      { id: "locateAgain", label: "Locate again", run: locateAgain },
       { id: "discardImport", label: "Discard", run: discard },
     ],
     localPlayUrl,
@@ -618,6 +751,12 @@ async function discard(statusEl) {
     titleUrl: (item) => (item.source === "other" ? null : item.url || item.item_url || null),
   });
   showSel.addEventListener("change", () => page.refilter());
+  // "Locate again": missing rows by default, every row on request.
+  const allRows = document.createElement("label");
+  allRows.className = "locate-all";
+  allRows.innerHTML = '<input type="checkbox" id="locateAllRows"> all rows';
+  allRows.title = "Locate every row again, not only the ones not found (files you set by hand stay)";
+  document.getElementById("locateAgain").after(allRows);
   const table = document.getElementById("collectionTable");
   const scroller = el("div");
   scroller.id = "tableScroll";
