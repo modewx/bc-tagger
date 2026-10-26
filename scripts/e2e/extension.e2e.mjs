@@ -1329,7 +1329,8 @@ test("import preview: Set file → Browse from the music folders to a file; the 
   writeAiff(path.join(album, "01 Browse Me.aiff"), "Browse Me", "Some Artist", "Some Album");
   writeAiff(path.join(album, "02 Browse Me Too.aiff"), "Browse Me Too", "Some Artist", "Some Album");
   const before = await api("/api/settings").then((d) => d.settings || d);
-  await put({ extra_roots: [{ path: E2E_MUSIC, kind: "not_owned" }], ...("last_browse_dir" in before ? { last_browse_dir: null } : {}) });
+  const saved = await put({ extra_roots: [{ path: E2E_MUSIC, kind: "not_owned" }], ...("last_browse_dir" in before ? { last_browse_dir: "" } : {}) });
+  assert.ok(!saved.detail, `settings: ${JSON.stringify(saved.detail)}`);
   const items = [
     { line: 1, raw: "Nobody - First Unknown", artist: "Nobody", title: "First Unknown", tags: ["must"] },
     { line: 2, raw: "Nobody - Second Unknown", artist: "Nobody", title: "Second Unknown", tags: ["must"] },
@@ -1352,7 +1353,8 @@ test("import preview: Set file → Browse from the music folders to a file; the 
     await page.click(`.popover .fb-dir[data-path="${E2E_MUSIC}"]`);
     await page.click(`.popover .fb-dir[data-path="${path.join(E2E_MUSIC, "Some Artist")}"]`);
     await page.click(`.popover .fb-dir[data-path="${album}"]`);
-    assert.match(await page.textContent(".popover .fb-crumbs"), /Some Artist \/ Some Album$/);
+    await page.waitForFunction(() => /Some Album$/.test(document.querySelector(".popover .fb-crumbs").textContent));
+    assert.equal(await page.textContent(".popover .fb-crumbs"), `Music folders / ${E2E_MUSIC} / Some Artist / Some Album`);
     await page.click(`.popover .fb-file[data-path="${path.join(album, "01 Browse Me.aiff")}"]`);
     await page.waitForFunction(() => document.querySelector("tr[data-key='r0'] .located-cell .chip").dataset.status === "located-manual");
     assert.equal((await api(`/api/import/${batchId}`)).rows[0].located.best.path, path.join(album, "01 Browse Me.aiff"));
@@ -1361,14 +1363,17 @@ test("import preview: Set file → Browse from the music folders to a file; the 
     await openBrowser("r1");
     await page.waitForSelector(`.popover .fb-file[data-path="${path.join(album, "02 Browse Me Too.aiff")}"]`);
     assert.match(await page.textContent(".popover .fb-crumbs"), /Some Album$/);
+    assert.equal((await api("/api/settings").then((d) => d.settings || d)).last_browse_dir, album);
+    await page.keyboard.press("Escape");
 
-    // A folder above the music folders is refused, and the list of music folders shows instead.
-    await page.click(`.popover .fb-crumb[data-path="${E2E}"]`);
+    // A remembered folder that's outside the music folders now is refused: the music folders show instead.
+    await put({ last_browse_dir: E2E });
+    await openBrowser("r1");
     await page.waitForFunction(() => /Can't open/.test(document.querySelector(".popover .fb-msg").textContent));
     assert.ok(await page.$(`.popover .fb-dir[data-path="${E2E_MUSIC}"]`), "back at the music folders");
   } finally {
     await api(`/api/import/${batchId}`, { method: "DELETE" });
-    await put({ extra_roots: [], ...("last_browse_dir" in before ? { last_browse_dir: before.last_browse_dir ?? null } : {}) });
+    await put({ extra_roots: [], ...("last_browse_dir" in before ? { last_browse_dir: before.last_browse_dir || "" } : {}) });
     fs.rmSync(E2E_MUSIC, { recursive: true, force: true });
     await page.close();
   }

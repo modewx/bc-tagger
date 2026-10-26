@@ -564,6 +564,10 @@ async function folderBrowser(pop, row) {
   box.append(el("div", "pop-label", "Pick the file"), crumbs, msg, list);
   pop.appendChild(box);
 
+  // The music folders, so the breadcrumb starts at the one we're in.
+  let roots = [];
+  const rootOf = (p) => roots.filter((r) => p === r || p.startsWith(r + "/")).sort((a, b) => b.length - a.length)[0];
+
   // A folder outside the music folders (or gone) is refused: say so, show the list of folders.
   async function open(path, note = "") {
     msg.textContent = note;
@@ -576,21 +580,31 @@ async function folderBrowser(pop, row) {
       else msg.textContent = `Can't list your music folders: ${e.message}`;
       return;
     }
+    if (!d.path) roots = d.dirs.map((f) => f.path);
     crumbs.innerHTML = "";
     const top = el("button", "fb-crumb", "Music folders");
     top.addEventListener("click", () => open(null));
     crumbs.appendChild(top);
     if (d.path) {
-      let acc = "";
-      d.path.split("/").filter(Boolean).forEach((part) => {
-        acc += "/" + part;
-        const at = acc;
+      const root = rootOf(d.path) || d.path;
+      const crumb = (label, at) => {
         crumbs.append(" / ");
-        const b = el("button", "fb-crumb", part);
+        const b = el("button", "fb-crumb", label);
         b.dataset.path = at;
+        b.title = at;
         b.addEventListener("click", () => open(at));
         crumbs.appendChild(b);
-      });
+      };
+      crumb(root, root);
+      let acc = root;
+      d.path
+        .slice(root.length)
+        .split("/")
+        .filter(Boolean)
+        .forEach((part) => {
+          acc += "/" + part;
+          crumb(part, acc);
+        });
     }
     list.innerHTML = "";
     if (d.path) {
@@ -631,6 +645,7 @@ async function folderBrowser(pop, row) {
   const last = (settings.settings || settings).last_browse_dir;
   const local = row.local || {};
   const guess = dirOf((local.best && local.best.path) || ((local.candidates || [])[0] || {}).path);
+  roots = (await listFolder(null).catch(() => ({ dirs: [] }))).dirs.map((f) => f.path);
   open(last || guess || null);
 }
 
