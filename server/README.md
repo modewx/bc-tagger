@@ -56,6 +56,9 @@ cd server
 ./bct ownership show --latest 20
 ./bct download --filter "Artist" -n 1 [--dry-run]   # see "Downloader" below
 ./bct settings [--set key=value ...]
+./bct rb-restore                    # list backups of the test DB
+./bct rb-restore master_YYYYmmdd_HHMMSS.db   # restore one (guarded; current DB backed up first)
+./bct match-report [--out FILE]     # match-quality numbers + a sample to spot-check
 ```
 
 `--latest N` means the N most recent items for `locate`, and the N most recent **located** items
@@ -77,7 +80,13 @@ for `export` and `xml`. `--all` selects every item. Add `--json` for machine-rea
 
 `GET /api/settings` also returns `presets.test` and `presets.production` (the
 `/Volumes/Stationary Backup` roots) so the settings page can switch between them. Indexing the
-production drive is read-only.
+production drive is read-only. `extra_roots` (`[{path, globs, kind}]`) adds more roots of either
+kind, e.g. the test folders next to the production preset. Settings changed by one process (CLI or
+server) are picked up by the others.
+
+If a drive is unmounted, or disappears in the middle of a scan, its files stay in the index (they
+show as located but can't be streamed or exported until the drive is back). Only a complete walk of
+a mounted root drops files that were deleted.
 
 ## rekordbox write guard
 
@@ -96,8 +105,8 @@ Every write to a `master.db` goes through `bc_tagger_server/rbguard.py`:
    doesn't back up or write at all.
 5. DBs are always opened by explicit path; pyrekordbox auto-detection is never used.
 
-To restore, copy a backup over `rekordbox_test/master.db` (rekordbox doesn't have the test DB open
-unless you switched to it with the script below).
+To restore: `./bct rb-restore <backup>`. It refuses if any process has the DB open, backs up the
+current DB first, and resets this data dir's export tracking for that DB.
 
 ## How the export works
 

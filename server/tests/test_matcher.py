@@ -198,3 +198,65 @@ def test_no_false_positives_on_full_collection(real_service):
         assert it.get("artist") in allowed or "Expat" in (it.get("album_title") or ""), it
     assert "t1064448596" not in located  # Islands, Part 3 (local file is Part 2)
     assert "t3227131631" not in located  # Space Drum Meditation SDM001 (local is SDM005)
+
+
+# -- patterns found on the real collection drive ---------------------------------------------
+
+
+def test_label_compilation_with_artist_in_title():
+    """The downloader files label compilations under the label; the tag title is 'Artist - Title'."""
+    f = row("/c/Banlieue Records/2024 - BR16 - VA – LABOR OF LOVE/Banlieue Records - BR16 - VA – LABOR OF LOVE - 02 Alien D - Liquid Nails.aiff",
+            "Alien D - Liquid Nails", "Banlieue Records", "BR16 - VA – LABOR OF LOVE", 2, root_kind="owned")
+    item = {"id": "t1", "artist": "Alien D", "title": "Liquid Nails", "album_title": "BR16 - VA – LABOR OF LOVE", "track_num": 2}
+    r = locate_item(item, FileIndex([f]), CFG)
+    assert r["status"] == "located" and r["best"]["confidence"] == 1.0
+
+
+def test_featured_artist_moved_between_fields():
+    f = row("/c/Lechuga Zafiro ft. Linn Da Quebrada - Oração (Pense & Dance).aiff",
+            "Oração (Pense & Dance)", "Lechuga Zafiro ft. Linn Da Quebrada", None, None, root_kind="owned")
+    item = {"id": "t1616655546", "artist": "V/A", "title": "Lechuga Zafiro - Oração (Pense & Dance) Ft. Linn da Quebrada",
+            "album_title": "NAAFI X", "track_num": 1}
+    assert locate_item(item, FileIndex([f]), CFG)["status"] == "located"
+
+
+def test_reordered_title_words_are_not_auto_accepted():
+    f = row("/c/Anatolian Weapons/2020 - Cause And Effect/Anatolian Weapons - Cause And Effect - 03 Naked Eye.aiff",
+            "Naked Eye", "Anatolian Weapons", "Cause And Effect", 3, root_kind="owned")
+    item = {"id": "t1", "artist": "Anatolian Weapons", "title": "Ego (Naked)", "album_title": "Beyond", "track_num": 3}
+    r = locate_item(item, FileIndex([f]), CFG)
+    assert r["status"] == "candidates" and r["best"] is None
+
+
+def test_same_title_other_artist_and_album_is_not_a_candidate():
+    f = row("/c/Ani Klang/2020 - Burn the Empire/Ani Klang - Burn the Empire - 03 Us.aiff", "Us", "Ani Klang", "Burn the Empire", 3)
+    item = {"id": "t1", "artist": "Klara Lewis", "title": "Us", "album_title": "Too", "track_num": 3}
+    assert locate_item(item, FileIndex([f]), CFG)["status"] == "missing"
+
+
+def test_downloader_filename_without_tags():
+    p = parse_filename("Avon Terror Corps - AVON ALIVE! - 12 Logic Lost & Monika Badly - Rabun")
+    assert (p["artist"], p["album"], p["track"], p["title"]) == (
+        "Avon Terror Corps", "AVON ALIVE!", 12, "Logic Lost & Monika Badly - Rabun")
+    f = row("/c/Avon Terror Corps/2026 - AVON ALIVE!/Avon Terror Corps - AVON ALIVE! - 12 Logic Lost & Monika Badly - Rabun.aiff")
+    item = {"id": "t1", "artist": "Avon Terror Corps", "title": "Logic Lost & Monika Badly - Rabun", "album_title": "AVON ALIVE!", "track_num": 12}
+    assert locate_item(item, FileIndex([f]), CFG)["status"] == "located"
+
+
+def test_album_in_loose_folder_only_takes_its_own_tracks():
+    loose = "/s/!!!LOOSE TRACKS!!!"
+    rows = [row(f"{loose}/{n:02d} Song {n}.aiff", f"Song {n}", "Band", "The Album", n) for n in (1, 2)]
+    rows += [row(f"{loose}/x{n}.aiff", f"Other {n}", f"Someone {n}", f"Unrelated {n}", 1) for n in (1, 2, 3)]
+    item = {"id": "a1", "title": "The Album", "artist": "Band", "album_title": "the-album", "track_num": -1}
+    r = locate_item(item, FileIndex(rows), CFG)
+    assert r["status"] == "located"
+    assert [t["title"] for t in r["best"]["tracks"]] == ["Song 1", "Song 2"]
+    assert r["best"]["release_dir"] == loose and r["best"]["path"] != loose
+
+
+def test_owned_root_wins_a_tie():
+    owned = row("/c/Band/2020 - Rec/Band - Rec - 01 Song.aiff", "Song", "Band", "Rec", 1, root_kind="owned")
+    soulseek = row("/s/Band - Rec/01 Song.aiff", "Song", "Band", "Rec", 1, root_kind="not_owned")
+    item = {"id": "t1", "artist": "Band", "title": "Song", "album_title": "Rec", "track_num": 1}
+    for rows in ([owned, soulseek], [soulseek, owned]):
+        assert locate_item(item, FileIndex(rows), CFG)["best"]["path"] == owned["path"]

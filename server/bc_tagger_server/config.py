@@ -56,6 +56,9 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     "roots_preset": "test",
     "owned_root": PRESETS["test"]["owned_root"],
     "not_owned_roots": copy.deepcopy(PRESETS["test"]["not_owned_roots"]),
+    # More roots of either kind, e.g. the test folders next to the production preset:
+    # [{"path": ..., "globs": [...], "kind": "owned" | "not_owned"}]
+    "extra_roots": [],
     "rekordbox_db_path": str(TEST_LIBRARY_DIR / "master.db"),
     "playlist_folder": "bc-tagger",
     "server_port": DEFAULT_PORT,
@@ -116,6 +119,20 @@ def _validate(merged: dict[str, Any]) -> dict[str, Any]:
             raise SettingsError("globs must be a list of strings")
         norm_roots.append({"path": r["path"], "globs": globs})
     out["not_owned_roots"] = norm_roots
+    extra = out.get("extra_roots") or []
+    if not isinstance(extra, list):
+        raise SettingsError("extra_roots must be a list")
+    norm_extra = []
+    for r in extra:
+        if not isinstance(r, dict) or not isinstance(r.get("path"), str):
+            raise SettingsError("each extra_roots entry needs a 'path'")
+        if r.get("kind") not in ("owned", "not_owned"):
+            raise SettingsError("extra_roots kind must be 'owned' or 'not_owned'")
+        globs = r.get("globs") or []
+        if not isinstance(globs, list) or not all(isinstance(g, str) for g in globs):
+            raise SettingsError("globs must be a list of strings")
+        norm_extra.append({"path": r["path"], "globs": globs, "kind": r["kind"]})
+    out["extra_roots"] = norm_extra
     for key in ("match_threshold", "candidate_threshold"):
         v = float(out[key])
         if not 0 <= v <= 1:
@@ -143,10 +160,24 @@ class Settings:
     def __init__(self, path: Path | None = None):
         self.path = path or data_dir() / "settings.json"
         self._lock = threading.Lock()
+        self._mtime: float | None = None
         self._data = self._load()
+
+    def _file_mtime(self) -> float | None:
+        try:
+            return self.path.stat().st_mtime
+        except OSError:
+            return None
+
+    def _fresh(self) -> dict[str, Any]:
+        """The settings, reloaded if another process (CLI or server) changed the file."""
+        if self._file_mtime() != self._mtime:
+            self._data = self._load()
+        return self._data
 
     def _load(self) -> dict[str, Any]:
         data = copy.deepcopy(DEFAULT_SETTINGS)
+        self._mtime = self._file_mtime()
         if self.path.exists():
             try:
                 stored = json.loads(self.path.read_text())
@@ -157,11 +188,11 @@ class Settings:
 
     def all(self) -> dict[str, Any]:
         with self._lock:
-            return copy.deepcopy(self._data)
+            return copy.deepcopy(self._fresh())
 
     def get(self, key: str) -> Any:
         with self._lock:
-            return copy.deepcopy(self._data[key])
+            return copy.deepcopy(self._fresh()[key])
 
     def update(self, changes: dict[str, Any]) -> dict[str, Any]:
         unknown = set(changes) - set(DEFAULT_SETTINGS)
@@ -171,12 +202,13 @@ class Settings:
         if blocked:
             raise SettingsError(f"read-only settings: {sorted(blocked)}")
         with self._lock:
-            merged = _validate({**self._data, **changes})
+            merged = _validate({**self._fresh(), **changes})
             self._data = merged
             self.path.parent.mkdir(parents=True, exist_ok=True)
             tmp = self.path.with_suffix(".tmp")
             tmp.write_text(json.dumps(merged, indent=2))
             tmp.replace(self.path)
+            self._mtime = self._file_mtime()
             return copy.deepcopy(merged)
 
     # Convenience accessors -------------------------------------------------------
@@ -189,7 +221,15 @@ class Settings:
             out.append({"path": data["owned_root"], "globs": [], "kind": "owned"})
         for r in data["not_owned_roots"]:
             out.append({"path": r["path"], "globs": r.get("globs", []), "kind": "not_owned"})
-        return out
+        out += [dict(r) for r in data["extra_roots"]]
+        seen: set[str] = set()
+        unique = []
+        for r in out:
+            key = str(Path(r["path"]).expanduser())
+            if key not in seen:
+                seen.add(key)
+                unique.append(r)
+        return unique
 
     def app_dist_dir(self) -> Path:
         configured = self.get("app_dist_dir")

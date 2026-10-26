@@ -32,6 +32,15 @@ def norm_title(s: str | None) -> str:
     return " ".join(_NOISE.sub(" ", norm(s)).split())
 
 
+_FEAT = re.compile(r"\s*[\(\[]?\s*\b(?:feat\.?|ft\.?|featuring)\s+[^\)\]]*[\)\]]?", re.I)
+
+
+def strip_feat(s: str | None) -> str:
+    """'Song (feat. X)' / 'Artist ft. X' -> 'Song' / 'Artist' (featured artists move between
+    title and artist fields from one source to another)."""
+    return " ".join(_FEAT.sub(" ", s or "").split())
+
+
 def unslug(s: str | None) -> str:
     return _SLUG_SEP.sub(" ", s or "").strip()
 
@@ -57,6 +66,8 @@ _TRACK_PREFIX = re.compile(
     r"^(?:(?P<disc>\d)[-.](?=\d))?(?P<track>\d{1,3})(?:\s*[-._)]\s*|\s+)(?P<rest>.+)$"
 )
 _SCENE_FILE = re.compile(r"^(?P<track>\d{2,3})-(?P<artist>[^-\s]+)-(?P<title>[^\s]+)$")
+# bandcamp-collection-downloader: "<artist> - <album> - <NN> <title>"
+_DOWNLOADER_FILE = re.compile(r"^(?P<artist>.+?) - (?P<album>.+) - (?P<track>\d{1,3}) (?P<title>.+)$")
 
 
 def _despace(s: str) -> str:
@@ -80,6 +91,11 @@ def parse_filename(stem: str) -> dict:
         )
         return out
     m = _TRACK_PREFIX.match(stem)
+    d = None if m else _DOWNLOADER_FILE.match(stem)
+    if d:
+        out.update(track=int(d["track"]), artist=d["artist"].strip(), title=d["title"].strip(),
+                   rest=d["title"].strip(), album=d["album"].strip())
+        return out
     rest = stem
     if m:
         out["track"] = int(m["track"])
