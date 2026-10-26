@@ -66,6 +66,12 @@ def test_bot_check_in_the_browser_stops(svc):  # noqa: F811
     assert waiting and all(r["match"]["status"] == "unavailable" and r["match"]["reason"] == "challenge" for r in waiting)
     assert svc.store.get_meta("bandcamp_challenge") is None  # the user's browser, not the server's lookups
     assert svc.store.query_one("SELECT count(*) AS n FROM http_cache WHERE body LIKE '%Client Challenge%'")["n"] == 0
+    # like server mode, the batch finishes: located, ready to review and commit (waiting rows unavailable)
+    svc.jobs.wait(importer.load_batch(svc.store, bid)["job_id"], timeout=30)
+    b = importer.get_batch(svc, bid)
+    assert b["status"] == "ready" and b["bandcamp_lookups"]["state"] == "stopped" and not b["resumable"]
+    assert row_at(b, 206)["located"]["status"] == "located"
+    assert importer.commit(svc, bid)["tag_merges"] == 2
 
 
 def test_rate_limit_in_the_browser_pauses_and_resumes(svc):  # noqa: F811
@@ -73,7 +79,9 @@ def test_rate_limit_in_the_browser_pauses_and_resumes(svc):  # noqa: F811
     pending = importer.browser_state(svc, bid)["pending"]
     state = importer.browser_results(svc, bid, [answer(pending[0], text="slow down", status=429)])
     assert state["state"] == "paused" and state["error"] == importer.RATE_LIMITED
-    assert importer.list_batches(svc)[0]["resumable"] is True
+    svc.jobs.wait(importer.load_batch(svc.store, bid)["job_id"], timeout=30)
+    listed = importer.list_batches(svc)[0]
+    assert listed["status"] == "ready" and listed["resumable"] is True  # reviewable meanwhile
     importer.prepare_job(svc, bid, "resume")
     importer.resume_batch(svc, bid)
     state = importer.browser_state(svc, bid)

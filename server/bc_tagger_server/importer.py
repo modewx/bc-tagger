@@ -671,7 +671,8 @@ def _browser_pass(svc, batch: dict, rows: list[dict]) -> list[dict]:
 def browser_state(svc, batch_id: str, limit: int = 20) -> dict[str, Any]:
     """``{state: "waiting"|"done"|"stopped"|"paused"|"server", reason?, error?, pending: [{key, method, url,
     body, rows}], pending_count, done, total}``. Rows the cache can answer are resolved on the way; once
-    nothing is pending the batch is located and becomes ready (a job)."""
+    nothing is pending, or the lookups stopped (bot check) or paused (rate limit, the waiting rows then
+    unavailable), the batch is located and becomes ready (a job); a paused batch stays resumable."""
     store = svc.store
     batch = load_batch(store, batch_id)
     if batch.get("lookup") != "browser":
@@ -686,6 +687,8 @@ def browser_state(svc, batch_id: str, limit: int = 20) -> dict[str, Any]:
     lookups = batch.get("bandcamp_lookups") or {}
     if lookups.get("state") in ("stopped", "paused"):
         state = lookups["state"]
+        if batch.get("phase") == "browser":  # like server mode: the batch becomes ready (resume re-opens it)
+            _finish_browser(svc, batch)
     elif batch.get("phase") == "browser" and not pending:
         state = "done"
         _finish_browser(svc, batch)
