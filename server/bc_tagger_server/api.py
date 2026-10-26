@@ -313,6 +313,18 @@ def create_app(service: Service | None = None) -> FastAPI:
         job, joined = svc.start_scan()
         return {"job_id": job.id, "joined": joined}
 
+    @app.get("/api/fs/list")
+    def fs_list(path: Optional[str] = None) -> dict:
+        """Folders and audio files under the configured roots (no ``path``: the mounted roots)."""
+        from .browse import OutsideRoots, list_dir
+
+        try:
+            return list_dir(svc.store, svc.settings.roots(), path)
+        except OutsideRoots as e:
+            raise HTTPException(403, str(e)) from e
+        except FileNotFoundError as e:
+            raise HTTPException(404, str(e)) from e
+
     @app.get("/api/index/search")
     def index_search(q: str = "", limit: int = 20) -> list[dict]:
         """Files by artist/title/album/filename words, for picking a file by hand."""

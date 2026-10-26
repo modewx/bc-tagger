@@ -92,6 +92,8 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     "bandcamp_request_interval_s": 1.0,
     # Which migrations this file has had (set by the server, not by clients).
     "settings_version": 2,
+    # The folder of the last file picked by hand for an import row (the file browser opens there).
+    "last_browse_dir": "",
     # The browser side (extension / app shared code) reads these for its own Bandcamp fetches.
     "bandcamp_browser_concurrency": 2,
     "bandcamp_browser_spacing_ms": 400,
@@ -140,6 +142,8 @@ def check_playlist_name(name: str) -> None:
 def _validate(merged: dict[str, Any]) -> dict[str, Any]:
     out = dict(merged)
     out["settings_version"] = SETTINGS_VERSION
+    if not isinstance(out.get("last_browse_dir"), str):
+        raise SettingsError("last_browse_dir must be a string path")
     if not isinstance(out.get("owned_root"), str):
         raise SettingsError("owned_root must be a string path")
     roots = out.get("not_owned_roots")

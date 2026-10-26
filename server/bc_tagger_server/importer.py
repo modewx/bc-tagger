@@ -18,6 +18,7 @@ import math
 import re
 import secrets
 from datetime import datetime, timedelta
+from pathlib import Path
 from typing import Any
 
 from . import bandcamp
@@ -682,6 +683,7 @@ def update_row(svc, batch_id: str, n: int, changes: dict) -> dict:
     if "path" in changes:  # the user picks the file (like the collection's Located popover); None: back to auto
         if changes["path"]:
             row["located"] = _manual_location(svc, changes["path"])
+            svc.settings.update({"last_browse_dir": str(Path(row["located"]["best"]["path"]).parent)})
         else:
             row["located"] = {"status": "unknown", "best": None, "candidates": []}
             _locate(svc, [row])
