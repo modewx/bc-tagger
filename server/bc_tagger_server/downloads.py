@@ -15,6 +15,7 @@ from typing import Any
 
 from . import downloader
 from .downloader import DownloadRefused
+from .items import album_name
 from .tagread import AUDIO_EXTS
 
 _one_at_a_time = threading.Lock()
@@ -93,8 +94,10 @@ def plan(svc, refs: list[str], force: bool = False) -> dict[str, Any]:
                 entry.update(release=release, state="skipped", message="already located")
             else:
                 entry.update(release=release, state="queued", message="queued")
-                rel = releases.setdefault(release, {"release": release, "refs": [], "title": item.get(
-                    "album_title") if release.startswith("a") else item.get("title"), "artist": item.get("artist")})
+                # an album item's album_title is a URL slug: its own title is the album's
+                title = (album_name(item) if release.startswith("a") else None) or item.get("title")
+                rel = releases.setdefault(release, {"release": release, "refs": [], "title": title,
+                                                    "artist": item.get("artist")})
                 rel["refs"].append(ref)
         items.append(entry)
     return {"destination": str(folder), "format": svc.settings.get("download_format"),
