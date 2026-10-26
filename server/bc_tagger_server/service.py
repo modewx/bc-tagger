@@ -283,11 +283,27 @@ class Service:
             self._scan_job_id = job.id
             return job, False
 
+    def _legacy_full_scan(self) -> dict[str, Any] | None:
+        """Full scans before per-root bookkeeping only stored ``last_scan``: derive what we can."""
+        last = self.store.get_meta("last_scan")
+        if not last or "at" not in last:
+            return None
+        incomplete = list(last.get("incomplete_roots") or [])
+        # Records older still didn't list their roots; they covered the configured ones.
+        roots = last.get("roots") or [r["path"] for r in self.settings.roots()]
+        return {
+            "at": last["at"],
+            "files": last.get("files", 0),
+            "incomplete_roots": incomplete,
+            "roots": [{"path": str(Path(p).expanduser()), "mounted": p not in incomplete, "files": None,
+                       "complete": p not in incomplete} for p in roots],
+        }
+
     def index_status(self) -> dict[str, Any]:
         from datetime import datetime, timezone
 
         s = self.settings.all()
-        full = self.store.get_meta("last_full_scan")
+        full = self.store.get_meta("last_full_scan") or self._legacy_full_scan()
         quick = self.store.get_meta("last_quick_scan")
         per_root = {r["root"]: r["n"] for r in self.store.query("SELECT root, COUNT(*) AS n FROM files GROUP BY root")}
         full_roots = {r["path"]: r for r in (full or {}).get("roots", [])}

@@ -45,7 +45,8 @@ cd server
 ## CLI
 
 ```bash
-./bct scan                          # index the roots (incremental: unchanged files are skipped)
+./bct scan                          # full scan of the roots (manual; incremental: unchanged files are skipped)
+./bct index-status                  # last full scan, per-root state, quick-scan result, rescan hints
 ./bct locate --latest 5             # match the 5 most recent tagged items to local files
 ./bct locate --ids t283914533,a563830364
 ./bct export --latest 7 --dry-run   # show what an export would change
@@ -62,9 +63,23 @@ cd server
 ```
 
 `--latest N` means the N most recent items for `locate`, and the N most recent **located** items
-for `export` and `xml`. `locate`/`export`/`xml` rescan the roots first unless the last scan is under
-5 minutes old (a rescan of the full drive takes about a minute even when nothing changed);
-`./bct scan` (or the app's scan) always rescans. `--all` selects every item. Add `--json` for machine-readable output.
+for `export` and `xml`.
+
+### Keeping the index current
+
+- `./bct scan` (the app's **Rescan drive**) is the **full** scan: it walks every root (about a minute for
+  ~41k unchanged files on the USB drive, ~30 minutes the first time). It only runs when you ask.
+- `locate`/`export`/`xml` run a **quick** scan first (`--scan quick`, the default): only audio files created
+  or changed since the selected items' tag dates minus `quick_scan_margin_days` (default 2), found with
+  Spotlight (`mdfind`, when `mdutil -s` says indexing is on) plus a walk into recently modified folders.
+  A new download is usually close to its tag date, so this finds it in a few seconds. `--scan none` uses the
+  index as is; `--scan full` runs the full scan first.
+- The quick scan can miss files added deep inside folders that didn't otherwise change (when Spotlight is
+  off or hasn't indexed them yet), and old files that were never indexed. `./bct index-status` (or
+  `GET /api/index/status`) says when a full rescan is worth it: never scanned, a root missing or interrupted
+  at the last full scan, or the last full scan older than `full_rescan_hint_days` (default 30).
+- When several copies match equally well, the one created closest after the item was tagged wins.
+- An FSEvents watcher that keeps the index current live is designed in `docs/fsevents-watcher.md` (not built). `--all` selects every item. Add `--json` for machine-readable output.
 
 ## Settings
 
