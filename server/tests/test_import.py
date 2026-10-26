@@ -629,3 +629,33 @@ def test_hand_picked_file_can_go_back_to_automatic(svc, tmp_path):
     importer.update_row(svc, bid, n, {"path": str(picked)})
     row = importer.update_row(svc, bid, n, {"path": None})
     assert not row["located"].get("manual") and row["located"]["best"]["path"].endswith("01. Astika.aiff")
+
+
+def test_browse_files_under_the_roots_only(svc, tmp_path):
+    import os
+
+    music = tmp_path / "music"
+    real_music = os.path.realpath(music)
+    (music / "Space Drum Meditation - SDM005" / "notes.txt").write_text("x")
+    (music / ".hidden").mkdir()
+    write_aiff(music / "Space Drum Meditation - SDM005" / "02. New.aiff", None, None, None, None)  # not indexed
+    (tmp_path / "secret").mkdir()
+    (music / "escape").symlink_to(tmp_path / "secret")  # a link out of the roots
+    with TestClient(create_app(svc)) as c:
+        top = c.get("/api/fs/list").json()
+        assert top["path"] is None and [d["path"] for d in top["dirs"]] == [real_music]  # owned root isn't mounted
+        root = c.get("/api/fs/list", params={"path": str(music)}).json()
+        assert root["path"] == real_music and root["parent"] is None
+        assert [d["name"] for d in root["dirs"]] == ["Gregor Schnitzler - Conrad & Sohn", "Space Drum Meditation - SDM005"]
+        sub = c.get("/api/fs/list", params={"path": root["dirs"][1]["path"]}).json()
+        assert sub["parent"] == real_music and sub["dirs"] == []
+        assert [(f["name"], f["indexed"]) for f in sub["files"]] == [("01. Astika.aiff", True), ("02. New.aiff", False)]
+        assert sub["files"][0]["title"] == "Astika" and sub["files"][0]["artist"] == "Space Drum Meditation"
+        for outside in (str(tmp_path), str(music / ".."), str(music / "escape"), "/etc"):
+            assert c.get("/api/fs/list", params={"path": outside}).status_code == 403, outside
+        assert c.get("/api/fs/list", params={"path": str(music / "nope")}).status_code == 404
+        # picking a file by hand remembers its folder for next time
+        batch = run(svc, recorded_rows())
+        pick = sub["files"][1]["path"]
+        c.put(f"/api/import/{batch['batch_id']}/rows/{row_at(batch, 181)['n']}", json={"path": pick})
+        assert c.get("/api/settings").json()["last_browse_dir"] == str(Path(pick).parent)
