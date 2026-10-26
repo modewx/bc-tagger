@@ -767,3 +767,77 @@ test("album page: the header widget is the album item; track rows never touch it
   assert.deepEqual(items[albumId], before, "still untouched after un-saving the track");
   await page.close();
 });
+
+// --- Phase 2b: file index status, Rescan drive ----------------------------------
+
+const hasIndexStatus = () => fetch(`${SERVER}/api/index/status`).then((r) => r.ok).catch(() => false);
+
+async function rescanFromApp(app) {
+  const samples = await app.evaluate(() => {
+    window.__indexSamples = [];
+    const st = document.getElementById("indexStatus");
+    new MutationObserver(() =>
+      window.__indexSamples.push(`${st.textContent}${document.getElementById("locateLatest").disabled ? " [blocked]" : ""}`)
+    ).observe(st, { childList: true, characterData: true, subtree: true });
+    document.getElementById("rescanDrive").click();
+    return true;
+  });
+  await app.waitForFunction(() => /^Rescan drive:/.test(document.getElementById("refreshStatus").textContent), null, {
+    timeout: 120000,
+  });
+  return samples && (await app.evaluate(() => window.__indexSamples));
+}
+
+test("Rescan drive: live progress, Locate/Export wait, then the status line", async () => {
+  const app = await context.newPage();
+  await app.goto(SERVER + "/");
+  await app.waitForSelector("#rescanDrive");
+  const samples = await rescanFromApp(app);
+  assert.ok(samples.some((s) => /Scanning the drive/.test(s)), `live progress: ${samples.slice(0, 4).join(" | ")}`);
+  assert.ok(samples.some((s) => /\[blocked\]/.test(s)), "Locate/Export are disabled while scanning");
+  assert.match(await app.textContent("#refreshStatus"), /Rescan drive: done/);
+  assert.equal(await app.isDisabled("#locateLatest"), false, "re-enabled after the scan");
+  if (await hasIndexStatus()) {
+    await app.waitForFunction(() => /^Scanned (just now|\d+ min ago) · [\d,.]+ files$/.test(document.getElementById("indexStatus").textContent));
+  }
+  await app.close();
+});
+
+test("index hint: a drive missing at the last scan, cleared once it's back", async (t) => {
+  if (!(await hasIndexStatus())) {
+    t.skip("server has no /api/index/status yet");
+    return;
+  }
+  const missing = path.join(E2E, "missing-drive"); // never created: like an unplugged drive
+  await put({ extra_roots: [{ path: missing, kind: "not_owned", globs: [] }] });
+  const app = await context.newPage();
+  await app.goto(SERVER + "/");
+  await app.waitForSelector("#rescanDrive");
+  await rescanFromApp(app);
+  await app.waitForSelector("#indexHint:not([hidden])");
+  const hint = await app.textContent("#indexHint");
+  assert.ok(/missing|rescan/i.test(hint), hint);
+  const status = await api("/api/index/status");
+  assert.ok((status.incomplete_roots || []).length || status.next_auto_reason, JSON.stringify(status));
+
+  await put({ extra_roots: [] });
+  await rescanFromApp(app);
+  await app.waitForFunction(() => document.getElementById("indexHint").hidden);
+  await app.close();
+});
+
+test("Settings: rescan_max_age_minutes under General → Matching", async (t) => {
+  if (!("rescan_max_age_minutes" in (await api("/api/settings")))) {
+    t.skip("server has no rescan_max_age_minutes yet");
+    return;
+  }
+  const page = await context.newPage();
+  await page.goto(SERVER + "/settings/");
+  await page.waitForSelector("#f_rescan_max_age_minutes");
+  assert.equal(await page.isVisible('#sec_matching .field[data-key="rescan_max_age_minutes"]'), true);
+  await page.fill("#f_rescan_max_age_minutes", "15");
+  await page.click("#saveBtn");
+  await page.waitForFunction(() => /Saved/.test(document.getElementById("saveState").textContent));
+  assert.equal((await api("/api/settings")).rescan_max_age_minutes, 15);
+  await page.close();
+});
