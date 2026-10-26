@@ -55,6 +55,52 @@ async function refreshOwnership(onProgress) {
   return jobs.run("/api/ownership/refresh", {}, onProgress);
 }
 
+// "… shown" buttons act on the rows currently shown (search + tags + Show).
+function shownIds() {
+  return Object.keys(page.getView());
+}
+
+function locateShown(onProgress) {
+  const ids = shownIds();
+  if (!ids.length) return Promise.resolve({ status: "done", result: { message: "no items shown" } });
+  return jobs.run("/api/locate", { ids }, onProgress);
+}
+
+// Export writes rekordbox, so preview it with a dry run and ask first.
+async function exportShown(onProgress) {
+  const ids = shownIds();
+  if (!ids.length) return { status: "done", result: { message: "no items shown" } };
+  const preview = await jobs.run("/api/rekordbox/export", { ids, dry_run: true }, (j) =>
+    onProgress({ ...j, progress: { ...j.progress, message: `preview · ${(j.progress || {}).message || ""}` } })
+  );
+  if (preview.status !== "done") return preview;
+  const d = preview.result || {};
+  const n = (v) => (Array.isArray(v) ? v.length : v || 0);
+  if (!d.changed) {
+    const none = n(d.skipped_items) >= n(d.selected_items); // selected = all shown; skipped = not located
+    return { status: "done", result: { message: none ? "none of the shown items are located" : "rekordbox is already up to date" } };
+  }
+  const lines = [
+    `Export ${ids.length} shown items to rekordbox?`,
+    `${d.db_path || ""}`,
+    "",
+    `• ${n(d.content_added)} tracks added to the collection (${n(d.content_existing)} already there)`,
+    `• ${n(d.playlists_created)} new playlists in "${(d.folder || {}).name || ""}"`,
+    `• ${n(d.entries_added)} playlist entries added, ${n(d.entries_removed)} removed`,
+  ];
+  if (n(d.skipped_items)) lines.push(`• ${n(d.skipped_items)} items skipped (not located)`);
+  if (n(d.failed_files)) lines.push(`• ${n(d.failed_files)} files rekordbox can't take`);
+  if (!confirm(lines.join("\n"))) return { status: "done", result: { message: "cancelled" } };
+  return jobs.run("/api/rekordbox/export", { ids }, onProgress);
+}
+
+function updateShownButtons(shown) {
+  const loc = document.getElementById("locateShown");
+  const exp = document.getElementById("exportShown");
+  if (loc) loc.textContent = `Locate shown (${shown})`;
+  if (exp) exp.textContent = `Export shown (${shown})…`;
+}
+
 async function refreshHealth() {
   try {
     nav.setHealth(await apiJson("/api/health"));
@@ -90,10 +136,20 @@ async function refreshHealth() {
         (p) => jobs.run("/api/rekordbox/export", { latest: 10 }, p)
       ),
       jobButton("refreshOwnership", "Refresh ownership", "Check which items you own on Bandcamp", refreshOwnership),
+      jobButton("locateShown", "Locate shown", "Match the items shown below to local files", locateShown),
+      jobButton(
+        "exportShown",
+        "Export shown",
+        "Add the located items shown below to rekordbox (previews the changes first)",
+        exportShown
+      ),
     ],
     localPlayUrl,
     filterItem: statusFilter.filterItem,
-    onView: statusFilter.onView,
+    onView: (shown, total) => {
+      statusFilter.onView(shown, total);
+      updateShownButtons(shown);
+    },
   });
 
   // Let the wide table scroll sideways on narrow screens.

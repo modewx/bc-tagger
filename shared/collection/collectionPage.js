@@ -1114,6 +1114,7 @@ export function createCollectionPage(opts) {
     reload,
     refreshRow,
     refilter: () => computeView(),
+    getView: () => currentView,
     render: () => renderCollectionTable(currentView),
     getItems: () => allItems,
     statusEl,
