@@ -33,6 +33,8 @@ class Service:
         self._file_index = None
         # Bandcamp lookups for imports; tests swap in an offline fetcher with recorded responses.
         self.bandcamp_fetcher = self.default_bandcamp_fetcher
+        self.musicbrainz_fetcher = lambda: __import__("bc_tagger_server.musicbrainz", fromlist=["x"]).make_fetcher(
+            self.store, min_interval=1.0)
         if seed:
             self.seed_items()
         self._migrate_playlist_keys()

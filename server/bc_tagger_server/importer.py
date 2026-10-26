@@ -21,7 +21,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 
-from . import bandcamp
+from . import bandcamp, musicbrainz
 from .collection import (
     DuplicateIndex, by_number, merge_pending_item_tags, now_ms_iso, other_get, other_id, other_put, queue_add,
     search_links,
@@ -123,7 +123,7 @@ def _needs_lookup(row: dict) -> bool:
 def _try_lookup(svc, batch: dict, fetcher, row: dict) -> tuple[str, str] | None:
     """One row's lookup; returns why the batch's lookups must stop now (bot check, rate limit)."""
     try:
-        _lookup(fetcher, row)
+        _lookup(fetcher, row, *_sources(svc))
         return None
     except Challenged as e:  # the bot check: stop asking Bandcamp, never retry
         stop = _challenged(svc, batch, e)
@@ -259,10 +259,19 @@ def _own(row: dict) -> dict | None:
 
 
 def _hints(row: dict) -> dict[str, Any]:
-    """Link hints: the import file's, or a Bandcamp page URL the user set (``match_url``)."""
+    """Link hints: the import file's or a Bandcamp page URL the user set (``match_url``); MusicBrainz's
+    release links fill the gaps (``from`` says where each came from)."""
     match = row.get("match") or {}
     url = match.get("url") if match.get("source") == "url" else None
-    return {"bandcamp_url": url or row.get("bandcamp_url"), "discogs_url": row.get("discogs_url")}
+    mb = (row.get("musicbrainz") or {}).get("chosen") or {}
+    hints: dict[str, Any] = {"bandcamp_url": url or row.get("bandcamp_url"), "discogs_url": row.get("discogs_url"),
+                             "musicbrainz_url": mb.get("url"), "from": {}}
+    for key in ("bandcamp_url", "discogs_url"):
+        if hints[key]:
+            hints["from"][key] = "user" if key == "bandcamp_url" and url else "file"
+        elif mb.get(key):
+            hints[key], hints["from"][key] = mb[key], "musicbrainz"
+    return hints
 
 
 def _refresh(row: dict) -> None:
@@ -340,7 +349,41 @@ def _locate(svc, rows: list[dict], index=None) -> None:
         row["located"] = {"status": result["status"], "best": result["best"], "candidates": result["candidates"][:3]}
 
 
-def _lookup(fetcher, row: dict) -> None:
+def _lookup(fetcher, row: dict, source: str = "bandcamp", mb_fetcher=None) -> None:
+    """``source`` "bandcamp": the file's Bandcamp URL (one page), else a Bandcamp search. "musicbrainz": a
+    MusicBrainz search only, whose release links become hints (no Bandcamp request). "both": Bandcamp first;
+    for rows it misses, MusicBrainz, and the Bandcamp page its release links to is read for the track."""
+    if source != "musicbrainz":
+        _lookup_bandcamp(fetcher, row)
+        if row.get("bandcamp") or source == "bandcamp" or mb_fetcher is None:
+            return
+    if mb_fetcher is None:
+        raise Unavailable("MusicBrainz isn't available here")
+    mb = musicbrainz.resolve(mb_fetcher, row)
+    if mb.get("chosen"):
+        mb["chosen"].update(musicbrainz.candidate_links(mb_fetcher, mb["chosen"]))
+    row["musicbrainz"] = mb
+    if source == "musicbrainz":
+        row["match"], row["bandcamp"] = {**mb, "item": None}, None
+        return
+    page = (mb.get("chosen") or {}).get("bandcamp_url") if mb.get("status") == "accepted" else None
+    found = bandcamp.item_from_page(fetcher, page, row) if page and bandcamp.is_bandcamp_url(page) else None
+    if found:
+        item, confidence = found
+        cand = {"id": item["id"], "type": item["item_type"], "title": item["title"], "artist": item.get("artist"),
+                "album": item.get("album_title"), "url": item.get("item_url"), "art_url": item.get("art_url"),
+                "confidence": round(confidence, 3)}
+        row["match"] = {"status": "accepted", "source": "musicbrainz", "confidence": cand["confidence"],
+                        "query": page, "candidates": [cand], "chosen": cand}
+        row["bandcamp"] = {"item": item, "via": "resolved"}
+
+
+def _sources(svc) -> tuple[str, Any]:
+    source = svc.settings.get("lookup_source")
+    return source, (svc.musicbrainz_fetcher() if source != "bandcamp" else None)
+
+
+def _lookup_bandcamp(fetcher, row: dict) -> None:
     """The file's Bandcamp URL when it has one (one page), else a Bandcamp search (no page)."""
     hint = row.get("bandcamp_url")
     found = bandcamp.item_from_page(fetcher, hint, row) if hint and bandcamp.is_bandcamp_url(hint) else None
@@ -814,8 +857,17 @@ def update_row(svc, batch_id: str, n: int, changes: dict) -> dict:
             cand = next((c for c in match.get("candidates") or [] if c["id"] == cid), None)
             if cand is None:
                 raise ImportError_(f"{cid} is not one of the row's candidates")
-            match.update(chosen=cand, status="manual", source="picked")
-            row["bandcamp"] = {"item": bandcamp.minimal_item(cand), "via": "chosen"}
+            if cid.startswith("mb:"):  # a MusicBrainz recording: its release links, no Bandcamp item
+                try:
+                    cand = {**cand, **musicbrainz.candidate_links(svc.musicbrainz_fetcher(), cand)}
+                except Unavailable:
+                    pass
+                match.update(chosen=cand, status="manual", source="musicbrainz")
+                row["musicbrainz"] = {**(row.get("musicbrainz") or {}), "chosen": cand, "status": "manual"}
+                row["bandcamp"] = None
+            else:
+                match.update(chosen=cand, status="manual", source="picked")
+                row["bandcamp"] = {"item": bandcamp.minimal_item(cand), "via": "chosen"}
         row["match"] = match
         identity = True
     if "match_url" in changes:  # a Bandcamp page the user found; nothing is fetched
