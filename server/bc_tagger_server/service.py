@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 from pathlib import Path
 from typing import Any, Iterable
@@ -23,6 +24,18 @@ class Service:
         self.jobs = JobManager()
         if seed:
             self.seed_items()
+        self._migrate_playlist_keys()
+
+    def _migrate_playlist_keys(self) -> None:
+        """Export tracking used to be keyed by tag name; it is keyed by playlist path now."""
+        if self.store.get_meta("rb_keys_v2"):
+            return
+        folder = self.settings.get("playlist_folder")
+        with self.store.tx() as c:
+            for table in ("rb_claims", "rb_entries"):
+                c.execute(f"UPDATE OR IGNORE {table} SET tag = '/' || ? || '/' || tag WHERE tag NOT LIKE '/%'", (folder,))
+                c.execute(f"DELETE FROM {table} WHERE tag NOT LIKE '/%'")
+        self.store.set_meta("rb_keys_v2", True)
 
     # -- items mirror -----------------------------------------------------------------
 
@@ -35,8 +48,43 @@ class Service:
             log.info("Seeded items mirror from %s (%s items)", path, result.get("upserted"))
         return result
 
+    def target(self, guard_overrides: dict[str, Any] | None = None):
+        """The export target from settings only (never from a request)."""
+        from .rbguard import Target
+
+        s = self.settings.all()
+        if s["rekordbox_target"] == "main":
+            main = str(Path(s["rekordbox_main_db_path"]).expanduser())
+            guard = {
+                # Re-read at every check: switching it off stops a pending write.
+                "allow": lambda: bool(self.settings.get("allow_main_writes"))
+                and self.settings.get("rekordbox_target") == "main",
+                "configured": lambda: str(Path(self.settings.get("rekordbox_main_db_path")).expanduser()),
+            }
+            return Target("main", main, {**guard, **(guard_overrides or {})})
+        return Target("test", str(Path(s["rekordbox_db_path"]).expanduser()), dict(guard_overrides or {}))
+
     def db_path(self) -> str:
+        return self.target().db_path
+
+    def test_db_path(self) -> str:
         return str(Path(self.settings.get("rekordbox_db_path")).expanduser())
+
+    def playlist_rule(self):
+        from .playlists import playlists_for_tag
+
+        s = self.settings.all()
+        return lambda tag: playlists_for_tag(tag, s["tag_playlist_mode"], s["tag_playlist_map"], s["playlist_folder"])
+
+    def settings_derived(self) -> dict[str, Any]:
+        from .playlists import mapping_warning
+
+        s = self.settings.all()
+        return {
+            "target": s["rekordbox_target"],
+            "target_db_path": self.db_path(),
+            "mapping_warning": mapping_warning(s["tag_playlist_mode"], s["tag_playlist_map"]),
+        }
 
     def list_items(
         self,
@@ -57,11 +105,12 @@ class Service:
         total = len(items)
         page = items[offset : offset + limit if limit is not None else None]
         db_path = self.db_path()
-        return total, [item_view(self.store, it, db_path) for it in page]
+        rule = self.playlist_rule()
+        return total, [item_view(self.store, it, db_path, rule) for it in page]
 
     def get_item_view(self, item_id: str) -> dict | None:
         item = self.store.get_item(item_id)
-        return item_view(self.store, item, self.db_path()) if item else None
+        return item_view(self.store, item, self.db_path(), self.playlist_rule()) if item else None
 
     def sync_items(self, items: dict[str, dict], deleted: list[str], full: bool) -> dict[str, Any]:
         result = self.store.upsert_items(items, deleted, full=full)
@@ -235,39 +284,115 @@ class Service:
                 out[p] = dict(row)
         return out
 
-    def export(self, ids=None, latest=None, dry_run=False, ctx=None, guard_kwargs=None) -> dict[str, Any]:
-        from .rbexport import build_selection, export
+    TOKEN_TTL_S = 15 * 60
 
+    def _issue_token(self, target, diff: dict[str, Any], item_ids: list[str]) -> tuple[str, str]:
+        import secrets
+        import time
+        from datetime import datetime, timezone
+
+        token = secrets.token_urlsafe(16)
+        expires = time.time() + self.TOKEN_TTL_S
+        with self.store.tx() as c:
+            c.execute("DELETE FROM confirm_tokens WHERE expires_at < ?", (time.time() - 86400,))
+            c.execute(
+                "INSERT INTO confirm_tokens(token, target, db_path, plan_fingerprint, source_fingerprint, item_ids, "
+                "created_at, expires_at) VALUES(?, ?, ?, ?, ?, ?, ?, ?)",
+                (token, target.kind, target.db_path, diff["plan_fingerprint"], diff["source_fingerprint"],
+                 json.dumps(item_ids), now_iso(), expires),
+            )
+        return token, datetime.fromtimestamp(expires, timezone.utc).isoformat(timespec="seconds")
+
+    def _token_expectation(self, token: str, target) -> dict[str, str]:
+        import time
+
+        from .rbexport import ExportError
+
+        row = self.store.query_one("SELECT * FROM confirm_tokens WHERE token = ?", (token,))
+        if row is None or row["used_at"] or row["expires_at"] < time.time():
+            raise ExportError("the confirmation expired or was already used; run the dry run again")
+        if row["target"] != target.kind or row["db_path"] != target.db_path:
+            raise ExportError("the target library changed since the dry run; run the dry run again")
+        return {"plan_fingerprint": row["plan_fingerprint"], "source_fingerprint": row["source_fingerprint"]}
+
+    def export(self, ids=None, latest=None, dry_run=False, ctx=None, guard_kwargs=None,
+               confirm_token: str | None = None) -> dict[str, Any]:
+        """Export to the configured target. The main collection needs ``confirm_token`` from a dry run."""
+        from .rbexport import ExportError, build_selection, export
+
+        target = self.target(guard_kwargs)
+        expect = None
+        if not dry_run:
+            if confirm_token:
+                expect = self._token_expectation(confirm_token, target)
+            elif target.is_main:
+                raise ExportError("dry run required: exports to your main collection need a confirmed dry run")
         items = self.select_located(ids=ids, latest=latest, ctx=ctx)
-        selection = build_selection(self.store, items, self.store.get_tags())
+        selection = build_selection(self.store, items, self.store.get_tags(), self.playlist_rule())
         progress = (lambda cur, tot, msg: ctx.progress(cur, tot, msg)) if ctx else None
         diff = export(
             self.store,
-            self.db_path(),
-            self.settings.get("playlist_folder"),
+            target,
             selection,
             dry_run=dry_run,
+            folder_name=self.settings.get("playlist_folder"),
             file_meta=self.file_meta(selection.tracks),
-            guard_kwargs=guard_kwargs,
             progress=progress,
+            expect=expect,
         )
         diff["selected_items"] = [{"id": it["id"], "title": it.get("title"), "tags": it.get("tags")} for it in items]
+        if dry_run:
+            diff["confirm_token"], diff["token_expires_at"] = self._issue_token(target, diff, [it["id"] for it in items])
+        elif confirm_token:
+            with self.store.tx() as c:
+                c.execute("UPDATE confirm_tokens SET used_at = ? WHERE token = ?", (now_iso(), confirm_token))
         if ctx:
             for it in items:
                 ctx.item_updated(it["id"])
         return diff
 
-    def start_export(self, ids=None, latest=None, dry_run=False):
+    def start_export(self, ids=None, latest=None, dry_run=False, confirm_token=None):
         return self.jobs.submit(
-            "export", lambda ctx: self.export(ids=ids, latest=latest, dry_run=dry_run, ctx=ctx)
+            "export",
+            lambda ctx: self.export(ids=ids, latest=latest, dry_run=dry_run, ctx=ctx, confirm_token=confirm_token),
         )
+
+    def rekordbox_playlists(self) -> list[dict[str, Any]]:
+        from .playlists import Tree
+
+        db = self.target().open_read()
+        try:
+            return Tree(db).listing()
+        finally:
+            db.close()
+            db.engine.dispose()
+
+    def resolve_playlist_names(self, names: list[str]) -> list[dict[str, Any]]:
+        from .playlists import PlaylistError, Tree, key_of, name_to_parts
+
+        folder = self.settings.get("playlist_folder")
+        db = self.target().open_read()
+        try:
+            tree = Tree(db)
+            out = []
+            for name in names:
+                try:
+                    key = key_of(name_to_parts(name, folder))
+                except PlaylistError as e:
+                    out.append({"name": name, "path": None, "status": "error", "error": str(e)})
+                    continue
+                out.append({"name": name, **tree.resolve(key)})
+            return out
+        finally:
+            db.close()
+            db.engine.dispose()
 
     def write_xml(self, ids=None, latest=None) -> dict[str, Any]:
         from .rbexport import build_selection
         from .xmlexport import write_xml
 
         items = self.select_located(ids=ids, latest=latest)
-        selection = build_selection(self.store, items, self.store.get_tags())
+        selection = build_selection(self.store, items, self.store.get_tags(), self.playlist_rule())
         result = write_xml(
             selection,
             self.settings.get("playlist_folder"),
@@ -330,7 +455,7 @@ class Service:
             "ok": True,
             "name": "bc-tagger",
             "version": __version__,
-            "db": {"path": db_path, "is_test": is_test_library(db_path)},
+            "db": {"path": db_path, "is_test": is_test_library(db_path), "target": self.target().kind},
             "items": self.store.count_items(),
             "items_source": self.store.get_meta("items_source"),
             "build_id": self.build_id(),

@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import Any
 
 from . import __version__
+from .playlists import parts_of
 from .rbexport import ExportSelection, merged_meta
 
 KIND = {
@@ -66,13 +67,25 @@ def build_xml(selection: ExportSelection, folder_name: str, file_meta: dict[str,
         ET.SubElement(collection, "TRACK", {k: str(v) for k, v in attrib.items()})
 
     playlists = ET.SubElement(root, "PLAYLISTS")
-    root_node = ET.SubElement(playlists, "NODE", Type="0", Name="ROOT", Count="1")
-    folder = ET.SubElement(root_node, "NODE", Type="0", Name=folder_name, Count=str(len(selection.tag_order)))
-    for tag in selection.tag_order:
-        members = [p for p, plan in selection.tracks.items() if tag in plan.tags and p in ids]
-        node = ET.SubElement(folder, "NODE", Name=tag, Type="1", KeyType="0", Entries=str(len(members)))
+    root_node = ET.SubElement(playlists, "NODE", Type="0", Name="ROOT", Count="0")
+    folders: dict[tuple[str, ...], ET.Element] = {(): root_node}
+
+    def folder_node(parts: tuple[str, ...]) -> ET.Element:
+        if parts not in folders:
+            parent = folder_node(parts[:-1])
+            folders[parts] = ET.SubElement(parent, "NODE", Type="0", Name=parts[-1], Count="0")
+        return folders[parts]
+
+    # Same playlists as the DB export (mapped paths); rekordbox imports them under "rekordbox xml".
+    for key in selection.playlist_order:
+        parts = parts_of(key)
+        members = [p for p, plan in selection.tracks.items() if key in plan.playlists and p in ids]
+        node = ET.SubElement(folder_node(parts[:-1]), "NODE", Name=parts[-1], Type="1", KeyType="0",
+                             Entries=str(len(members)))
         for p in members:
             ET.SubElement(node, "TRACK", Key=str(ids[p]))
+    for el in folders.values():
+        el.set("Count", str(len(el.findall("NODE"))))
     ET.indent(root, space="  ")
     return ET.ElementTree(root)
 

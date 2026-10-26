@@ -55,6 +55,14 @@ class SelectionBody(BaseModel):
     dry_run: bool = False
 
 
+class ExportBody(SelectionBody):
+    confirm_token: Optional[str] = None
+
+
+class NamesBody(BaseModel):
+    names: list[str]
+
+
 class PathBody(BaseModel):
     path: str
 
@@ -174,8 +182,26 @@ def create_app(service: Service | None = None) -> FastAPI:
     # -- rekordbox ---------------------------------------------------------------------
 
     @app.post("/api/rekordbox/export")
-    def rb_export(body: SelectionBody = Body(default_factory=SelectionBody)) -> dict:
-        return {"job_id": svc.start_export(ids=body.ids, latest=body.latest, dry_run=body.dry_run).id}
+    def rb_export(body: ExportBody = Body(default_factory=ExportBody)) -> dict:
+        if not body.dry_run and not body.confirm_token and svc.target().is_main:
+            # No client can skip the dry run on the main collection.
+            raise HTTPException(409, "dry run required")
+        job = svc.start_export(ids=body.ids, latest=body.latest, dry_run=body.dry_run, confirm_token=body.confirm_token)
+        return {"job_id": job.id}
+
+    @app.get("/api/rekordbox/playlists")
+    def rb_playlists() -> list[dict]:
+        try:
+            return svc.rekordbox_playlists()
+        except FileNotFoundError as e:
+            raise HTTPException(409, f"rekordbox library not found: {e}") from e
+
+    @app.post("/api/rekordbox/resolve")
+    def rb_resolve(body: NamesBody) -> list[dict]:
+        try:
+            return svc.resolve_playlist_names(body.names)
+        except FileNotFoundError as e:
+            raise HTTPException(409, f"rekordbox library not found: {e}") from e
 
     @app.post("/api/rekordbox/xml")
     def rb_xml(body: SelectionBody = Body(default_factory=SelectionBody)) -> dict:
@@ -231,16 +257,16 @@ def create_app(service: Service | None = None) -> FastAPI:
 
     @app.get("/api/settings")
     def get_settings() -> dict:
-        return {**svc.settings.all(), "presets": PRESETS}
+        return {**svc.settings.all(), "presets": PRESETS, "derived": svc.settings_derived()}
 
     @app.put("/api/settings")
     def put_settings(changes: dict[str, Any] = Body(...)) -> dict:
-        changes = {k: v for k, v in changes.items() if k != "presets"}
+        changes = {k: v for k, v in changes.items() if k not in ("presets", "derived")}
         try:
             updated = svc.settings.update(changes)
         except (SettingsError, ValueError, TypeError) as e:
             raise HTTPException(400, str(e)) from e
-        return {**updated, "presets": PRESETS}
+        return {**updated, "presets": PRESETS, "derived": svc.settings_derived()}
 
     # -- files & dev -------------------------------------------------------------------
 
