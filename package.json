@@ -1,14 +1,18 @@
 {
   "name": "bc-tagger",
   "version": "0.1.0",
-  "description": "My Chrome Extension",
+  "description": "Bandcamp tagger: Chrome extension, shared collection UI, local app",
   "private": true,
   "scripts": {
-    "watch": "webpack --mode=development --watch --config config/webpack.config.js",
-    "build": "webpack --mode=production --config config/webpack.config.js",
-    "pack": "node pack.js",
+    "build": "webpack --mode=production --config extension/config/webpack.config.js",
+    "build:dev": "webpack --mode=development --env dev --config extension/config/webpack.config.js",
+    "watch:dev": "webpack --mode=development --env dev --watch --config extension/config/webpack.config.js",
+    "build:app": "webpack --mode=production --config app/config/webpack.config.js",
+    "watch:app": "webpack --mode=development --watch --config app/config/webpack.config.js",
+    "build:all": "npm run build && npm run build:dev && npm run build:app",
+    "pack": "node extension/pack.js",
     "repack": "npm run build && npm run pack",
-    "format": "prettier --write --ignore-unknown \"{config,public,src}/**/*.{html,css,js,ts,json}\""
+    "format": "prettier --write --ignore-unknown \"{extension,shared,app}/**/*.{html,css,js,ts,json}\""
   },
   "devDependencies": {
     "adm-zip": "^0.5.10",

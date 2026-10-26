@@ -1,0 +1,127 @@
+/* Collection page styles, shared by the extension page and the local app. */
+body { font-family: -apple-system, system-ui, sans-serif; margin: 0; }
+#topBar {
+  position: sticky;
+  top: 0;
+  z-index: 200;
+  background: #fff;
+  border-bottom: 1px solid #ddd;
+  padding: 8px 12px;
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  justify-content: flex-start;
+  flex-wrap: wrap;
+  gap: 12px 20px;
+}
+#topControls { flex: none; min-width: 0; }
+#playerArea {
+  flex: none;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 6px;
+}
+#globalPlayer {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+#globalPlayer.hidden { display: none; }
+#gpPlayerCol { display: flex; flex-direction: column; align-items: center; gap: 4px; }
+#gpAudioHolder audio { height: 46px; width: 460px; max-width: 48vw; }
+#collectionTable td.player-cell audio { width: 100%; height: 36px; }
+#gpTagHolder { width: 220px; }
+#gpTagHolder:empty { display: none; }
+.tag-editor-wrap { width: 100%; }
+.mode-toggle { font-size: 12px; color: #444; cursor: pointer; display: inline-flex; align-items: center; gap: 4px; white-space: nowrap; }
+#collectionTable tr.clickable-row { cursor: pointer; }
+#gpInfo { max-width: 220px; overflow: hidden; }
+#gpTitle { font-size: 15px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+#gpArtist { font-size: 13px; color: #666; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+#gpGoto {
+  flex: none;
+  padding: 6px 10px;
+  border: 1px solid #3875d7;
+  border-radius: 5px;
+  background: #fff;
+  color: #3875d7;
+  cursor: pointer;
+  font-size: 12px;
+  white-space: nowrap;
+}
+#collectionTable tr.playing-row { background: #eaf1ff; }
+#searchBar { margin: 10px 0; display: flex; align-items: center; gap: 10px; }
+#searchBar label, #tagFilter label { font-size: 13px; color: #444; }
+#searchInput { padding: 6px 10px; border: 1px solid #aaa; border-radius: 5px; font-size: 13px; width: 420px; max-width: 100%; }
+#tagFilter { margin: 10px 0; display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.filter-mode { font-size: 13px; color: #444; display: inline-flex; align-items: center; gap: 3px; cursor: pointer; }
+#toolbar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 8px 0 12px;
+}
+.toolbar-btn {
+  padding: 6px 10px;
+  border: 1px solid #3875d7;
+  border-radius: 5px;
+  background: #3875d7;
+  color: #fff;
+  cursor: pointer;
+  font-size: 13px;
+}
+.toolbar-btn:disabled { opacity: 0.6; cursor: default; }
+#refreshStatus { color: #666; font-size: 12px; }
+#collectionTable { border-collapse: collapse; width: 100%; table-layout: fixed; }
+#collectionTable th, #collectionTable td {
+  padding: 6px 8px;
+  border-bottom: 1px solid #eee;
+  vertical-align: top;
+  text-align: left;
+}
+#collectionTable th { position: relative; border-right: 1px solid #e3e3e3; }
+/* Default column sizing (overridden by drag-resize). Tags takes the rest. */
+#collectionTable .col-index { width: 34px; }
+#collectionTable .col-date { width: 92px; }
+#collectionTable .col-thumb { width: 60px; }
+#collectionTable .col-title { width: 16%; }
+#collectionTable .col-artist { width: 11%; }
+#collectionTable .col-player { width: 340px; }
+/* Title + artist: wrap to multiple lines instead of being cut off. */
+#collectionTable td.col-title, #collectionTable td.col-artist {
+  white-space: normal;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+.index-cell { font-size: 11px; color: #999; text-align: right; overflow: hidden; }
+.date-cell { white-space: nowrap; font-size: 12px; color: #555; }
+.sort-arrow { color: #3875d7; }
+/* Drag handle on each header's right edge. */
+.col-resizer {
+  position: absolute;
+  top: 0;
+  right: 0;
+  width: 7px;
+  height: 100%;
+  cursor: col-resize;
+  user-select: none;
+}
+.col-resizer:hover { background: rgba(56, 117, 215, 0.35); }
+#collectionTable img { width: 48px; height: 48px; object-fit: cover; cursor: pointer; }
+.no-thumb { display: inline-block; width: 48px; height: 48px; background: #e9e9e9; border-radius: 3px; }
+.player-btn {
+  padding: 5px 14px;
+  border: 1px solid #bbb;
+  border-radius: 5px;
+  background: #f5f5f5;
+  cursor: pointer;
+  font-size: 13px;
+  white-space: nowrap;
+}
+.player-btn:disabled { opacity: 0.6; cursor: default; }
+audio { width: 100%; height: 36px; vertical-align: middle; }
+.tags-cell { white-space: normal; font-size: 12px; color: #444; }
+/* Local app: a tag edit queued on the server (extension not reachable). */
+.tag-editor-wrap.tags-pending .chosen-choices { border-color: #e0a800; background: #fff8e1; }
+.tag-editor-wrap.tags-error .chosen-choices { border-color: #d9534f; background: #fdecea; }

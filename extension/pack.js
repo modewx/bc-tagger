@@ -1,17 +1,20 @@
 const { readFileSync, existsSync, mkdirSync } = require('fs');
-const { parse, resolve } = require('path');
+const { resolve } = require('path');
 const AdmZip = require('adm-zip');
 
+// Zips the production build (extension/build) into <repo>/release/.
 try {
-  const { base } = parse(__dirname);
+  const root = resolve(__dirname, '..');
+  const { name } = JSON.parse(readFileSync(resolve(root, 'package.json'), 'utf8'));
+  const build = resolve(__dirname, 'build');
   const { version } = JSON.parse(
-    readFileSync(resolve(__dirname, 'build', 'manifest.json'), 'utf8')
+    readFileSync(resolve(build, 'manifest.json'), 'utf8')
   );
 
-  const outdir = 'release';
-  const filename = `${base}-v${version}.zip`;
+  const outdir = resolve(root, 'release');
+  const filename = `${name}-v${version}.zip`;
   const zip = new AdmZip();
-  zip.addLocalFolder('build');
+  zip.addLocalFolder(build);
   if (!existsSync(outdir)) {
     mkdirSync(outdir);
   }
