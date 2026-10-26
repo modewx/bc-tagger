@@ -91,6 +91,9 @@ def build_xml(selection: ExportSelection, folder_name: str, file_meta: dict[str,
 
 
 def write_xml(selection: ExportSelection, folder_name: str, file_meta: dict[str, dict], out_dir: Path) -> dict[str, Any]:
+    from .fsguard import require_mounted
+
+    require_mounted(out_dir)  # never create it on an unplugged drive's empty mount point
     out_dir.mkdir(parents=True, exist_ok=True)
     stamp = dt.datetime.now().strftime("%Y%m%d_%H%M%S")
     path = out_dir / f"bc-tagger_{stamp}.xml"

@@ -33,6 +33,8 @@ class Service:
         self._file_index = None
         # Bandcamp lookups for imports; tests swap in an offline fetcher with recorded responses.
         self.bandcamp_fetcher = self.default_bandcamp_fetcher
+        self.musicbrainz_fetcher = lambda: __import__("bc_tagger_server.musicbrainz", fromlist=["x"]).make_fetcher(
+            self.store, min_interval=1.0)
         if seed:
             self.seed_items()
         self._migrate_playlist_keys()
@@ -650,10 +652,10 @@ class Service:
         return make_fetcher(self.store, min_interval=lambda: float(self.settings.get("bandcamp_request_interval_s")))
 
     def start_import(self, file_obj: dict, default_tags: list[str], name: str | None = None,
-                     default_tags_all: bool = False):
+                     default_tags_all: bool = False, lookup: str = "server"):
         from . import importer
 
-        batch = importer.create_batch(self, file_obj, default_tags, name, default_tags_all)
+        batch = importer.create_batch(self, file_obj, default_tags, name, default_tags_all, lookup)
         job = self.jobs.submit("import", lambda ctx: importer.run_batch(self, batch["batch_id"], ctx))
         importer.set_job(self, batch["batch_id"], job)
         batch["job_id"] = job.id

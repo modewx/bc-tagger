@@ -100,6 +100,9 @@ def build(svc, sample: int = 12, seed: int = 7) -> str:
 def _cmd(svc, args: argparse.Namespace) -> int:
     text = build(svc, sample=args.sample)
     if args.out:
+        from .fsguard import require_mounted
+
+        require_mounted(args.out)
         Path(args.out).write_text(text)
         print(f"wrote {args.out}")
     else:

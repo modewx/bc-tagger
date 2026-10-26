@@ -25,6 +25,7 @@ from typing import Any, Callable
 from . import USER_AGENT
 from .config import PROTECTED_VOLUME, TEST_OWNED_ROOT
 from .fetcher import is_challenge
+from .fsguard import NotMounted, ensure_dir_under, require_existing_root
 from .rbguard import is_within, resolve
 
 MAX_ITEMS = 5
@@ -84,13 +85,24 @@ def owned_roots(settings) -> list[Path]:
     return [resolve(r["path"]) for r in settings.roots() if r["kind"] == "owned"]
 
 
-def downloads_dir(settings) -> Path:
-    """``downloads_dir``, or the owned root when empty; refused unless inside an owned root."""
+def _downloads_root(settings) -> tuple[Path, Path]:
+    """(``downloads_dir``, the owned root it's in); refused unless inside an owned root that exists on a
+    mounted volume ("music drive not mounted")."""
     folder = resolve((settings.get("downloads_dir") or "").strip() or settings.get("owned_root"))
     owned = owned_roots(settings)
-    if not any(is_within(folder, o) for o in owned):
+    root = next((o for o in sorted(owned, key=lambda o: -len(str(o))) if is_within(folder, o)), None)
+    if root is None:
         raise DownloadRefused(f"downloads_dir must be inside an owned root ({', '.join(map(str, owned))}), not {folder}")
-    return folder
+    try:
+        require_existing_root(root)
+    except NotMounted as e:
+        raise DownloadRefused(str(e)) from None
+    return folder, root
+
+
+def downloads_dir(settings) -> Path:
+    """``downloads_dir``, or the owned root when empty (see ``_downloads_root``)."""
+    return _downloads_root(settings)[0]
 
 
 def _launcher(settings) -> list[str]:
@@ -128,6 +140,11 @@ def run_release(settings, release_id: str, audio_format: str = "aiff-lossless", 
     """Download one release; ``outcome``: downloaded | on_disk | cached | not_in_collection |
     challenged | rate_limited | failed."""
     cmd = release_command(settings, release_id, audio_format, force)
+    target, root = _downloads_root(settings)  # again: the drive may have gone since the job started
+    try:
+        ensure_dir_under(target, root)  # the tool creates artist/release folders below it
+    except NotMounted as e:
+        raise DownloadRefused(str(e)) from None
     lines: list[str] = []
     folder: str | None = None
     proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
@@ -174,7 +191,10 @@ def run(settings, string_filter: str, number: int = 1, audio_format: str = "aiff
     shown = [c if not c.startswith("--cookies-file=") else "--cookies-file=<cookies file>" for c in cmd]
     if dry_run:
         return {"dry_run": True, "command": shown, "folder": str(folder)}
-    folder.mkdir(parents=True, exist_ok=True)
+    try:
+        ensure_dir_under(folder, TEST_OWNED_ROOT)
+    except NotMounted as e:
+        raise DownloadRefused(str(e)) from None
     before = {p for p in folder.rglob("*") if p.is_file()}
     lines: list[str] = []
     proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)

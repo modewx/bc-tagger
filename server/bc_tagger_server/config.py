@@ -105,6 +105,8 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     # Downloads of owned releases (Phase 4); empty: the owned root. Must be inside an owned root.
     "downloads_dir": "",
     "download_format": "aiff-lossless",
+    # Imports: where rows are looked up: "bandcamp" (default), "musicbrainz" (hints only) or "both".
+    "lookup_source": "bandcamp",
     "downloader_dir": str(DEFAULT_DOWNLOADER_DIR),
     # Empty: <downloader_dir>/build/libs/bandcamp-collection-downloader.jar, then ~/Scripts/bc-download/...
     "downloader_jar": "",
@@ -156,6 +158,8 @@ def _check_downloads_dir(settings: dict[str, Any]) -> None:
 def _validate(merged: dict[str, Any]) -> dict[str, Any]:
     out = dict(merged)
     out["settings_version"] = SETTINGS_VERSION
+    if out.get("lookup_source") not in ("bandcamp", "musicbrainz", "both"):
+        raise SettingsError("lookup_source must be bandcamp, musicbrainz or both")
     if out.get("download_format") not in ("flac", "wav", "aac-hi", "mp3-320", "aiff-lossless", "vorbis", "mp3-v0", "alac"):
         raise SettingsError("download_format must be one of the downloader's audio formats")
     out["downloads_dir"] = out.get("downloads_dir") or ""
