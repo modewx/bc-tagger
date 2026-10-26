@@ -3,6 +3,12 @@
 // extension is unreachable, tag edits are queued on the server and the
 // extension applies them the next time it syncs.
 
+// {concurrency, spacingMs} from /api/settings (or its {settings} wrapper).
+export function limitsFromSettings(data) {
+  const s = (data && data.settings) || data || {};
+  return { concurrency: s.bandcamp_browser_concurrency, spacingMs: s.bandcamp_browser_spacing_ms };
+}
+
 export async function apiJson(path, { method = "GET", body } = {}) {
   const init = { method };
   if (body !== undefined) {
@@ -121,6 +127,11 @@ export class HttpDataSource {
 
   persistFields(updates) {
     return this._persist("persistFields", { updates });
+  }
+
+  // Settings → Bandcamp requests: the throttle for page fetches.
+  bandcampLimits() {
+    return apiJson("/api/settings").then(limitsFromSettings);
   }
 
   // Cross-origin bandcamp pages can't be fetched from the app's origin; the

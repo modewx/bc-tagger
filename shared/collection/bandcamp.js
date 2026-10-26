@@ -190,13 +190,16 @@ export function splitArtistFromTitle(title) {
 // this fetcher (onChallenge(url) tells the page once); nothing retries it.
 // ---------------------------------------------------------------------------
 
+// Defaults for the throttle; Settings → Bandcamp requests can change them.
+export const DEFAULT_LIMITS = { concurrency: 2, spacingMs: 400 };
+
 export function createBandcampFetcher(fetchFn, { onChallenge } = {}) {
   // --- Global throttle ------------------------------------------------------
   // Bandcamp returns HTTP 429 when hit too fast, so ALL page fetches go through
   // one small queue: few at a time, spaced out, and when a 429 lands everything
   // pauses for a cooldown. This keeps bulk refreshes from getting blocked.
-  const MAX_CONCURRENT = 2;
-  const SPACING_MS = 400;
+  let maxConcurrent = DEFAULT_LIMITS.concurrency;
+  let spacingMs = DEFAULT_LIMITS.spacingMs;
   let activeFetches = 0;
   const fetchQueue = [];
   let pausedUntil = 0;
@@ -211,12 +214,12 @@ export function createBandcampFetcher(fetchFn, { onChallenge } = {}) {
   }
 
   function pumpFetches() {
-    while (activeFetches < MAX_CONCURRENT && fetchQueue.length) {
+    while (activeFetches < maxConcurrent && fetchQueue.length) {
       const task = fetchQueue.shift();
       activeFetches++;
       task().finally(() => {
         activeFetches--;
-        setTimeout(pumpFetches, SPACING_MS);
+        setTimeout(pumpFetches, spacingMs);
       });
     }
   }
@@ -364,5 +367,13 @@ export function createBandcampFetcher(fetchFn, { onChallenge } = {}) {
     resolveTrackTralbum,
     resolveTrackPlayerData,
     challengedUrl: () => challengedUrl,
+    // {concurrency (1–4), spacingMs (≥100)}; anything missing keeps its value.
+    setLimits(limits) {
+      const c = Math.round(Number(limits && limits.concurrency));
+      const s = Math.round(Number(limits && limits.spacingMs));
+      if (c >= 1) maxConcurrent = Math.min(4, c);
+      if (s >= 100) spacingMs = s;
+    },
+    limits: () => ({ concurrency: maxConcurrent, spacingMs }),
   };
 }

@@ -11,6 +11,7 @@
 //   persistFields({id: {..}})   -> Promise           e.g. fixed artists
 //   canFetchPages()             -> bool              can bandcamp pages be fetched?
 //   fetchPage(url, {credentials}) -> Promise<{ok, status, text()}>
+//   bandcampLimits?()           -> Promise<{concurrency, spacingMs} | null>  Settings → Bandcamp requests
 //   onTagsChanged(cb(tags))                          live vocabulary updates
 //   onItemsChanged?(cb)                              optional: items changed elsewhere
 
@@ -60,6 +61,12 @@ export class ExtensionDataSource {
 
   persistFields(updates) {
     return send({ type: "updateTaggedItemFields", updates });
+  }
+
+  // The server's Settings → Bandcamp requests when it's reachable, else null
+  // (the defaults).
+  bandcampLimits() {
+    return send({ type: "bandcampLimits" }).then((res) => (res && res.ok ? res.limits : null));
   }
 
   // Extension pages have host_permissions for bandcamp, so plain fetch works.

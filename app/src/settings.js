@@ -22,6 +22,7 @@ const SECTIONS = [
   ["folders", "general", "Music folders", "Where the indexer looks for your files. Files are referenced in place, never moved."],
   ["matching", "general", "Matching", "How tagged Bandcamp items are matched to local files."],
   ["bandcamp", "general", "Bandcamp", "Ownership normally comes from the extension's live session; these are the fallback."],
+  ["bandcamp_requests", "general", "Bandcamp requests", "Lower values are faster, but can trigger Bandcamp's rate limiting (HTTP 429)."],
   ["server", "general", "Server", ""],
   ["advanced", "general", "Advanced", ""],
   ["rb_target", "rekordbox", "Target library", "Where exports write. Your main collection needs an explicit opt-in, and every export to it shows a dry run first."],
@@ -103,6 +104,31 @@ const FIELDS = {
     placeholder: "default: the server's data folder / exports",
   },
   bandcamp_username: { section: "bandcamp", type: "text", label: "Bandcamp username" },
+  bandcamp_request_interval_s: {
+    section: "bandcamp_requests",
+    type: "number",
+    min: 0.5,
+    step: 0.5,
+    label: "Server lookups: seconds between requests",
+    help: "The import's Bandcamp lookups. Default 1.",
+  },
+  bandcamp_browser_concurrency: {
+    section: "bandcamp_requests",
+    type: "number",
+    min: 1,
+    max: 4,
+    step: 1,
+    label: "Browser actions: parallel requests",
+    help: "Fix album IDs, Refresh player files and thumbnails, and loading a track to play, through the extension. Default 2.",
+  },
+  bandcamp_browser_spacing_ms: {
+    section: "bandcamp_requests",
+    type: "number",
+    min: 100,
+    step: 50,
+    label: "Browser actions: spacing (ms)",
+    help: "The wait before the next request once one finishes. Default 400.",
+  },
   cookies_file: { section: "bandcamp", type: "path", label: "Cookies file", help: "Netscape cookies.txt." },
   server_port: {
     section: "server",
@@ -171,6 +197,7 @@ function textEditor(key, def, numeric) {
     },
   });
   if (def.type === "path") input.classList.add("path");
+  ["min", "max", "step"].forEach((a) => def[a] != null && input.setAttribute(a, def[a]));
   return {
     node: input,
     get: () => (numeric ? Number(input.value) : input.value),
@@ -459,7 +486,8 @@ function makeEditor(key, def, value) {
     case "roots-kind": return rootsEditor({ withKind: true });
     case "order": return orderEditor();
     case "ratio": return ratioEditor(key);
-    case "int": return textEditor(key, def, true);
+    case "int":
+    case "number": return textEditor(key, def, true);
     case "path":
     case "text": return textEditor(key, def, false);
     default: return genericEditor(key, value);

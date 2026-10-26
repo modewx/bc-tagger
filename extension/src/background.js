@@ -8,6 +8,7 @@ import {
   importLinkCandidates,
   linkImportRow,
   openImportRows,
+  bandcampLimits,
   queueItemsDiff,
   queueTags,
   refreshOwnership,
@@ -353,6 +354,13 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
 
   // From the content script: import rows that fit an item of the page, and
   // linking the page's item to one of them.
+  if (request.type === "bandcampLimits") {
+    bandcampLimits().then(
+      (limits) => sendResponse({ ok: true, limits }),
+      (e) => sendResponse({ ok: false, error: e.message })
+    );
+    return true;
+  }
   if (request.type === "importOpenRows") {
     openImportRows().then(
       (rows) => sendResponse({ ok: true, rows }),

@@ -1133,6 +1133,16 @@ export function createCollectionPage(opts) {
     if (ds.onItemsChanged) ds.onItemsChanged(() => reload());
 
     await ds.init();
+    // Settings → Bandcamp requests (defaults until they arrive, or if they can't).
+    if (ds.bandcampLimits) {
+      ds.bandcampLimits()
+        .then((l) => {
+          if (l) bc.setLimits(l);
+          const now = bc.limits();
+          document.documentElement.dataset.bandcampLimits = `${now.concurrency}/${now.spacingMs}`; // what's in use (e2e reads it)
+        })
+        .catch(() => {});
+    }
 
     const dbTags = await ds.getTags();
     allTagsVocab = Array.isArray(dbTags) ? dbTags : [];

@@ -267,6 +267,13 @@ export async function pullPendingAdds() {
   return { added, merged, tags: newTags };
 }
 
+// Settings → Bandcamp requests (the page-fetch throttle), from the server.
+export async function bandcampLimits() {
+  const data = await api("/api/settings", { timeoutMs: 2000 });
+  const s = (data && data.settings) || data || {};
+  return { concurrency: s.bandcamp_browser_concurrency, spacingMs: s.bandcamp_browser_spacing_ms };
+}
+
 // --- Import rows (Phase 3) -----------------------------------------------------
 
 // Rows of open imports still waiting for a Bandcamp item, with the URL the user

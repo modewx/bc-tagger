@@ -1182,6 +1182,34 @@ test("import: lookups paused by Bandcamp's rate limiting resume from the preview
   await page.close();
 });
 
+test("Settings → Bandcamp requests: the three values round-trip, and both collection pages use the browser ones", async () => {
+  const page = await context.newPage();
+  await page.goto(SERVER + "/settings/");
+  await page.waitForSelector("#f_bandcamp_browser_concurrency");
+  assert.match(await page.textContent("#sec_bandcamp_requests"), /rate limiting \(HTTP 429\)/);
+  await page.fill("#f_bandcamp_request_interval_s", "1.5");
+  await page.fill("#f_bandcamp_browser_concurrency", "1");
+  await page.fill("#f_bandcamp_browser_spacing_ms", "150");
+  await page.click("#saveBtn");
+  await waitFor(() => api("/api/settings").then((d) => (d.settings || d).bandcamp_browser_spacing_ms === 150), { what: "the saved settings" });
+  const saved = await api("/api/settings").then((d) => d.settings || d);
+  assert.equal(saved.bandcamp_request_interval_s, 1.5);
+  assert.equal(saved.bandcamp_browser_concurrency, 1);
+  for (const url of [SERVER + "/", extPage("collection.html")]) {
+    const p = await context.newPage();
+    await p.goto(url);
+    await p.waitForFunction(() => document.documentElement.dataset.bandcampLimits === "1/150", null, { timeout: 15000 });
+    await p.close();
+  }
+  // Out of range: the server refuses it and nothing changes.
+  await page.fill("#f_bandcamp_browser_concurrency", "9");
+  await page.click("#saveBtn");
+  await page.waitForTimeout(800);
+  assert.equal((await api("/api/settings").then((d) => d.settings || d)).bandcamp_browser_concurrency, 1);
+  await put({ bandcamp_request_interval_s: 1, bandcamp_browser_concurrency: 2, bandcamp_browser_spacing_ms: 400 });
+  await page.close();
+});
+
 // --- Bandcamp's bot check ("Client Challenge") ---------------------------------------
 // Whatever gets it stops fetching from Bandcamp and says so; nothing retries it.
 
