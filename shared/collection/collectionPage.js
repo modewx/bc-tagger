@@ -264,11 +264,24 @@ export function createCollectionPage(opts) {
     }
   }
 
+  // Put `audio` in a row's player cell as its only player: anything else
+  // there (a fresh player rendered meanwhile, a Play button) is dropped, so a
+  // row never shows two players for its track.
+  function dockInto(cell, audio) {
+    [...cell.children].forEach((child) => {
+      if (child === audio) return;
+      child.querySelectorAll("audio").forEach((a) => a.pause());
+      if (child.tagName === "AUDIO") child.pause();
+      child.remove();
+    });
+    if (audio.parentElement !== cell) cell.appendChild(audio);
+  }
+
   // Move a no-longer-current audio back into its own row cell, or drop it.
   function returnToRow(audio, key) {
     const cell = document.querySelector(`#collectionTable tr[data-key="${key}"] td.player-cell`);
     if (cell) {
-      if (audio.parentElement !== cell) cell.appendChild(audio);
+      dockInto(cell, audio);
     } else if (audio.parentElement) {
       audio.remove();
     }
@@ -290,7 +303,7 @@ export function createCollectionPage(opts) {
     const cell = row ? row.querySelector("td.player-cell") : null;
     const tagsCell = row ? row.querySelector("td.tags-cell") : null;
     if (cell && isElementInView(cell)) {
-      if (playingAudio.parentElement !== cell) cell.appendChild(playingAudio);
+      dockInto(cell, playingAudio);
       if (playingTagWrap && tagsCell && playingTagWrap.parentElement !== tagsCell) {
         tagsCell.innerHTML = "";
         tagsCell.appendChild(playingTagWrap);
@@ -318,9 +331,11 @@ export function createCollectionPage(opts) {
   // Play a track in a row (used by the row-click shortcut and the Play button for
   // not-yet-resolved tracks): reuse an existing audio, else resolve a link first.
   async function playTrack(item, key, cell, btn) {
+    if (!cell) return;
+    if (cell.querySelector("iframe")) return; // the full Bandcamp player is loaded: use it
     const existing = cell.querySelector("audio");
     if (existing) {
-      existing.play().catch(() => {});
+      existing.play().catch(() => {}); // reuse (no-op if it's already playing)
       return;
     }
     if (btn) { btn.disabled = true; btn.textContent = "Loading..."; }
@@ -363,7 +378,7 @@ export function createCollectionPage(opts) {
     // it (and keep them there during the smooth scroll).
     if (globalMode && playingAudio) {
       const cell = row.querySelector("td.player-cell");
-      if (cell && playingAudio.parentElement !== cell) cell.appendChild(playingAudio);
+      if (cell) dockInto(cell, playingAudio);
       const tagsCell = row.querySelector("td.tags-cell");
       if (playingTagWrap && tagsCell && playingTagWrap.parentElement !== tagsCell) {
         tagsCell.innerHTML = "";
@@ -758,12 +773,10 @@ export function createCollectionPage(opts) {
     entries.forEach(([key, item]) => {
       const row = tbody.insertRow();
       row.dataset.key = key;
-      let playerCell = null;
       columns.forEach((col) => {
         const cell = row.insertCell();
         cell.classList.add(`col-${col.id}`);
         col.render(cell, key, item);
-        if (col.id === "player") playerCell = cell;
       });
 
       // Global mode: clicking the "white space" of a row plays it. Ignore clicks on
@@ -774,7 +787,8 @@ export function createCollectionPage(opts) {
           if (e.target.closest("a, img, .no-thumb, button, audio, input, select, .chosen-container, .tags-cell, .thumb-cell, .no-row-play")) {
             return;
           }
-          playTrack(item, key, playerCell);
+          // The current cell: in-place row updates replace cells.
+          playTrack(allItems[key] || item, key, row.querySelector("td.player-cell"));
         });
       }
     });
@@ -1175,6 +1189,7 @@ export function createCollectionPage(opts) {
         tagEditorObserver.unobserve(old);
       }
       if (col.id === "thumb") thumbObserver.unobserve(old);
+      if (col.id === "player") old.querySelectorAll("audio").forEach((a) => a.pause());
       const cell = document.createElement("td");
       cell.classList.add(`col-${col.id}`);
       col.render(cell, key, item);

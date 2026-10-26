@@ -869,3 +869,73 @@ test("Locate never runs a full scan; its status shows what the quick scan did", 
   assert.equal((await api("/api/jobs")).filter((j) => j.kind === "scan").length, scanJobsBefore, "no scan job started");
   await app.close();
 });
+
+// --- One player per row ----------------------------------------------------------
+// Clicking a row (global player) after its row was updated in place used to
+// play the stale, replaced cell's audio and dock it next to the new cell's own
+// player: one more player per update+click.
+
+const audiosIn = (page, key) => page.$$eval(`tr[data-key="${key}"] audio`, (a) => a.length);
+const playingCount = (page) =>
+  page.evaluate(() => [...document.querySelectorAll("audio")].filter((a) => !a.paused).length);
+
+test("local app: re-clicking a row after item updates keeps one player in it", async () => {
+  const key = "t283914533"; // located by the earlier Locate tests: a local-file player
+  const app = await context.newPage();
+  await app.goto(SERVER + "/");
+  await app.waitForSelector(`tr[data-key="${key}"]`);
+  if (!(await app.isChecked("#globalModeToggle"))) await app.click("#globalModeToggle");
+  const row = app.locator(`tr[data-key="${key}"]`);
+  for (let i = 0; i < 3; i++) {
+    // An unrelated change to this item → SSE item → the row is updated in place.
+    const before = await app.textContent(`tr[data-key="${key}"] .col-owned`);
+    await post("/api/ownership", { owned_ids: i % 2 ? [] : [key], source: "e2e", full: true });
+    await app.waitForFunction(
+      ([k, b]) => document.querySelector(`tr[data-key="${k}"] .col-owned`).textContent !== b,
+      [key, before],
+      { timeout: 10000 }
+    );
+    await row.scrollIntoViewIfNeeded();
+    await row.locator(".col-date").click(); // the row's "white space" plays it in global mode
+    await app.waitForTimeout(600);
+  }
+  assert.equal(await audiosIn(app, key) + (await app.$$eval("#gpAudioHolder audio", (a) => a.length)), 1, "one player for the track");
+  assert.ok((await playingCount(app)) <= 1, "at most one playing");
+  await app.evaluate(() => document.querySelectorAll("audio").forEach((a) => a.pause()));
+  await app.close();
+});
+
+test("extension page: re-clicking a row and switching tracks keeps one player per row", async () => {
+  const a = "t1002746421"; // Futuro Lontano (durable stream link: an <audio> from the start)
+  const page = await context.newPage();
+  await page.goto(extPage("collection.html"));
+  await page.waitForSelector(`tr[data-key="${a}"] audio`, { state: "attached" });
+  if (!(await page.isChecked("#globalModeToggle"))) await page.click("#globalModeToggle");
+  const rowA = page.locator(`tr[data-key="${a}"]`);
+  await rowA.scrollIntoViewIfNeeded();
+  for (let i = 0; i < 3; i++) {
+    await rowA.locator(".col-date").click();
+    await page.waitForTimeout(300);
+  }
+  // Another playable row, then back to the first one.
+  const b = await page.evaluate((a) => {
+    const rows = [...document.querySelectorAll("#collectionTable tbody tr")];
+    const r = rows.find((tr) => tr.dataset.key !== a && tr.querySelector("td.player-cell audio"));
+    return r && r.dataset.key;
+  }, a);
+  if (b) {
+    const rowB = page.locator(`tr[data-key="${b}"]`);
+    await rowB.scrollIntoViewIfNeeded();
+    await rowB.locator(".col-date").click();
+    await page.waitForTimeout(300);
+    await rowA.scrollIntoViewIfNeeded();
+    await rowA.locator(".col-date").click();
+    await page.waitForTimeout(300);
+    assert.equal(await audiosIn(page, b), 1, "the other row keeps one player");
+  }
+  const docked = await page.$$eval("#gpAudioHolder audio", (x) => x.length);
+  assert.equal(await audiosIn(page, a) + docked, 1, "one player for the track");
+  assert.ok((await playingCount(page)) <= 1, "at most one playing");
+  await page.evaluate(() => document.querySelectorAll("audio").forEach((x) => x.pause()));
+  await page.close();
+});
