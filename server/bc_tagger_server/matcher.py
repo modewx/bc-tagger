@@ -18,13 +18,16 @@ from urllib.parse import urlparse
 from rapidfuzz import fuzz
 
 from .items import album_name, album_url, bandcamp_host, is_album, item_url
-from .normalize import norm, norm_title, numbers, unslug
+from .normalize import norm, norm_title, numbers, strip_feat, unslug
 from .store import Store, now_iso
 
 # A located match within this distance of the best score counts as "the same track"
 # for the format preference.
 SAME_TRACK_MARGIN = 0.1
 TITLE_GATE = 0.75
+# Below this title similarity a track is never auto-accepted, however well artist and
+# album agree ("Ego (Naked)" vs "Naked Eye" on the same artist's page).
+AUTO_TITLE_MIN = 0.88
 ALBUM_GATE = 0.8
 # Title tokens shared by more files than this ("the", "mix", "dub") are not used to find
 # candidates, unless the title has no rarer token.
@@ -88,11 +91,28 @@ def _clean(values: Iterable[str | None]) -> list[str]:
     return [v for v in dict.fromkeys(v.strip() for v in values if v and v.strip())]
 
 
+def _with_variants(titles: Iterable[str | None], artists: Iterable[str | None]) -> tuple[list[str], list[str]]:
+    """Add 'Artist - Title' splits and feat.-stripped forms to title/artist variants."""
+    titles, artists = _clean(titles), _clean(artists)
+    for t in list(titles):
+        split = _split_artist_title(t)
+        if split:
+            artists.append(split[0])
+            titles.append(split[1])
+    titles = _clean(titles + [strip_feat(t) for t in titles])
+    artists = _clean(artists + [strip_feat(a) for a in artists])
+    return titles, artists
+
+
 def file_view(row: dict) -> FileView:
     pf = row["parsed"].get("file", {})
     pd = row["parsed"].get("dir", {})
     urls = {u.rstrip("/").lower() for u in row.get("bc_urls") or []}
     hosts = {urlparse(u).netloc for u in urls if urlparse(u).netloc}
+    titles, artists = _with_variants(
+        [row.get("title"), pf.get("title"), pf.get("rest")],
+        [row.get("artist"), row.get("albumartist"), pf.get("artist"), pd.get("artist")],
+    )
     return FileView(
         path=row["path"],
         format=row["format"],
@@ -100,9 +120,9 @@ def file_view(row: dict) -> FileView:
         release_dir=row["release_dir"],
         track=row.get("tracknumber") or pf.get("track"),
         disc=row.get("discnumber") or pf.get("disc"),
-        titles=_clean([row.get("title"), pf.get("title"), pf.get("rest")]),
-        artists=_clean([row.get("artist"), row.get("albumartist"), pf.get("artist"), pd.get("artist")]),
-        albums=_clean([row.get("album"), pd.get("album")]),
+        titles=titles,
+        artists=artists,
+        albums=_clean([row.get("album"), pf.get("album"), pd.get("album")]),
         hosts=hosts,
         urls=urls,
         display={
@@ -173,17 +193,12 @@ def _split_artist_title(title: str) -> tuple[str, str] | None:
 def track_item_variants(item: dict) -> dict[str, Any]:
     title = str(item.get("title") or "")
     artist = item.get("artist") or item.get("band_name") or ""
-    titles = [title]
-    artists = [] if norm(artist) in VARIOUS else [artist]
-    split = _split_artist_title(title)
-    if split:
-        titles.append(split[1])
-        artists.append(split[0])
+    titles, artists = _with_variants([title], [] if norm(artist) in VARIOUS else [artist])
     albums = _clean([item.get("album_title"), unslug(_url_slug(album_url(item)))])
     track = item.get("track_num")
     return {
-        "titles": _clean(titles),
-        "artists": _clean(artists),
+        "titles": titles,
+        "artists": artists,
         "albums": albums,
         "track": track if isinstance(track, int) and track > 0 else None,
         "host": bandcamp_host(item),
@@ -220,8 +235,12 @@ def score_track(v: dict[str, Any], f: FileView) -> dict[str, Any] | None:
         score += 0.05 if v["track"] == f.track else -0.05
     if v["host"] and v["host"] in f.hosts:
         score += 0.1
+    if title < AUTO_TITLE_MIN:
+        score = min(score, 0.8)  # a fuzzy title alone can't carry a match: candidate at most
     if artist is not None and artist < 0.6:
-        score = min(score, 0.7)  # same title, different artist: never auto-accept
+        # Same title, different artist: a candidate on a matching album (label compilations),
+        # otherwise not even that ("Us" by Klara Lewis vs "Us" by Ani Klang).
+        score = min(score, 0.7 if album >= 0.6 else 0.5)
     return {
         "confidence": round(max(0.0, min(1.0, score)), 3),
         "method": "auto",
