@@ -313,15 +313,16 @@ def _check_duplicate(dups: DuplicateIndex, row: dict) -> None:
     _refresh(row)
 
 
-def _refresh_index(svc, ctx=None) -> dict[str, Any]:
-    """Before locating: pick up files added since the last full scan (a quick scan from its date)."""
-    mode = svc.default_scan_mode
+def _refresh_index(svc, ctx=None, batch: dict | None = None, mode: str | None = None) -> dict[str, Any]:
+    """Before locating: pick up files added since the last full scan or since the batch was created,
+    whichever is earlier (a quick scan from that date, minus ``quick_scan_margin_days``)."""
+    mode = mode or svc.default_scan_mode
     if mode != "quick":
         return svc.prepare_index([], mode, ctx)
-    last = svc.index_status().get("last_scan_at")
-    if not last:
+    dates = [d for d in (svc.index_status().get("last_scan_at"), (batch or {}).get("created_at")) if d]
+    if not dates:
         return {"mode": "none", "skipped": "no full scan yet"}
-    cutoff = datetime.fromisoformat(last.replace("Z", "+00:00")) - \
+    cutoff = min(datetime.fromisoformat(d.replace("Z", "+00:00")) for d in dates) - \
         timedelta(days=float(svc.settings.get("quick_scan_margin_days")))
     return svc.prepare_index([], "quick", ctx, cutoff=cutoff)
 
@@ -332,6 +333,8 @@ def _locate(svc, rows: list[dict], index=None) -> None:
     index = index or svc.file_index()
     cfg = svc.match_config()
     for row in rows:
+        if (row.get("located") or {}).get("manual"):
+            continue  # a file the user picked: later locates leave it alone
         result = locate_item(row_item(row), index, cfg)
         row["located"] = {"status": result["status"], "best": result["best"], "candidates": result["candidates"][:3]}
 
@@ -676,6 +679,12 @@ def update_row(svc, batch_id: str, n: int, changes: dict) -> dict:
             row["match"] = {**_empty_match(), "status": "manual"}
         row["bandcamp"] = None
         identity = True
+    if "path" in changes:  # the user picks the file (like the collection's Located popover); None: back to auto
+        if changes["path"]:
+            row["located"] = _manual_location(svc, changes["path"])
+        else:
+            row["located"] = {"status": "unknown", "best": None, "candidates": []}
+            _locate(svc, [row])
     if changes.get("link_item") is not None:  # the item the extension saved from the page
         return link_row(svc, batch_id, n, {"item": changes["link_item"]})
     if identity:
@@ -694,6 +703,73 @@ def _clean_page_url(value: str | None, key: str = "bandcamp_url") -> str:
     if url and not _PAGE_URL.match(url):
         raise ImportError_(f"{key} must look like https://host/track/slug or https://host/album/slug")
     return url
+
+
+def _manual_location(svc, path: str) -> dict[str, Any]:
+    from .indexer import index_file
+    from .matcher import _file_entry
+
+    try:
+        found = index_file(svc.store, path, svc.settings.roots())
+    except FileNotFoundError:
+        raise ImportError_(f"no such file: {path}") from None
+    except (ValueError, OSError) as e:
+        raise ImportError_(str(e)) from None
+    view = svc.file_index().by_path.get(found["path"])
+    if view is None:
+        raise ImportError_(f"couldn't index {path}")
+    best = _file_entry(view, {"confidence": 1.0, "method": "manual"})
+    return {"status": "located", "best": best, "candidates": [], "manual": True, "match_source": "manual"}
+
+
+def locate_row(svc, batch_id: str, n: int) -> dict:
+    """Search again for one row's file: quick scan for new files, then locate (a hand-picked file is
+    replaced by what the search finds)."""
+    store = svc.store
+    batch, rows, row = _editable(store, batch_id, n)
+    scan = _refresh_index(svc, batch=batch)
+    row["located"] = {"status": "unknown", "best": None, "candidates": []}
+    _locate(svc, [row])
+    _save_rows(store, batch_id, [row])
+    _refresh_stats(store, batch, rows)
+    _row_event(svc, batch_id, n, len(rows))
+    return {**row, "scan": scan}
+
+
+def relocate_batch(svc, batch_id: str, which: Any = "missing", scan: str | None = None, ctx=None) -> dict:
+    """Locate a batch's rows again ("missing", "all" or a list of row numbers) after a quick scan for
+    files added since the batch was created. Hand-picked files stay."""
+    store = svc.store
+    batch = load_batch(store, batch_id)
+    if batch["status"] == "committed":
+        raise ImportError_("the batch was already imported")
+    rows = load_rows(store, batch_id)
+    if which == "missing":
+        targets = [r for r in rows if (r.get("located") or {}).get("status") != "located"]
+    elif which == "all":
+        targets = list(rows)
+    else:
+        wanted = {int(x) for x in which}
+        targets = [r for r in rows if r["n"] in wanted]
+    targets = [r for r in targets if not (r.get("located") or {}).get("manual") and not r.get("committed")]
+    if ctx:
+        ctx.progress(0, len(targets), "scanning for new files")
+    scan_stats = _refresh_index(svc, ctx, batch, scan)
+    before = {r["n"]: ((r.get("located") or {}).get("status"), ((r.get("located") or {}).get("best") or {}).get("path"))
+              for r in targets}
+    if ctx:
+        ctx.progress(0, len(targets), f"locating {len(targets)} rows")
+    _locate(svc, targets)
+    newly = [r["n"] for r in targets if r["located"]["status"] == "located" and before[r["n"]][0] != "located"]
+    changed = [r["n"] for r in targets if (r["located"]["status"], (r["located"].get("best") or {}).get("path"))
+               != before[r["n"]]]
+    _save_rows(store, batch_id, rows)
+    _refresh_stats(store, batch, rows)
+    svc.jobs.bus.publish("import", {"batch_id": batch_id, "phase": "located", "current": len(newly),
+                                    "total": len(targets)})
+    return {"batch_id": batch_id, "checked": len(targets), "newly_located": newly, "changed": changed,
+            "still_missing": sum(r["located"]["status"] != "located" for r in targets),
+            "scan": {k: v for k, v in (scan_stats or {}).items() if k != "roots"}, "stats": batch["stats"]}
 
 
 def _row_event(svc, batch_id: str, n: int, total: int) -> None:
@@ -923,6 +999,13 @@ def _commit(svc, batch: dict) -> dict:
             dups.add(item)
             row["committed"] = "other"
             result["other_added"] += 1
+        located = row.get("located") or {}
+        if located.get("manual") and located.get("best"):  # the hand-picked file: confirmed for the new item
+            item_id = (row["duplicate"] or {}).get("of") or row_item(row)["id"]
+            with store.tx() as c:
+                c.execute("DELETE FROM match_overrides WHERE item_id = ? AND decision = 'confirm'", (item_id,))
+                c.execute("INSERT INTO match_overrides(item_id, path, decision, created_at) VALUES(?, ?, 'confirm', ?)",
+                          (item_id, located["best"]["path"], now_iso()))
         _save_rows(store, batch_id, [row])  # done rows are skipped if a restart makes the user import again
     new_tags = [t for t in dict.fromkeys(used_tags) if t not in vocab]
     if new_tags:

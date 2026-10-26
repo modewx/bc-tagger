@@ -6,7 +6,7 @@ import asyncio
 import json
 import logging
 import re
-from typing import Any, Literal, Optional
+from typing import Any, Literal, Optional, Union
 
 from fastapi import Body, FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -84,6 +84,7 @@ class RowChanges(BaseModel):
     match_url: Optional[str] = None  # a Bandcamp page the user found (stored, not fetched)
     bandcamp_url: Optional[str] = None  # a pasted Bandcamp page: the row's hint, read by re_resolve
     link_item: Optional[dict] = None  # the item the extension saved from the open Bandcamp page
+    path: Optional[str] = None  # the row's file, picked by hand (null: back to automatic)
 
 
 class LinkBody(BaseModel):
@@ -94,6 +95,11 @@ class LinkBody(BaseModel):
     tralbum: Optional[dict] = None
     embed: Optional[dict] = None
     page_url: Optional[str] = None
+
+
+class RelocateBody(BaseModel):
+    rows: Union[Literal["missing", "all"], list[int]] = "missing"
+    scan: Literal["quick", "none", "full"] = "quick"
 
 
 class DefaultTagsBody(BaseModel):
@@ -253,6 +259,15 @@ def create_app(service: Service | None = None) -> FastAPI:
     def import_link_candidates(body: LinkBody) -> list[dict]:
         return _import_call(imp.link_candidates, svc, body.model_dump(exclude_unset=True))
 
+    @app.post("/api/import/{batch_id}/locate")
+    def import_relocate(batch_id: str, body: RelocateBody) -> dict:
+        job = _import_call(svc.start_relocate, batch_id, body.rows, body.scan)
+        return {"job_id": job.id}
+
+    @app.post("/api/import/{batch_id}/rows/{n}/locate")
+    def import_locate_row(batch_id: str, n: int) -> dict:
+        return _import_call(imp.locate_row, svc, batch_id, n)
+
     @app.put("/api/import/{batch_id}/default-tags")
     def import_default_tags(batch_id: str, body: DefaultTagsBody) -> dict:
         return _import_call(imp.set_default_tags, svc, batch_id, body.tags, body.all)
@@ -297,6 +312,13 @@ def create_app(service: Service | None = None) -> FastAPI:
     def scan() -> dict:
         job, joined = svc.start_scan()
         return {"job_id": job.id, "joined": joined}
+
+    @app.get("/api/index/search")
+    def index_search(q: str = "", limit: int = 20) -> list[dict]:
+        """Files by artist/title/album/filename words, for picking a file by hand."""
+        from .indexer import search_files
+
+        return search_files(svc.store, q, limit)
 
     @app.get("/api/index/status")
     def index_status() -> dict:

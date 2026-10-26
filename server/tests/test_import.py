@@ -565,3 +565,67 @@ def test_default_tags_on_a_batch_from_before_default_added(svc):
     assert by_line[211]["tags"][-1] == "must" and by_line[297]["tags"] == ["must"]
     out = importer.set_default_tags(svc, bid, ["must"], False)
     assert {x["line"]: x for x in out["rows"]}[211]["tags"] == ["muertos", "dubstep", "industrial", "ritual"]
+
+
+def test_relocate_finds_files_added_after_the_batch(svc, tmp_path):
+    batch = run(svc, recorded_rows())
+    bid = batch["batch_id"]
+    butterfly, bones = row_at(batch, 13), row_at(batch, 85)
+    assert butterfly["located"]["status"] == "missing" and bones["located"]["status"] == "missing"
+    music = tmp_path / "music"
+    write_aiff(music / "Shinichi Atobe - Butterfly Effect" / "01 Butterfly Effect.aiff", "Butterfly Effect",
+               "Shinichi Atobe", "Butterfly Effect", 1)  # the user just added it
+    with TestClient(create_app(svc)) as c:
+        job = c.post(f"/api/import/{bid}/locate", json={"rows": "missing", "scan": "quick"}).json()
+        done = svc.jobs.wait(job["job_id"], timeout=30)
+        assert done.status == "done", done.error
+        result = done.result
+        assert butterfly["n"] in result["newly_located"] and butterfly["n"] in result["changed"]
+        assert result["scan"]["mode"] == "quick" and result["scan"]["added"] >= 1
+        assert result["still_missing"] >= 1 and result["stats"]["located"] == batch["stats"]["located"] + 1
+        row = next(r for r in c.get(f"/api/import/{bid}").json()["rows"] if r["n"] == butterfly["n"])
+        assert row["located"]["best"]["path"].endswith("01 Butterfly Effect.aiff")
+        # one row: "search again"
+        write_aiff(music / "Wata Igarashi - WIP" / "3 Bones.aiff", "Bones", "Wata Igarashi", "WIP", 3)
+        row = c.post(f"/api/import/{bid}/rows/{bones['n']}/locate").json()
+        assert row["located"]["status"] == "located" and row["located"]["best"]["path"].endswith("3 Bones.aiff")
+        assert c.post(f"/api/import/{bid}/rows/999/locate").status_code == 404
+
+
+def test_pick_a_file_by_hand_and_search_the_index(svc, tmp_path):
+    batch = run(svc, recorded_rows())
+    bid = batch["batch_id"]
+    uf0 = row_at(batch, 181)
+    elsewhere = write_aiff(tmp_path / "elsewhere" / "ufo track.aiff", None, None, None, None)  # outside the roots
+    (tmp_path / "notes.txt").write_text("x")
+    with TestClient(create_app(svc)) as c:
+        hits = c.get("/api/index/search", params={"q": "astika space", "limit": 5}).json()
+        assert [h["path"].endswith("01. Astika.aiff") for h in hits] == [True] and hits[0]["artist"] == "Space Drum Meditation"
+        assert c.get("/api/index/search", params={"q": " "}).json() == []
+        assert c.put(f"/api/import/{bid}/rows/{uf0['n']}", json={"path": str(tmp_path / "gone.aiff")}).status_code == 400
+        assert c.put(f"/api/import/{bid}/rows/{uf0['n']}", json={"path": str(tmp_path / "notes.txt")}).status_code == 400
+        row = c.put(f"/api/import/{bid}/rows/{uf0['n']}", json={"path": str(elsewhere)}).json()
+        loc = row["located"]
+        assert loc["status"] == "located" and loc["manual"] and loc["match_source"] == "manual"
+        assert loc["best"]["path"] == str(elsewhere) and loc["best"]["method"] == "manual"
+        assert c.get("/api/index/search", params={"q": "ufo track"}).json()[0]["path"] == str(elsewhere)  # indexed
+        # later locates leave it alone
+        job = c.post(f"/api/import/{bid}/locate", json={"rows": "all", "scan": "none"}).json()
+        assert uf0["n"] not in svc.jobs.wait(job["job_id"], timeout=30).result["changed"]
+        assert row_at(c.get(f"/api/import/{bid}").json(), 181)["located"]["best"]["path"] == str(elsewhere)
+        # on import, it becomes the new item's confirmed file
+        c.post(f"/api/import/{bid}/tags", json={"map": {}, "unmapped": "create"})
+        c.post(f"/api/import/{bid}/commit")
+        item_id = importer.row_item(row_at(importer.get_batch(svc, bid), 181))["id"]
+        o = svc.store.query_one("SELECT path, decision FROM match_overrides WHERE item_id = ?", (item_id,))
+        assert (o["path"], o["decision"]) == (str(elsewhere), "confirm")
+        assert svc.locate(ids=[item_id], scan="none")["items"][0]["path"] == str(elsewhere)
+
+
+def test_hand_picked_file_can_go_back_to_automatic(svc, tmp_path):
+    batch = run(svc, recorded_rows())
+    bid, n = batch["batch_id"], row_at(batch, 206)["n"]
+    picked = write_aiff(tmp_path / "elsewhere" / "other.aiff", None, None, None, None)
+    importer.update_row(svc, bid, n, {"path": str(picked)})
+    row = importer.update_row(svc, bid, n, {"path": None})
+    assert not row["located"].get("manual") and row["located"]["best"]["path"].endswith("01. Astika.aiff")
