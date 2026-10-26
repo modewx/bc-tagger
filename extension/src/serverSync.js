@@ -15,6 +15,7 @@
 // ---------------------------------------------------------------------------
 
 import { withItems, serialized, getStorage, setStorage } from "./itemsStore";
+import { CHALLENGE_TEXT, isChallengePage } from "../../shared/bandcampChallenge";
 
 // http://127.0.0.1:8765 unless the build sets BC_DEFAULT_SERVER_URL (e2e builds).
 export const DEFAULT_SERVER_URL = __DEFAULT_SERVER_URL__;
@@ -266,13 +267,37 @@ export async function pullPendingAdds() {
   return { added, merged, tags: newTags };
 }
 
+// --- Import rows (Phase 3) -----------------------------------------------------
+
+// Rows of open imports still waiting for their Bandcamp page (for the content
+// script's "Link to import"): [{batch_id, batch_name, n, line, artist, title,
+// album, position, track_num, hint, match_url}].
+export async function openImportRows() {
+  const rows = await api("/api/import/open-rows", { timeoutMs: 4000 });
+  return Array.isArray(rows) ? rows : [];
+}
+
+// The page's item (as the content script saves it) becomes the row's match.
+export function linkImportRow(batchId, n, item) {
+  return api(`/api/import/${encodeURIComponent(batchId)}/rows/${encodeURIComponent(n)}`, {
+    method: "PUT",
+    body: { link_item: item },
+  });
+}
+
 // --- Ownership ---------------------------------------------------------------
 
 // The logged-in fan's collection, keyed like our item IDs ("a<album>", "t<track>").
 async function fetchOwnedIds() {
   const res = await fetch("https://bandcamp.com/api/fan/2/collection_summary", { credentials: "include" });
+  const text = await res.text();
+  if (isChallengePage(text)) {
+    const e = new Error(`${CHALLENGE_TEXT}. Ownership isn't checked in the background until you refresh it yourself.`);
+    e.challenge = true;
+    throw e;
+  }
   if (!res.ok) throw new Error(`Bandcamp collection_summary: HTTP ${res.status}`);
-  const data = await res.json();
+  const data = JSON.parse(text);
   const summary = data && data.collection_summary;
   if (!summary || !data.fan_id) throw new Error("not logged in to Bandcamp in this browser");
   const owned = Object.keys(summary.tralbum_lookup || {}).filter((k) => /^[at]\d+$/.test(k));
@@ -284,7 +309,7 @@ export async function refreshOwnership() {
   try {
     fetched = await fetchOwnedIds();
   } catch (e) {
-    await setStatus({ ownership: { at: Date.now(), error: e.message } });
+    await setStatus({ ownership: { at: Date.now(), error: e.message, challenge: !!e.challenge } });
     throw e;
   }
   const res = await api("/api/ownership", {
@@ -332,7 +357,8 @@ export async function syncTick(reason) {
   await pullTagEdits().catch((e) => console.warn("[sync] pull failed", e.message));
   await pullPendingAdds().catch((e) => console.warn("[sync] pending adds failed", e.message));
   const own = status.ownership || {};
-  if (!own.at || Date.now() - own.at > OWNERSHIP_EVERY_MS) {
+  // After a bot check, only the user's own Refresh ownership tries again.
+  if (!own.challenge && (!own.at || Date.now() - own.at > OWNERSHIP_EVERY_MS)) {
     await refreshOwnership().catch((e) => console.warn("[sync] ownership failed", e.message));
   }
 }

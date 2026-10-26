@@ -111,10 +111,19 @@ export function createImportTab(container) {
       fileData = data;
       fileName = f.name;
       const unknown = Object.keys(data.unknown_tags || {});
+      const existing = data.items.filter((it) => it.existing_id).length;
+      const confirm = data.items.filter((it) => (it.flags || []).includes("needs_user_confirmation")).length;
+      const pending = Array.isArray(data.pending_releases) ? data.pending_releases.length : 0;
       fileInfo.className = "help";
-      fileInfo.textContent =
-        `${data.items.length} rows from ${data.source || f.name}` +
-        (unknown.length ? ` · ${unknown.length} tags not in your vocabulary (you'll map them next)` : "");
+      fileInfo.textContent = [
+        `${data.items.length} rows from ${data.source || f.name}`,
+        existing ? `${existing} already in your collection` : "",
+        confirm ? `${confirm} to confirm` : "",
+        pending ? `${pending} release${pending > 1 ? "s" : ""} not importable yet (no tracklist)` : "",
+        unknown.length ? `${unknown.length} tags not in your vocabulary (you'll map them next)` : "",
+      ]
+        .filter(Boolean)
+        .join(" · ");
       start.disabled = false;
     } catch (e) {
       fileInfo.className = "help err";

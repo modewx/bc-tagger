@@ -1039,7 +1039,7 @@ test("extension page: old position-based widths move to the right columns", asyn
 
 const IMPORT_SAMPLE = path.join(ROOT, "scripts/e2e/fixtures/import-sample.json");
 
-test("import: file → tag mapping → preview with tints, match sources, Find link, pasted URL, Import selected", async () => {
+test("import: file → tag mapping → preview (tints, release, to confirm, match sources, Open on Bandcamp, pasted URL) → Import selected", async () => {
   const stub = importStub(JSON.parse(fs.readFileSync(IMPORT_SAMPLE, "utf8")), { located: [1, 2] });
   const page = await context.newPage();
   await stub.install(page);
@@ -1047,7 +1047,11 @@ test("import: file → tag mapping → preview with tints, match sources, Find l
   await page.goto(SERVER + "/settings/#import");
   await page.setInputFiles("#importFile", IMPORT_SAMPLE);
   await page.waitForFunction(() => /6 rows from/.test(document.getElementById("importFileInfo").textContent));
-  assert.match(await page.textContent("#importFileInfo"), /2 tags not in your vocabulary/);
+  const fileInfo = await page.textContent("#importFileInfo");
+  assert.match(fileInfo, /1 already in your collection/);
+  assert.match(fileInfo, /1 to confirm/);
+  assert.match(fileInfo, /1 release not importable yet/);
+  assert.match(fileInfo, /2 tags not in your vocabulary/);
   await page.click("#importStart");
 
   // Mapping step: the file's suggestion is pre-filled; create the rest.
@@ -1061,30 +1065,50 @@ test("import: file → tag mapping → preview with tints, match sources, Find l
   assert.equal(startCall.body.name, "import-sample.json");
   assert.equal(startCall.body.file.format, "bc-tagger-import/1");
 
-  // Preview: tints and where each match came from.
+  // Preview: tints, rows to confirm, release info, where each match came from.
   await page.waitForFunction(() => document.querySelectorAll("#collectionTable tbody tr").length === 6);
-  const rowInfo = () =>
-    page.$$eval("#collectionTable tbody tr", (trs) =>
-      trs.map((tr) => ({
-        key: tr.dataset.key,
-        cls: ["row-duplicate", "row-missing"].filter((c) => tr.classList.contains(c)).join(" "),
-        source: tr.querySelector(".match-cell .chip").dataset.source,
-        find: (tr.querySelector(".match-cell a.find-bc") || {}).href || null,
-      }))
-    );
-  const byKey = Object.fromEntries((await rowInfo()).map((r) => [r.key, r]));
-  assert.equal(byKey.r0.cls, "row-duplicate");
-  assert.equal(byKey.r0.source, "collection");
-  assert.equal(byKey.r1.cls, "");
-  assert.equal(byKey.r1.source, "file");
-  assert.equal(byKey.r2.cls, "row-missing");
-  assert.equal(byKey.r2.source, "none");
-  assert.equal(byKey.r5.source, "candidates");
-  assert.equal(byKey.r2.find, "https://bandcamp.com/search?q=Nobody%20Known%20Slow%20One&item_type=t");
-  assert.equal(byKey.r4.find, "https://bandcamp.com/search?q=Sample%20Artist%20Sample%20Album&item_type=a");
-  assert.equal(byKey.r0.find, null, "matched rows have no Find link in the cell");
-  assert.equal(await page.getAttribute("tr[data-key='r2'] a.find-bc", "target"), "_blank");
-  assert.match(await page.textContent(".import-stats"), /6 rows/);
+  const rows = Object.fromEntries(
+    (
+      await page.$$eval("#collectionTable tbody tr", (trs) =>
+        trs.map((tr) => ({
+          key: tr.dataset.key,
+          cls: ["row-duplicate", "row-missing", "row-confirm"].filter((c) => tr.classList.contains(c)).join(" "),
+          source: tr.querySelector(".match-cell .chip").dataset.source,
+          open: tr.querySelector(".match-cell a.open-bc") && {
+            text: tr.querySelector(".match-cell a.open-bc").textContent,
+            href: tr.querySelector(".match-cell a.open-bc").href,
+          },
+          release: tr.querySelector("td.release-cell").innerText.replace(/\s+/g, " ").trim(),
+          confirm: !!tr.querySelector(".confirm-chip"),
+        }))
+      )
+    ).map((r) => [r.key, r])
+  );
+  assert.equal(rows.r0.cls, "row-duplicate");
+  assert.equal(rows.r0.source, "collection");
+  assert.equal(rows.r0.open, null, "matched rows have no Open link in the cell");
+  assert.equal(rows.r1.cls, "", "located, not a duplicate");
+  assert.equal(rows.r1.source, "none", "a link from the file is a hint, not a match");
+  assert.deepEqual(rows.r1.open, { text: "Open link ↗", href: "https://superdrama.bandcamp.com/album/select-edits-2017-2020" });
+  assert.equal(rows.r1.release, "Select Edits (2017-2020) track 4");
+  assert.equal(rows.r2.cls, "row-missing row-confirm");
+  assert.equal(rows.r2.confirm, true);
+  assert.deepEqual(rows.r2.open, { text: "Search ↗", href: "https://bandcamp.com/search?q=Nobody%20Known%20Slow%20One&item_type=t" });
+  assert.equal(rows.r3.release, "Cosmic Function B1 · track 2");
+  assert.equal(rows.r4.release, "Cosmic Function B2 · track 3", "same title, distinct rows");
+  assert.equal(rows.r5.source, "candidates");
+  assert.equal(await page.getAttribute("tr[data-key='r2'] a.open-bc", "target"), "_blank");
+  assert.match(await page.textContent(".import-stats"), /6 rows .*1 to confirm/);
+  assert.match(await page.textContent(".import-pending"), /1 release not importable yet .*Sample Artist – Sample EP/);
+
+  // Show filter.
+  const shown = () => page.$$eval("#collectionTable tbody tr", (trs) => trs.map((tr) => tr.dataset.key));
+  await page.selectOption("#importShow", "confirm");
+  assert.deepEqual(await shown(), ["r2"]);
+  await page.selectOption("#importShow", "duplicates");
+  assert.deepEqual(await shown(), ["r0"]);
+  await page.selectOption("#importShow", "all");
+  assert.equal((await shown()).length, 6);
 
   // Paste a URL: junk is refused, a real page URL (query dropped) becomes the match.
   await page.click("tr[data-key='r2'] .match-cell .chip");
@@ -1095,16 +1119,16 @@ test("import: file → tag mapping → preview with tints, match sources, Find l
   await page.click(".popover .pop-url button.primary");
   await page.waitForFunction(() => document.querySelector("tr[data-key='r2'] .match-cell .chip").dataset.source === "url");
   assert.deepEqual(stub.calls.filter((c) => c.method === "PUT").pop().body, { match_url: "https://nobodyknown.bandcamp.com/track/slow-one" });
-  assert.equal(await page.$("tr[data-key='r2'] a.find-bc"), null);
+  assert.equal(await page.$("tr[data-key='r2'] a.open-bc"), null);
 
-  // Pick a search candidate, then send another row back to Other.
+  // Pick a candidate, then send that row back to Other.
   await page.click("tr[data-key='r5'] .match-cell .chip");
   await page.click(".popover .pop-file button.primary >> nth=0");
   await page.waitForFunction(() => document.querySelector("tr[data-key='r5'] .match-cell .chip").dataset.source === "picked");
   assert.deepEqual(stub.calls.filter((c) => c.method === "PUT").pop().body, { choose: "t7000000001" });
-  await page.click("tr[data-key='r1'] .match-cell .chip");
+  await page.click("tr[data-key='r5'] .match-cell .chip");
   await page.click(".popover button.danger");
-  await page.waitForFunction(() => document.querySelector("tr[data-key='r1'] .match-cell .chip").dataset.source === "none");
+  await page.waitForFunction(() => document.querySelector("tr[data-key='r5'] .match-cell .chip").dataset.source === "none");
   assert.deepEqual(stub.calls.filter((c) => c.method === "PUT").pop().body, { choose: null });
 
   // Select: one row off, then Import selected.
@@ -1113,8 +1137,124 @@ test("import: file → tag mapping → preview with tints, match sources, Find l
   assert.equal(await page.$eval("#selectAll", (b) => b.indeterminate), true);
   await page.click("#importSelected");
   await page.waitForFunction(() => /^Imported:/.test(document.getElementById("refreshStatus").textContent));
-  assert.match(await page.textContent("#refreshStatus"), /pending adds 2, tag merges 1, other added 2/);
+  assert.match(await page.textContent("#refreshStatus"), /pending adds 1, tag merges 1, other added 3/);
   assert.ok(stub.calls.some((c) => c.path.endsWith("/commit")));
   assert.deepEqual(standInPages, [], "the preview fetches no Bandcamp pages");
   await page.close();
+});
+
+test("Link to import: the album page links a pasted-URL row by itself and another row by hand (recorded album page)", async () => {
+  // The server side (open rows, link_item) is stubbed like the import API above.
+  const OPEN = `${SERVER}/api/import/open-rows`;
+  const ROW = /\/api\/import\/e2e-b2\/rows\/(\d+)$/;
+  const album = "https://infiniteexpanse.bandcamp.com/album/synergy-trilogy";
+  const openRows = [
+    { batch_id: "e2e-b2", batch_name: "e2e-sample.txt", n: 7, line: 9, artist: "Synergy Trilogy", title: "Holo Law", album: "Synergy Trilogy", track_num: 9, hint: null, match_url: album },
+    { batch_id: "e2e-b2", batch_name: "e2e-sample.txt", n: 8, line: 10, artist: "Someone Else", title: "Another Track", album: null, track_num: null, hint: null, match_url: null },
+  ];
+  const puts = [];
+  const serveOpen = (route) => route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(openRows) });
+  const servePut = (route) => {
+    const body = JSON.parse(route.request().postData());
+    puts.push({ n: Number(route.request().url().match(ROW)[1]), body });
+    return route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ n: 7, source: "bandcamp" }) });
+  };
+  await context.route(OPEN, serveOpen);
+  await context.route(ROW, servePut);
+  const page = await context.newPage();
+  try {
+    await page.goto(album);
+    await page.waitForSelector("#bct-import-notice", { timeout: 15000 });
+    await waitFor(() => puts.length >= 1, { what: "the automatic link" });
+    assert.equal(puts[0].n, 7);
+    assert.equal(puts[0].body.link_item.id, "t3738475288");
+    assert.equal(puts[0].body.link_item.album_id, "a563830364");
+    assert.equal(puts[0].body.link_item.title, "Holo Law");
+    assert.match(await page.textContent("#bct-import-notice"), /linked this page's “Holo Law” to import row line 9/);
+
+    // By hand: the stand-in track's button lists the remaining row.
+    const btn = page.locator("#tagger_t3738475200").locator("xpath=ancestor::div[contains(@class,'tagger-container')]").locator(".bct-link-btn");
+    await btn.click();
+    const choices = await page.$$eval(".bct-link-menu .bct-link-row", (b) => b.map((x) => x.textContent));
+    assert.deepEqual(choices, ["line 10: Someone Else – Another Track · e2e-sample.txt"]);
+    await page.click(".bct-link-menu .bct-link-row");
+    await waitFor(() => puts.length >= 2, { what: "the manual link" });
+    assert.equal(puts[1].n, 8);
+    assert.equal(puts[1].body.link_item.id, "t3738475200");
+    assert.match(await btn.textContent(), /^Linked ✓ line 10/);
+  } finally {
+    await context.unroute(OPEN, serveOpen);
+    await context.unroute(ROW, servePut);
+    await page.close();
+  }
+});
+
+// --- Bandcamp's bot check ("Client Challenge") ---------------------------------------
+// Whatever gets it stops fetching from Bandcamp and says so; nothing retries it.
+
+const CHALLENGE_HTML = fs.readFileSync(path.join(FIXTURES, "challenge.html"));
+
+test("bot check: the first challenged page stops all page fetching and is shown", async () => {
+  const ids = ["t999000601", "t999000602"];
+  await probe.evaluate(async (ids) => {
+    const { taggedItems } = await chrome.storage.local.get("taggedItems");
+    Object.values(taggedItems).forEach((it) => {
+      if (it.tralbum_type === "t") it.album_checked = true;
+    });
+    ids.forEach((id, i) => {
+      taggedItems[id] = {
+        id,
+        title: `Challenged ${i + 1}`,
+        tralbum_type: "t",
+        raw_id: Number(id.slice(1)),
+        tags: ["must"],
+        url: `https://e2e-challenge.bandcamp.com/track/challenged-${i + 1}`,
+      };
+    });
+    await chrome.storage.local.set({ taggedItems });
+  }, ids);
+  const page = await context.newPage();
+  const seen = [];
+  await page.route(/e2e-challenge\.bandcamp\.com|\/EmbeddedPlayer\/track=99900060/, (route) => {
+    seen.push(route.request().url());
+    return route.fulfill({ status: 403, contentType: "text/html", body: CHALLENGE_HTML });
+  });
+  await page.goto(extPage("collection.html"));
+  await page.waitForFunction(() => document.querySelectorAll("#collectionTable tbody tr").length > 0);
+  await page.click("#fixAlbumIds");
+  await page.waitForFunction(() => /^Album IDs: stopped by Bandcamp's bot check/.test(document.getElementById("refreshStatus").textContent));
+  assert.match(await page.textContent("#bcChallenge"), /Client Challenge/);
+  assert.match(await page.getAttribute("#bcChallenge a", "href"), /^https:\/\/e2e-challenge\.bandcamp\.com\/track\/challenged-/);
+  // The two track pages may already be in flight together; nothing after the
+  // challenge (no embedded-player fallback, no retry).
+  assert.ok(seen.length >= 1 && seen.length <= 2, `fetched: ${seen.join(", ")}`);
+  assert.ok(seen.every((u) => /e2e-challenge/.test(u)), `fetched after the challenge: ${seen.join(", ")}`);
+  const items = (await storage("taggedItems")).taggedItems;
+  ids.forEach((id) => assert.equal(items[id].album_checked, undefined, "a challenged item isn't marked checked"));
+  await page.click("#refreshThumbs").catch(() => {});
+  await page.waitForTimeout(500);
+  assert.ok(seen.every((u) => /e2e-challenge/.test(u)) && seen.length <= 2, "no fetches after the challenge");
+  await probe.evaluate((ids) => Promise.all(ids.map((id) => chrome.runtime.sendMessage({ type: "removeTaggedItem", id }))), ids);
+  await page.close();
+});
+
+test("bot check: ownership reports it and stops refreshing in the background", async () => {
+  const SUMMARY = "https://bandcamp.com/api/fan/2/collection_summary";
+  const challenge = (route) => route.fulfill({ status: 200, contentType: "text/html", body: CHALLENGE_HTML });
+  await context.route(SUMMARY, challenge);
+  const app = await context.newPage();
+  await app.goto(SERVER + "/");
+  await app.waitForFunction(() => /extension connected/.test(document.getElementById("navExt").textContent));
+  await app.click("#refreshOwnership");
+  await app.waitForFunction(() => /failed|error/i.test(document.getElementById("refreshStatus").textContent), null, { timeout: 30000 });
+  assert.match(await app.textContent("#refreshStatus"), /bot check/);
+  const status = await probe.evaluate(() => chrome.storage.session.get("bcSyncStatus").then((s) => s.bcSyncStatus));
+  assert.equal(status.ownership.challenge, true);
+  // The user's own refresh clears it once Bandcamp answers again.
+  await context.unroute(SUMMARY, challenge);
+  await app.click("#refreshOwnership");
+  await app.waitForFunction(() => /owned: \d+/.test(document.getElementById("refreshStatus").textContent), null, { timeout: 30000 });
+  const after = await probe.evaluate(() => chrome.storage.session.get("bcSyncStatus").then((s) => s.bcSyncStatus));
+  assert.ok(!after.ownership.challenge);
+  await app.close();
 });

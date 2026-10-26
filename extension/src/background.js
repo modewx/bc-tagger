@@ -5,6 +5,8 @@ import {
   probeServer,
   pullTagEdits,
   pullPendingAdds,
+  openImportRows,
+  linkImportRow,
   queueItemsDiff,
   queueTags,
   refreshOwnership,
@@ -12,6 +14,7 @@ import {
   syncTick,
 } from "./serverSync";
 import { serialized, withItems, getStorage, setStorage } from "./itemsStore";
+import { isChallengePage } from "../../shared/bandcampChallenge";
 
 // ---------------------------------------------------------------------------
 // Tag vocabulary helpers
@@ -205,7 +208,8 @@ async function handleAppBridge(op, payload, sender) {
         credentials: payload.credentials === "include" ? "include" : "omit",
       });
       if (res.url && !isBandcampUrl(res.url)) throw new Error("redirected away from bandcamp.com");
-      return { status: res.status, text: res.ok ? await res.text() : "" };
+      const text = await res.text();
+      return { status: res.status, text: res.ok ? text : "", challenge: isChallengePage(text) };
     }
     case "refreshOwnership":
       return refreshOwnership();
@@ -342,6 +346,28 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
     handleAppBridge(request.op, request.payload || {}, sender).then(
       (result) => sendResponse({ ok: true, result }),
       (e) => sendResponse({ ok: false, error: (e && e.message) || String(e) })
+    );
+    return true;
+  }
+
+  // From the content script: imports waiting for a Bandcamp page, and linking
+  // the page's item to one of their rows.
+  if (request.type === "importRows") {
+    openImportRows().then(
+      (rows) => sendResponse({ ok: true, rows }),
+      (e) => sendResponse({ ok: false, error: e.message })
+    );
+    return true;
+  }
+  if (request.type === "linkImportRow") {
+    const item = request.item || {};
+    if (!/^[at]\d+$/.test(String(item.id || ""))) {
+      sendResponse({ ok: false, error: "not a Bandcamp track or album" });
+      return false;
+    }
+    linkImportRow(request.batch_id, request.n, item).then(
+      (row) => sendResponse({ ok: true, row }),
+      (e) => sendResponse({ ok: false, error: e.message })
     );
     return true;
   }

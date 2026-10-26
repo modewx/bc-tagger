@@ -155,14 +155,22 @@ button.chip:hover { filter: brightness(0.95); border-color: #bbb; }
 .import-process { font-size: 12px; color: #777; flex-basis: 100%; }
 #collectionTable .col-sel { width: 30px; text-align: center; }
 #collectionTable .col-match { width: 112px; }
-#collectionTable .col-notes { width: 64px; }
+#collectionTable .col-notes { width: 96px; }
+#collectionTable .col-release { width: 150px; }
+.release-title { font-size: 13px; }
+.release-meta { font-size: 11px; color: #777; }
+.confirm-chip { background: #ffe8cc; color: #9a4a00; font-weight: 600; margin: 0 4px 2px 0; padding: 1px 6px; }
+#collectionTable tr.row-confirm td:first-child { box-shadow: inset 4px 0 0 #e8590c; }
+.import-show-label { font-size: 13px; color: #444; }
+.import-pending { flex-basis: 100%; font-size: 12px; color: #8a5a00; }
+.import-pending[hidden] { display: none; }
 #collectionTable tr.row-missing { background: #fdecec; }
 #collectionTable tr.row-duplicate { background: #fff8dc; }
 #collectionTable tr.row-missing.playing-row, #collectionTable tr.row-duplicate.playing-row { background: #eaf1ff; }
 .match-bc { background: #e6f4f8; color: #136b82; }
 .match-none { background: transparent; color: #999; border-color: #e3e3e3; }
 .match-cand { background: #fff4d6; color: #8a5a00; }
-.match-cell .find-bc { display: block; margin: 3px 0 0; font-size: 11px; }
+.match-cell .open-bc { display: block; margin: 3px 0 0; font-size: 11px; }
 .pop-url { border-top: 1px solid #eee; margin-top: 8px; padding-top: 6px; }
 .pop-label { font-size: 12px; font-weight: 600; color: #444; }
 .pop-err { color: #b42318; }

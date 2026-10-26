@@ -134,7 +134,7 @@ export class HttpDataSource {
       url,
       credentials: (opts && opts.credentials) || "omit",
     });
-    return { ok: r.status >= 200 && r.status < 300, status: r.status, text: async () => r.text };
+    return { ok: r.status >= 200 && r.status < 300, status: r.status, challenge: !!r.challenge, text: async () => r.text };
   }
 
   // Vocabulary changes arrive from the extension (instantly) and from the

@@ -1,5 +1,6 @@
 'use strict';
 const cheerio = require('cheerio');
+const { setupImportLinks } = require('./importLink');
 
 // Content script file will run in the context of web page.
 // With content script you can manipulate the web pages using
@@ -602,6 +603,7 @@ function createTagButton(taggedItems, element, itemUrl, trackdata) {
   //   event.stopPropagation();
   //   dropdownMenu.classList.toggle("visible");
   // });
+  return container;
 }
 
 function extractAlbumData(tralbum) {
@@ -750,6 +752,7 @@ getTaggedItems((taggedItems) => {
 
 
 
+  const linkTargets = [];
   allElements.forEach((element, index) => {
     var aElement = element.querySelector(".title a");
     let itemUrl = "";
@@ -839,8 +842,11 @@ getTaggedItems((taggedItems) => {
       //   // $($.parseHTML(data)).appendTo('body');
       // });
     }
-    createTagButton(taggedItems, element, itemId, trackdata);
+    const container = createTagButton(taggedItems, element, itemId, trackdata);
+    if (albumPage || trackPage) linkTargets.push({ container, item: trackdata });
   });
+  // Imports waiting for a Bandcamp page can be linked to this one.
+  setupImportLinks(linkTargets).catch((e) => console.warn("[bc-tagger] import links", e));
 });
 
 function updateDropdownMenu() {

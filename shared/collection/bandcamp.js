@@ -10,6 +10,8 @@
 // network call, and we can rebuild a fresh one by fetching the Bandcamp page.
 // ---------------------------------------------------------------------------
 
+import { ChallengeError, isChallengePage } from "../bandcampChallenge";
+
 export function streamUrlOf(item) {
   return item && item.file && item.file["mp3-128"] ? item.file["mp3-128"] : null;
 }
@@ -180,12 +182,15 @@ export function splitArtistFromTitle(title) {
 // ---------------------------------------------------------------------------
 // Page fetching
 //
-// `fetchFn(url, opts)` must resolve to a Response-like {ok, status, text()}.
+// `fetchFn(url, opts)` must resolve to a Response-like {ok, status, text()}
+// (plus `challenge: true` when the extension saw Bandcamp's bot check).
 // The extension passes window.fetch (it has host_permissions for bandcamp);
 // the local app passes a fetch that goes through the extension bridge.
+// The first bot-check page ("Client Challenge") stops all fetching through
+// this fetcher (onChallenge(url) tells the page once); nothing retries it.
 // ---------------------------------------------------------------------------
 
-export function createBandcampFetcher(fetchFn) {
+export function createBandcampFetcher(fetchFn, { onChallenge } = {}) {
   // --- Global throttle ------------------------------------------------------
   // Bandcamp returns HTTP 429 when hit too fast, so ALL page fetches go through
   // one small queue: few at a time, spaced out, and when a 429 lands everything
@@ -195,6 +200,15 @@ export function createBandcampFetcher(fetchFn) {
   let activeFetches = 0;
   const fetchQueue = [];
   let pausedUntil = 0;
+  let challengedUrl = null;
+
+  function challenged(url) {
+    if (!challengedUrl) {
+      challengedUrl = url;
+      if (onChallenge) onChallenge(url);
+    }
+    return new ChallengeError(challengedUrl);
+  }
 
   function pumpFetches() {
     while (activeFetches < MAX_CONCURRENT && fetchQueue.length) {
@@ -219,6 +233,7 @@ export function createBandcampFetcher(fetchFn) {
     return schedule(async () => {
       for (let attempt = 0; attempt < 4; attempt++) {
         while (Date.now() < pausedUntil) await sleep(pausedUntil - Date.now() + 50);
+        if (challengedUrl) throw new ChallengeError(challengedUrl);
         let res;
         try {
           res = await fetchFn(url, opts);
@@ -227,13 +242,18 @@ export function createBandcampFetcher(fetchFn) {
           await sleep(800 * (attempt + 1));
           continue;
         }
+        if (res.challenge) throw challenged(url);
         if (res.status === 429) {
           pausedUntil = Date.now() + 15000; // back everything off
           if (attempt === 3) throw new Error("HTTP 429");
           continue;
         }
-        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        if (!res.ok) {
+          if (isChallengePage(await res.text().catch(() => ""))) throw challenged(url);
+          throw new Error(`HTTP ${res.status}`);
+        }
         const html = await res.text();
+        if (isChallengePage(html)) throw challenged(url);
         return new DOMParser().parseFromString(html, "text/html");
       }
     });
@@ -337,5 +357,12 @@ export function createBandcampFetcher(fetchFn) {
       .catch(() => null);
   }
 
-  return { fetchFreshStream, resolveAlbumDoc, resolveItemArt, resolveTrackTralbum, resolveTrackPlayerData };
+  return {
+    fetchFreshStream,
+    resolveAlbumDoc,
+    resolveItemArt,
+    resolveTrackTralbum,
+    resolveTrackPlayerData,
+    challengedUrl: () => challengedUrl,
+  };
 }

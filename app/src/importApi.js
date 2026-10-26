@@ -4,16 +4,20 @@
 //
 // Batch: {id, status, committed, error, source, created_at, job_id, stats,
 //         unknownTags: {tag: [suggested]}, newTags, defaultTags, rows: [Row]}
-// Row:   {n, line, raw, kind, artist, title, album, label, catalog, year, tags, flags, note, checked,
+// Row:   {n, line, raw, kind, artist, title, album, album_artist, track_num, position, duration, year,
+//         label, catalog, expanded_from, tags, flags, note, checked, needsConfirmation,
 //         source: "bandcamp" | "other", duplicate: null | {of, source, title, artist, tags},
 //         match: {status, source, confidence, query, url, chosen, candidates}, item (tagger item or null),
-//         local, links: {discogs, youtube}, committed}
+//         hints: {bandcamp, discogs} (links from the file or a metadata lookup), local,
+//         links: {discogs, youtube}, committed}
+// Batch.pendingReleases: [{line, artist, release, tags, reason}] (not importable yet)
 
 import { apiJson } from "../../shared/datasource/HttpDataSource";
 
 const enc = encodeURIComponent;
 
-function normDuplicate(d) {
+function normDuplicate(d, r) {
+  if (!d && r.existing_id) d = { of: r.existing_id, source: /^o/.test(r.existing_id) ? "other" : "bandcamp", tags: r.existing_tags };
   if (!d) return null;
   if (typeof d === "string") return { of: d, source: null, title: null, artist: null, tags: [] };
   return { of: d.of || d.id || null, source: d.source || null, title: d.title || null, artist: d.artist || null, tags: d.tags || [] };
@@ -30,6 +34,11 @@ function normRow(r, i) {
     artist: r.artist ?? null,
     title: r.title || "",
     album: r.album ?? null,
+    album_artist: r.album_artist ?? null,
+    track_num: r.track_num ?? null,
+    position: r.position ?? null,
+    duration: r.duration ?? null,
+    expanded_from: r.expanded_from ?? null,
     label: r.label ?? null,
     catalog: r.catalog ?? null,
     year: r.year ?? null,
@@ -38,7 +47,8 @@ function normRow(r, i) {
     note: r.note || null,
     checked: r.checked !== false,
     source: r.source || (chosen || r.item || match.item ? "bandcamp" : "other"),
-    duplicate: normDuplicate(r.duplicate || r.duplicate_of),
+    duplicate: normDuplicate(r.duplicate || r.duplicate_of, r),
+    needsConfirmation: (Array.isArray(r.flags) ? r.flags : []).includes("needs_user_confirmation"),
     match: {
       status: match.status || null,
       source: match.source || null,
@@ -47,10 +57,15 @@ function normRow(r, i) {
       url: match.url || match.match_url || null,
       chosen,
       candidates: Array.isArray(match.candidates) ? match.candidates : [],
+      item: match.item || null,
     },
     item: match.item || r.item || null,
     local: r.located || r.local || null,
     links: r.links || {},
+    hints: {
+      bandcamp: (r.hints && r.hints.bandcamp_url) || r.bandcamp_url || (r.links && r.links.bandcamp) || null,
+      discogs: (r.hints && r.hints.discogs_url) || r.discogs_url || null,
+    },
     committed: r.committed || null,
   };
 }
@@ -71,6 +86,7 @@ export function normBatch(b) {
     unknownTags: b.unknown_tags || {},
     newTags: b.new_tags || [],
     defaultTags: b.default_tags || [],
+    pendingReleases: Array.isArray(b.pending_releases) ? b.pending_releases : [],
     rows,
   };
 }
@@ -93,7 +109,7 @@ export function matchSource(row) {
   const m = row.match;
   if (m.source) return m.source;
   if (row.duplicate && row.duplicate.source !== "other" && row.source === "bandcamp") return "collection";
-  if (m.status === "manual") return m.url ? "url" : "picked";
+  if (m.status === "manual") return m.url ? "url" : m.item && !m.candidates.length ? "linked" : "picked";
   if (m.status === "accepted") return "search";
   if (m.status === "candidates") return "candidates";
   if (m.status === "error") return "error";
@@ -104,6 +120,12 @@ export function matchSource(row) {
 export function bandcampSearchUrl(row) {
   const q = [row.artist, row.kind === "album" ? row.album || row.title : row.title].filter(Boolean).join(" ");
   return `https://bandcamp.com/search?q=${enc(q)}&item_type=${row.kind === "album" ? "a" : "t"}`;
+}
+
+// "Open on Bandcamp": the row's link hint (file or metadata lookup) when it
+// has one, else Bandcamp's search.
+export function openOnBandcampUrl(row) {
+  return cleanBandcampUrl(row.hints.bandcamp) || bandcampSearchUrl(row);
 }
 
 // A pasted Bandcamp track/album page URL (artist.bandcamp.com or a label's

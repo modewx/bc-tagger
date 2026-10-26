@@ -1,8 +1,9 @@
 // Import preview (/import/?batch=<id>): the batch's rows in the shared
-// collection table, with a checkbox per row, the Bandcamp match (where it came
-// from, its alternatives, Find on Bandcamp, a pasted URL), located state,
-// flags/notes, editable tags (kept in the batch), tints (not located: light
-// red; duplicate: cream yellow) and "Import selected".
+// collection table, with a checkbox per row, the release (album, position,
+// track number), the Bandcamp match (where it came from, alternatives, Open on
+// Bandcamp, a pasted URL), located state, flags/notes (rows to confirm stand
+// out), editable tags (kept in the batch), tints (not located: light red;
+// duplicate: cream yellow), a Show filter and "Import selected".
 
 import { createCollectionPage } from "../../shared/collection/collectionPage";
 import { HttpDataSource, apiJson } from "../../shared/datasource/HttpDataSource";
@@ -12,7 +13,7 @@ import { Jobs, progressText } from "./jobs";
 import { buildNav } from "./nav";
 import { sourceColumn, localPlayUrl } from "./columns";
 import { openPopover, closePopover } from "./popover";
-import { getBatch, updateRow, commitBatch, discardBatch, rowToItem, matchSource, bandcampSearchUrl, cleanBandcampUrl } from "./importApi";
+import { getBatch, updateRow, commitBatch, discardBatch, rowToItem, matchSource, bandcampSearchUrl, openOnBandcampUrl, cleanBandcampUrl } from "./importApi";
 import { statsLine } from "./importTab";
 import { playableItem } from "./statusFilter";
 
@@ -89,13 +90,36 @@ const ds = new ImportDataSource({ bridge, events });
 const info = el("div", "import-info");
 const title = el("h1", "import-title", "Import preview");
 const stats = el("div", "import-stats");
+const pending = el("div", "import-pending");
 const proc = el("div", "import-process");
-info.append(title, stats, proc);
+
+// Show: narrow the rows to what needs a look.
+const SHOW = [
+  ["all", "All rows", () => true],
+  ["confirm", "To confirm", (r) => r.needsConfirmation],
+  ["unmatched", "No Bandcamp match", (r) => r.source !== "bandcamp"],
+  ["duplicates", "Already in the collection", (r) => !!r.duplicate],
+  ["missing", "Not located", (r) => !(r.local && r.local.status === "located")],
+  ["flagged", "Flagged", (r) => r.flags.length > 0 || !!r.note],
+];
+const showSel = el("select", "import-show");
+showSel.id = "importShow";
+SHOW.forEach(([v, label]) => showSel.appendChild(new Option(label, v)));
+const showLabel = el("label", "import-show-label", "Show ");
+showLabel.appendChild(showSel);
+info.append(title, stats, showLabel, pending, proc);
+const showFilter = (item) => (SHOW.find(([v]) => v === showSel.value) || SHOW[0])[2](rowNow(item));
 
 function renderInfo() {
   if (!batch) return;
   title.textContent = `Import preview · ${batch.source || batch.id}`;
-  stats.textContent = statsLine(batch.stats);
+  const confirmN = batch.rows.filter((r) => r.needsConfirmation).length;
+  stats.textContent = [statsLine(batch.stats), confirmN ? `${confirmN} to confirm` : ""].filter(Boolean).join(" · ");
+  const pr = batch.pendingReleases;
+  pending.hidden = !pr.length;
+  pending.textContent = pr.length ? `${pr.length} release${pr.length > 1 ? "s" : ""} not importable yet (no tracklist): ` : "";
+  pending.title = pr.map((p) => `Line ${p.line}: ${[p.artist, p.release].filter(Boolean).join(" – ")}${p.reason ? ` (${p.reason})` : ""}`).join("\n");
+  if (pr.length) pending.append(pr.map((p) => [p.artist, p.release].filter(Boolean).join(" – ")).join("; "));
   const checked = batch.rows.filter((r) => r.checked).length;
   const btn = document.getElementById("importSelected");
   if (btn) {
@@ -109,7 +133,7 @@ function renderInfo() {
     : batch.status && !/done|ready|resolved|complete/.test(batch.status)
     ? `Processing: ${batch.status}`
     : "Review the rows, fix matches and tags, then Import selected. Rows matched on Bandcamp are added to the tagger; " +
-      "the rest to Other. To match a row, open its Match: Find on Bandcamp, then paste the page's URL.";
+      "the rest to Other. To match a row: Open on Bandcamp, then link the page (the tagger's button on it) or paste its URL in Match.";
 }
 
 // --- columns ---------------------------------------------------------------------
@@ -197,18 +221,24 @@ const SOURCES = {
   picked: ["picked", "match-bc", "Picked by you from the search results."],
   url: ["URL", "match-bc", "Set by you from a pasted Bandcamp URL."],
   file: ["from file", "match-bc", "The Bandcamp URL given in the import file."],
+  linked: ["linked", "match-bc", "Linked by you on its Bandcamp page (the tagger's “Link to import” button)."],
   candidates: ["options", "match-cand", "The search found possible matches: pick one."],
   error: ["lookup failed", "match-none", "The Bandcamp lookup failed for this row."],
-  none: ["unmatched", "match-none", "No Bandcamp match yet: Find on Bandcamp, then paste the page's URL."],
+  none: ["unmatched", "match-none", "No Bandcamp match yet: Open on Bandcamp, then link the page with the tagger's button on it, or paste its URL here."],
 };
 const sourceInfo = (row) => SOURCES[matchSource(row)] || [matchSource(row), "match-bc", `Match source: ${matchSource(row)}.`];
 
-function findLink(row, text) {
-  const a = el("a", "pop-link find-bc", text || "Find on Bandcamp ↗");
-  a.href = bandcampSearchUrl(row);
+// "Open on Bandcamp" in a normal tab: the row's link hint, else a search.
+function openLink(row, text, url) {
+  const href = url || openOnBandcampUrl(row);
+  const a = el("a", "pop-link open-bc", text || "Open on Bandcamp ↗");
+  a.href = href;
   a.target = "_blank";
   a.rel = "noopener";
-  a.title = `Search Bandcamp for “${[row.artist, row.title].filter(Boolean).join(" ")}” in a new tab`;
+  a.title =
+    href === bandcampSearchUrl(row)
+      ? `Search Bandcamp for “${[row.artist, row.title].filter(Boolean).join(" ")}” in a new tab`
+      : `Open the link from the import (${href}) in a new tab`;
   return a;
 }
 
@@ -273,7 +303,9 @@ function matchPopover(anchor, row) {
     });
     pop.appendChild(urlForm(row));
     const foot = el("div", "pop-actions");
-    foot.appendChild(findLink(row));
+    const hint = cleanBandcampUrl(row.hints.bandcamp);
+    if (hint) foot.appendChild(openLink(row, "Open the import's link ↗", hint));
+    foot.appendChild(openLink(row, "Search Bandcamp ↗", bandcampSearchUrl(row)));
     if (row.source === "bandcamp") {
       const none = el("button", "danger", "Not on Bandcamp");
       none.title = "Import this row into Other instead";
@@ -295,7 +327,7 @@ function matchPopover(anchor, row) {
       save.addEventListener("click", () => patchRow(row, { artist: a.value.trim() || null, title: t.value.trim() }));
       const actions = el("div", "pop-actions");
       actions.appendChild(save);
-      pop.append(a, t, el("div", "pop-meta", "Used for the row and for Find on Bandcamp."), actions);
+      pop.append(a, t, el("div", "pop-meta", "Used for the row and for Open on Bandcamp."), actions);
       t.focus();
     });
     foot.appendChild(edit);
@@ -303,11 +335,40 @@ function matchPopover(anchor, row) {
   });
 }
 
+// Album, vinyl position and track number (rows are single tracks; a whole
+// release was expanded into its tracks).
+function releaseColumn() {
+  const albumOf = (item) => String(rowOf(item).album || "");
+  return {
+    id: "release",
+    label: "Release",
+    after: "artist",
+    sortKey: "release",
+    compare: (a, b) => albumOf(a).localeCompare(albumOf(b)) || (rowOf(a).track_num ?? 0) - (rowOf(b).track_num ?? 0),
+    render(cell, key, item) {
+      cell.classList.add("release-cell");
+      const row = rowOf(item);
+      if (row.album) cell.appendChild(el("div", "release-title", row.album));
+      const pos = [row.position, row.track_num != null ? `track ${row.track_num}` : null].filter(Boolean).join(" · ");
+      const meta = [pos, row.year, row.label].filter(Boolean).join(" · ");
+      if (meta) cell.appendChild(el("div", "release-meta", meta));
+      cell.title = [
+        row.album_artist && `Album artist: ${row.album_artist}`,
+        row.catalog && `Catalog: ${row.catalog}`,
+        row.duration && `Duration: ${row.duration}`,
+        row.expanded_from != null && `From the release on line ${row.expanded_from}`,
+      ]
+        .filter(Boolean)
+        .join("\n");
+    },
+  };
+}
+
 function matchColumn() {
   return {
     id: "match",
     label: "Match",
-    after: "artist",
+    after: "release",
     sortKey: "match",
     compare: (a, b) => matchSource(rowOf(a)).localeCompare(matchSource(rowOf(b))) || (rowOf(a).match.confidence ?? -1) - (rowOf(b).match.confidence ?? -1),
     render(cell, key, item) {
@@ -322,7 +383,7 @@ function matchColumn() {
       chip.title = (row.match.chosen ? candidateLabel(row.match.chosen) + "\n" : "") + sourceInfo(row)[2];
       chip.addEventListener("click", () => matchPopover(chip, rowNow(item)));
       cell.appendChild(chip);
-      if (row.source !== "bandcamp") cell.appendChild(findLink(row, "Find ↗"));
+      if (row.source !== "bandcamp") cell.appendChild(openLink(row, cleanBandcampUrl(row.hints.bandcamp) ? "Open link ↗" : "Search ↗"));
     },
   };
 }
@@ -360,6 +421,11 @@ function notesColumn() {
         const d = el("span", "note-icon dup-icon", "⧉");
         d.title = `Already in your collection (${[dup.title, dup.artist].filter(Boolean).join(" — ") || dup.of}): its tags will be merged.`;
         cell.appendChild(d);
+      }
+      if (row.needsConfirmation) {
+        const c = el("span", "chip confirm-chip", "confirm");
+        c.title = `Needs your confirmation: the reading and the files disagree.${row.note ? `\n${row.note}` : ""}`;
+        cell.appendChild(c);
       }
       if (row.flags.length || row.note) {
         const f = el("span", "note-icon flag-icon", "⚑");
@@ -426,7 +492,10 @@ async function discard(statusEl) {
     topBarStart: top,
     colWidthKey: "bc_import_col_widths_v2",
     baseToolbar: false,
-    extraColumns: [selectColumn(), sourceColumn(), matchColumn(), locatedColumn(), notesColumn()],
+    hideColumns: ["date"], // nothing is added yet
+    extraColumns: [selectColumn(), { ...sourceColumn(), after: "index" }, releaseColumn(), matchColumn(), locatedColumn(), notesColumn()],
+    filterItem: showFilter,
+    clearExtraFilters: () => (showSel.value = "all"),
     extraToolbarButtons: [
       { id: "importSelected", label: "Import selected", className: "job-btn", run: importSelected },
       { id: "discardImport", label: "Discard", run: discard },
@@ -436,11 +505,12 @@ async function discard(statusEl) {
     rowClass: (item) => {
       const row = rowOf(item);
       if (!row) return "";
-      if (row.duplicate) return "row-duplicate";
-      return item.local && item.local.status === "located" ? "" : "row-missing";
+      const tint = row.duplicate ? "row-duplicate" : item.local && item.local.status === "located" ? "" : "row-missing";
+      return [tint, row.needsConfirmation ? "row-confirm" : ""].filter(Boolean).join(" ");
     },
     titleUrl: (item) => (item.source === "other" ? null : item.url || item.item_url || null),
   });
+  showSel.addEventListener("change", () => page.refilter());
   const table = document.getElementById("collectionTable");
   const scroller = el("div");
   scroller.id = "tableScroll";

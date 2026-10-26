@@ -1,9 +1,10 @@
 // A stand-in for the server's import API (Phase 3, shapes as documented by
 // Session A in LOCAL_COLLECTION_PLAN.md), served with page.route() so the
-// import UI can be tested before the server implements it. Bandcamp lookup is
-// paused: rows match only when already in the collection (existing_id) or
-// given a URL (the file's bandcamp_url or a pasted one); one row has search
-// candidates to exercise picking.
+// import UI can be tested before the server implements it. There's no
+// Bandcamp lookup: rows match only when already in the collection
+// (existing_id) or when the user links a page or pastes a URL; the file's
+// bandcamp_url is a hint (hints.bandcamp_url). One row has candidates (as a
+// metadata lookup might give) to exercise picking.
 
 export function importStub(file, { located = [] } = {}) {
   const calls = [];
@@ -18,11 +19,7 @@ export function importStub(file, { located = [] } = {}) {
             { id: "t7000000002", type: "track", title: "Maybe Track (Dub)", artist: "Two Options", album: null, url: "https://twooptions.bandcamp.com/track/maybe-track-dub", confidence: 0.41 },
           ]
         : [];
-    const chosen = it.existing_id
-      ? { id: it.existing_id, type: "track", title: it.title, artist: it.artist, url: null, confidence: 1 }
-      : it.bandcamp_url
-      ? { id: null, type: /\/album\//.test(it.bandcamp_url) ? "album" : "track", title: it.title, artist: it.artist, url: it.bandcamp_url, confidence: null }
-      : null;
+    const chosen = it.existing_id ? { id: it.existing_id, type: "track", title: it.title, artist: it.artist, url: null, confidence: 1 } : null;
     return {
       n,
       line: it.line,
@@ -31,6 +28,9 @@ export function importStub(file, { located = [] } = {}) {
       artist: it.artist ?? null,
       title: it.title,
       album: it.album ?? null,
+      album_artist: it.album_artist ?? null,
+      track_num: it.track_num ?? null,
+      position: it.position ?? null,
       label: null,
       catalog: null,
       year: null,
@@ -40,16 +40,17 @@ export function importStub(file, { located = [] } = {}) {
       checked: true,
       source: chosen ? "bandcamp" : "other",
       match: {
-        status: it.existing_id ? "accepted" : it.bandcamp_url ? "manual" : cands.length ? "candidates" : "none",
-        source: it.existing_id ? "collection" : it.bandcamp_url ? "file" : cands.length ? "candidates" : "none",
+        status: it.existing_id ? "accepted" : cands.length ? "candidates" : "none",
+        source: it.existing_id ? "collection" : cands.length ? "candidates" : "none",
         confidence: chosen ? chosen.confidence : null,
         query: [it.artist, it.title].filter(Boolean).join(" "),
-        url: it.bandcamp_url || null,
+        url: null,
         chosen,
         candidates: cands,
         item: it.existing_id ? { id: it.existing_id, title: it.title, artist: it.artist, tralbum_type: "t" } : null,
       },
-      duplicate: it.existing_id ? { of: it.existing_id, source: "bandcamp", title: it.title, artist: it.artist, tags: ["must"] } : null,
+      duplicate: it.existing_id ? { of: it.existing_id, source: "bandcamp", title: it.title, artist: it.artist, tags: it.existing_tags || [] } : null,
+      hints: { bandcamp_url: it.bandcamp_url || null, discogs_url: it.discogs_url || null },
       located: located.includes(it.line) ? { status: "located", best: { path: `/e2e/${it.title}.aiff`, format: "aiff" }, candidates: [] } : { status: "missing", best: null, candidates: [] },
       links: { discogs: null, youtube: null },
       committed: null,
@@ -76,6 +77,7 @@ export function importStub(file, { located = [] } = {}) {
     stats: stats(),
     unknown_tags: unknown,
     new_tags: [],
+    pending_releases: file.pending_releases || [],
     rows,
   });
   const json = (route, body, status = 200) => route.fulfill({ status, contentType: "application/json", body: JSON.stringify(body) });

@@ -75,6 +75,7 @@ const SHELL_HTML = `
  * @param {boolean}  [opts.baseToolbar]     false hides the Bandcamp tools (refresh players, ...)
  * @param {function} [opts.rowClass]        (item, key) -> extra class names for the row
  * @param {function} [opts.titleUrl]        (item) -> link for the title, instead of its Bandcamp page
+ * @param {string[]} [opts.hideColumns]     ids of base columns to leave out (e.g. "date")
  * @param {function} [opts.playable]        (item) -> false: nothing to play (no Bandcamp page, no local file)
  *
  * Columns may also have headerRender(th) to fill their header themselves, and
@@ -84,7 +85,7 @@ export function createCollectionPage(opts) {
   const ds = opts.dataSource;
   const mount = opts.mount || document.body;
   const colWidthKey = opts.colWidthKey || "bc_collection_col_widths_by_id";
-  const bc = createBandcampFetcher((url, o) => ds.fetchPage(url, o));
+  const bc = createBandcampFetcher((url, o) => ds.fetchPage(url, o), { onChallenge: (url) => showChallenge(url) });
   const { fetchFreshStream, resolveAlbumDoc, resolveItemArt, resolveTrackTralbum, resolveTrackPlayerData } = bc;
 
   // --- Shell -----------------------------------------------------------------
@@ -397,6 +398,32 @@ export function createCollectionPage(opts) {
     }
     row.scrollIntoView({ behavior: "smooth", block: "center" });
   }
+
+  // Bandcamp showed its bot check to a fetch: all fetching from Bandcamp has
+  // stopped on this page. Say so, with the page, and never retry it.
+  function showChallenge(url) {
+    let box = document.getElementById("bcChallenge");
+    if (!box) {
+      box = document.createElement("div");
+      box.id = "bcChallenge";
+      box.className = "challenge-banner";
+      document.getElementById("topBar").appendChild(box);
+    }
+    const link = document.createElement("a");
+    link.href = url;
+    link.target = "_blank";
+    link.rel = "noopener";
+    link.textContent = "the page it showed it for";
+    box.replaceChildren(
+      "Bandcamp is showing its bot check (“Client Challenge”), so this page stopped fetching from Bandcamp. See ",
+      link,
+      ". Reload this page to try again later."
+    );
+    const status = document.getElementById("refreshStatus");
+    if (status) status.textContent = "Stopped: Bandcamp bot check.";
+  }
+
+  const stoppedNote = () => (bc.challengedUrl() ? " Stopped early: Bandcamp's bot check." : "");
 
   // ---------------------------------------------------------------------------
   // Thumbnails
@@ -724,7 +751,7 @@ export function createCollectionPage(opts) {
     { id: "tags", label: "Tags", sortKey: "tags", compare: cmpTags, render: renderTagsCell },
   ];
 
-  const columns = BASE_COLUMNS.slice();
+  const columns = BASE_COLUMNS.filter((c) => !(opts.hideColumns || []).includes(c.id));
   (opts.extraColumns || []).forEach((col) => {
     if (col.first) {
       columns.unshift(col);
@@ -879,7 +906,7 @@ export function createCollectionPage(opts) {
       await ds.persistFiles(filesToPersist);
     }
     if (statusEl) {
-      statusEl.textContent = `Refreshed ${updated} of ${tracks.length} tracks.`;
+      statusEl.textContent = `Refreshed ${updated} of ${tracks.length} tracks.${stoppedNote()}`;
     }
     if (button) button.disabled = false;
     renderCollectionTable(allItems);
@@ -922,7 +949,7 @@ export function createCollectionPage(opts) {
     console.log(`[thumbnails] checked=${targets.length} set=${updated} (per-URL failures logged above as "[art] failed ...")`);
 
     if (statusEl) {
-      statusEl.textContent = `Thumbnails: set ${updated} of ${targets.length} (any failures in console).`;
+      statusEl.textContent = `Thumbnails: set ${updated} of ${targets.length} (any failures in console).${stoppedNote()}`;
     }
     if (button) button.disabled = false;
     renderCollectionTable(allItems);
@@ -1005,7 +1032,7 @@ export function createCollectionPage(opts) {
     );
     await flush();
 
-    if (statusEl) statusEl.textContent = `Fixed ${fixed} artists.`;
+    if (statusEl) statusEl.textContent = `Fixed ${fixed} artists.${stoppedNote()}`;
     if (button) button.disabled = false;
     renderCollectionTable(currentView);
   }
@@ -1079,7 +1106,9 @@ export function createCollectionPage(opts) {
     await flush();
 
     const missed = targets.length - fixed - singles;
-    if (statusEl) {
+    if (statusEl && bc.challengedUrl()) {
+      statusEl.textContent = `Album IDs: stopped by Bandcamp's bot check (${fixed} fixed, ${singles} singles before that).`;
+    } else if (statusEl) {
       statusEl.textContent =
         `Album IDs: ${fixed} fixed, ${singles} singles` +
         (viaPlayer ? ` (${viaPlayer} from the embedded player)` : "") +

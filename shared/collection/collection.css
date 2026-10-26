@@ -125,3 +125,14 @@ audio { width: 100%; height: 36px; vertical-align: middle; }
 /* Local app: a tag edit queued on the server (extension not reachable). */
 .tag-editor-wrap.tags-pending .chosen-choices { border-color: #e0a800; background: #fff8e1; }
 .tag-editor-wrap.tags-error .chosen-choices { border-color: #d9534f; background: #fdecea; }
+/* Bandcamp's bot check stopped fetching on this page. */
+.challenge-banner {
+  flex-basis: 100%;
+  margin: 6px 0 0;
+  padding: 7px 10px;
+  border: 1px solid #e5a5a0;
+  border-radius: 5px;
+  background: #fdecec;
+  color: #7a1d14;
+  font-size: 13px;
+}
