@@ -17,7 +17,7 @@ import threading
 import time
 from datetime import datetime
 from email.utils import parsedate_to_datetime
-from typing import Any
+from typing import Any, Callable
 from urllib.parse import urlencode, urljoin, urlsplit
 
 from pathlib import Path
@@ -81,10 +81,11 @@ class Fetcher:
     _last: dict[str, float] = {}
     _guard = threading.Lock()
 
-    def __init__(self, store: Store, user_agent: str, min_interval: float = 1.0, offline: bool = False,
-                 transport: httpx.BaseTransport | None = None, fixtures: dict[str, tuple[int, str]] | None = None):
+    def __init__(self, store: Store, user_agent: str, min_interval: float | Callable[[], float] = 1.0,
+                 offline: bool = False, transport: httpx.BaseTransport | None = None,
+                 fixtures: dict[str, tuple[int, str]] | None = None):
         self.store = store
-        self.min_interval = min_interval
+        self._interval = min_interval  # a number, or read before every request (a live setting)
         self.offline = offline or fixtures is not None
         self.fixtures = fixtures
         self.sleep = time.sleep  # tests replace it
@@ -94,6 +95,10 @@ class Fetcher:
             follow_redirects=False, transport=transport,
         )
         self.network_requests = 0
+
+    @property
+    def min_interval(self) -> float:
+        return float(self._interval() if callable(self._interval) else self._interval)
 
     @staticmethod
     def cache_key(method: str, url: str, body: Any = None) -> str:

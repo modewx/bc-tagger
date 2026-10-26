@@ -100,27 +100,22 @@ def test_resolve_readings():
     assert f.queries == ["Front 242 Controversy Between", "Controversy Between"]
 
 
-CLASSIC_HTML = """<ul class="result-items">
-<li class="searchresult data-search" data-search="{&quot;id&quot;:3244411361,&quot;type&quot;:&quot;t&quot;}">
-  <div class="result-info"><div class="itemtype">TRACK</div>
-  <div class="heading"><a href="https://gilbartemusic.bandcamp.com/track/elhwah?from=search">Elhwah</a></div>
-  <div class="subhead">from Claviceps Purpurea by Gil.Barte</div></div>
-</li></ul>"""
+def test_search_errors_say_what_happened():
+    class Site(FakeSite):
+        def __init__(self, status, body=""):
+            super().__init__({})
+            self.status, self.body = status, body
 
-
-def test_html_fallback_parser_and_bot_check():
-    hits = bandcamp.parse_html_search(CLASSIC_HTML, "t")
-    assert [(h.id, h.title, h.artist, h.album, h.url) for h in hits] == [
-        ("t3244411361", "Elhwah", "Gil.Barte", "Claviceps Purpurea", "https://gilbartemusic.bandcamp.com/track/elhwah")]
-
-    class BotCheck(FakeSite):
         def request(self, method, url, *, json_body=None, params=None):
-            if url == bandcamp.SEARCH_URL:
-                return 503, ""
-            return 200, "<html><script>challenge()</script></html>"  # the bot-check page
+            self.queries.append(url)
+            return self.status, self.body
 
-    with pytest.raises(Unavailable, match="bot-check"):
-        bandcamp.search(BotCheck({}), "x", "t")
+    for site, message in ((Site(599, "ConnectError: refused"), "unreachable"), (Site(503), "HTTP 503"),
+                          (Site(200, "<html>not json</html>"), "isn't its JSON")):
+        with pytest.raises(Unavailable, match=message) as e:
+            bandcamp.search(site, "x", "t")
+        assert not isinstance(e.value, bandcamp.Challenged) and "bot" not in str(e.value)
+        assert site.queries == [bandcamp.SEARCH_URL]  # no HTML-search fallback
 
 
 TRALBUM = {

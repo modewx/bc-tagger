@@ -255,17 +255,18 @@ without a filter, refuses more than 5 releases, and only downloads into `test-do
    tracklist), else searches Bandcamp's public autocomplete. The search answer (id, URL, names, art)
    is enough to import; the track page (`data-tralbum`) is only fetched by the optional
    `POST /api/import/<id>/details` job. Requests come from this server one at a time, every
-   `bandcamp_request_interval_s` seconds (default 2.5, never below 1), with the honest User-Agent
+   `bandcamp_request_interval_s` seconds (default 2.5, at least 0.5; read before every request), with the honest User-Agent
    `bc-tagger-dev/0.1 (…)`, and are cached for 30 days in `http_cache`. HTTP 429: `Retry-After` is
    honored, else it waits 30, 60, 120 s; still limited, the batch pauses ("Bandcamp is rate-limiting;
    try again later") until `POST /api/import/<id>/resume`. Bandcamp's bot check ("Client Challenge")
    stops the batch's lookups for good (and every batch's for an hour); it is never cached, retried or
-   worked around. `POST /api/import` answers with an estimate ("~120 lookups ≈ 5 min").
+   worked around. There is no HTML-search fallback (it only ever returns the bot check). `POST /api/import` answers with an estimate ("~120 lookups ≈ 5 min").
 3. quick-scans files added since the last full scan, then locates the row in the file index;
    `match_by_track_num` rows match by album + track number.
 
 `BC_TAGGER_BANDCAMP=off` turns Bandcamp requests off; `BC_TAGGER_BANDCAMP_FIXTURES=<file or dir>` serves
-recorded answers only (tests and e2e; `server/tests/fixtures/`).
+recorded answers only (tests and e2e; `server/tests/fixtures/`); `BC_TAGGER_BANDCAMP_OFFLINE=1` uses the
+server's own cache only.
 
 Rows below the threshold keep up to three candidates to pick (`PUT …/rows/<n> {choose}`). A row the
 search misses can be linked from the extension to the Bandcamp page the user has open

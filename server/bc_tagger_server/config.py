@@ -88,8 +88,11 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     "quick_scan_margin_days": 2,
     # Suggest a manual full rescan when the last one is older than this.
     "full_rescan_hint_days": 30,
-    # Imports: seconds between Bandcamp requests (one at a time; never below 1).
+    # Imports: seconds between the server's Bandcamp requests (one at a time; read before each one).
     "bandcamp_request_interval_s": 2.5,
+    # The browser side (extension / app shared code) reads these for its own Bandcamp fetches.
+    "bandcamp_browser_concurrency": 2,
+    "bandcamp_browser_spacing_ms": 400,
     # Seed for the items mirror until the extension pushes its own data.
     "seed_export_json": str(DEFAULT_EXPORT_JSON),
     # Where the built local app (Session B) lives; served at "/".
@@ -188,9 +191,17 @@ def _validate(merged: dict[str, Any]) -> dict[str, Any]:
         interval = float(out["bandcamp_request_interval_s"])
     except (TypeError, ValueError):
         raise SettingsError("bandcamp_request_interval_s must be a number") from None
-    if interval < 1:
-        raise SettingsError("bandcamp_request_interval_s must be at least 1 (one request per second at most)")
+    if interval < 0.5:
+        raise SettingsError("bandcamp_request_interval_s must be at least 0.5")
     out["bandcamp_request_interval_s"] = interval
+    for key, low, high in (("bandcamp_browser_concurrency", 1, 4), ("bandcamp_browser_spacing_ms", 100, None)):
+        try:
+            v = float(out[key])
+        except (TypeError, ValueError):
+            raise SettingsError(f"{key} must be a number") from None
+        if v != int(v) or v < low or (high is not None and v > high):
+            raise SettingsError(f"{key} must be a whole number " + (f"from {low} to {high}" if high else f"of at least {low}"))
+        out[key] = int(v)
     if out.get("rekordbox_target") not in ("test", "main"):
         raise SettingsError("rekordbox_target must be 'test' or 'main'")
     if not isinstance(out.get("allow_main_writes"), bool):
