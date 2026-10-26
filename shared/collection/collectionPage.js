@@ -194,6 +194,33 @@ export function createCollectionPage(opts) {
     return r.bottom > barH + 4 && r.top < (window.innerHeight || document.documentElement.clientHeight);
   }
 
+  // At the right of the Artist cell: copies "Artist Title" (to search for it
+  // elsewhere); green for a moment after.
+  const COPY_ICON =
+    '<svg viewBox="0 0 16 16" width="12" height="12" aria-hidden="true">' +
+    '<rect x="5" y="5" width="9" height="9" rx="1.5" fill="none" stroke="currentColor" stroke-width="1.5"/>' +
+    '<path d="M3 11V3a1 1 0 0 1 1-1h7" fill="none" stroke="currentColor" stroke-width="1.5"/></svg>';
+  function copyButton(item) {
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = "copy-btn no-row-play";
+    btn.title = "Copy artist and title";
+    btn.innerHTML = COPY_ICON;
+    btn.addEventListener("click", async (e) => {
+      e.stopPropagation();
+      const text = [item.artist, item.title].filter(Boolean).join(" ");
+      try {
+        await navigator.clipboard.writeText(text);
+        btn.classList.add("copied");
+        btn.title = `Copied: ${text}`;
+      } catch (err) {
+        btn.title = `Couldn't copy: ${(err && err.message) || err}`;
+      }
+      setTimeout(() => btn.classList.remove("copied"), 1200);
+    });
+    return btn;
+  }
+
   function playButton(label) {
     const btn = document.createElement("button");
     btn.className = "player-btn";
@@ -212,10 +239,10 @@ export function createCollectionPage(opts) {
     audio.addEventListener(
       "pointerenter",
       () => {
-        if (audio.preload !== "metadata") {
-          audio.preload = "metadata";
-          audio.load();
-        }
+        if (audio.preload === "metadata") return;
+        audio.preload = "metadata";
+        // Not once it has started (Play, a row click): load() would reset and stop it.
+        if (audio.paused && audio.readyState === HTMLMediaElement.HAVE_NOTHING) audio.load();
       },
       { once: true }
     );
@@ -776,7 +803,13 @@ export function createCollectionPage(opts) {
       sortKey: "artist",
       compare: cmpText("artist"),
       render: (cell, key, item) => {
-        cell.innerText = item.artist || "";
+        const wrap = document.createElement("div");
+        wrap.className = "artist-wrap";
+        const name = document.createElement("span");
+        name.className = "artist-name";
+        name.innerText = item.artist || "";
+        wrap.append(name, copyButton(item));
+        cell.appendChild(wrap);
       },
     },
     { id: "player", label: "Player", render: renderPlayerCell },

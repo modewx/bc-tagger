@@ -95,6 +95,12 @@ body { font-family: -apple-system, system-ui, sans-serif; margin: 0; }
   word-break: break-word;
 }
 .index-cell { font-size: 11px; color: #999; text-align: right; overflow: hidden; }
+/* Artist, with the copy button at the cell's right edge. */
+.artist-wrap { display: flex; align-items: flex-start; gap: 4px; }
+.artist-wrap .artist-name { flex: 1 1 auto; min-width: 0; }
+.copy-btn { flex: none; border: 0; background: none; padding: 2px; margin: -1px -2px 0 0; color: #b0b0b0; cursor: pointer; line-height: 0; }
+.copy-btn:hover { color: #3875d7; }
+.copy-btn.copied { color: #1f7a4d; }
 .date-cell { white-space: nowrap; font-size: 12px; color: #555; }
 .sort-arrow { color: #3875d7; }
 /* Drag handle on each header's right edge. */

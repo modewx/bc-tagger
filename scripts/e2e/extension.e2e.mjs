@@ -1029,6 +1029,56 @@ test("local app: re-clicking a row after item updates keeps one player in it", a
   await app.close();
 });
 
+test("player: hovering a track that is playing doesn't stop it (hover still loads a paused one); the Artist cell copies \"Artist Title\"", async () => {
+  const a = "t1002746421"; // Futuro Lontano by TSVI (durable stream link: an <audio> from the start)
+  const page = await context.newPage();
+  try {
+    await page.goto(extPage("collection.html"));
+    await page.waitForSelector(`tr[data-key="${a}"] audio`, { state: "attached" });
+    if (!(await page.isChecked("#globalModeToggle"))) await page.click("#globalModeToggle");
+    // A paused player: hovering loads its metadata, so the timeline can be scrubbed first.
+    const other = await page.evaluate((a) => {
+      const r = [...document.querySelectorAll("#collectionTable tbody tr")].find((tr) => tr.dataset.key !== a && tr.querySelector("td.player-cell audio"));
+      return r && r.dataset.key;
+    }, a);
+    if (other) {
+      await page.locator(`tr[data-key="${other}"] audio`).scrollIntoViewIfNeeded();
+      await page.hover(`tr[data-key="${other}"] audio`);
+      await page.waitForFunction((k) => document.querySelector(`tr[data-key="${k}"] audio`).readyState > 0, other, { timeout: 10000 });
+    }
+    // Play (a row click), then hover the player: it keeps playing (load() would reset it).
+    await page.$eval(`tr[data-key="${a}"] audio`, (au) => {
+      au.loop = true; // the stand-in stream is 1 s of silence
+      window.__audioEvents = [];
+      ["emptied", "abort", "pause"].forEach((t) => au.addEventListener(t, () => window.__audioEvents.push(t)));
+    });
+    await page.locator(`tr[data-key="${a}"]`).scrollIntoViewIfNeeded();
+    await page.click(`tr[data-key="${a}"] .col-date`);
+    await page.waitForFunction(() => [...document.querySelectorAll("audio")].some((au) => !au.paused && au.currentTime > 0), null, { timeout: 10000 });
+    const playing = await page.evaluateHandle(() => [...document.querySelectorAll("audio")].find((au) => !au.paused));
+    await playing.hover();
+    await page.waitForTimeout(600);
+    assert.equal(await playing.evaluate((au) => au.paused), false, "still playing after the hover");
+    assert.deepEqual(await page.evaluate(() => window.__audioEvents), [], "not reset or paused");
+    await page.evaluate(() => document.querySelectorAll("audio").forEach((au) => au.pause()));
+
+    // The copy button at the right of the Artist cell (the clipboard is stubbed: the real one stays as it is).
+    await page.evaluate(() => {
+      window.__copied = [];
+      navigator.clipboard.writeText = async (t) => window.__copied.push(t);
+    });
+    const cell = await page.$(`tr[data-key="${a}"] td.col-artist`);
+    const [btn, box] = [await cell.$(".copy-btn").then((b) => b.boundingBox()), await cell.boundingBox()];
+    assert.ok(box.x + box.width - (btn.x + btn.width) < 12, "at the cell's right edge");
+    assert.equal(await cell.$eval(".artist-name", (n) => n.textContent), "TSVI");
+    await page.click(`tr[data-key="${a}"] .copy-btn`);
+    assert.deepEqual(await page.evaluate(() => window.__copied), ["TSVI Futuro Lontano"]);
+    assert.equal(await page.evaluate(() => [...document.querySelectorAll("audio")].some((au) => !au.paused)), false, "copying doesn't play the row");
+  } finally {
+    await page.close();
+  }
+});
+
 test("extension page: re-clicking a row and switching tracks keeps one player per row", async () => {
   const a = "t1002746421"; // Futuro Lontano (durable stream link: an <audio> from the start)
   const page = await context.newPage();
