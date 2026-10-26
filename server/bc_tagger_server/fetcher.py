@@ -154,14 +154,17 @@ class Fetcher:
         host = urlsplit(url).netloc
         with Fetcher._guard:
             lock = Fetcher._locks.setdefault(host, threading.Lock())
-        with lock:  # at most one request per min_interval and host, across all fetchers
+        with lock:  # one request at a time per host, across all fetchers
+            # Start to start: min_interval after the previous request *started*, so the answer's
+            # latency isn't added on top (0.5 s really is ~2 requests/s).
             wait = Fetcher._last.get(host, 0.0) + self.min_interval - time.monotonic()
             if wait > 0:
                 self.sleep(wait)
+            started = time.monotonic()
             try:
                 return self.client.request(method, url, json=json_body)
             finally:
-                Fetcher._last[host] = time.monotonic()
+                Fetcher._last[host] = started
                 self.network_requests += 1
 
     def _fetch(self, method: str, url: str, json_body: Any) -> tuple[int, str]:

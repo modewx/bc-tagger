@@ -197,8 +197,8 @@ def _validate(merged: dict[str, Any]) -> dict[str, Any]:
         interval = float(out["bandcamp_request_interval_s"])
     except (TypeError, ValueError):
         raise SettingsError("bandcamp_request_interval_s must be a number") from None
-    if interval < 0.5:
-        raise SettingsError("bandcamp_request_interval_s must be at least 0.5")
+    if interval < 0.1:
+        raise SettingsError("bandcamp_request_interval_s must be at least 0.1")
     out["bandcamp_request_interval_s"] = interval
     for key, low, high in (("bandcamp_browser_concurrency", 1, 4), ("bandcamp_browser_spacing_ms", 100, None)):
         try:

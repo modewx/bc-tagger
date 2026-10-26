@@ -302,3 +302,18 @@ def test_interval_default_and_migration(tmp_path):
     assert Settings(path=old).get("bandcamp_request_interval_s") == 2.5
     old.write_text(json.dumps({"bandcamp_request_interval_s": 3}))  # not the old default: kept
     assert Settings(path=old).get("bandcamp_request_interval_s") == 3
+
+
+def test_pacing_is_start_to_start(tmp_path):
+    starts = []
+
+    def slow(request):
+        starts.append(time.monotonic())
+        time.sleep(0.2)  # the answer takes a while
+        return httpx.Response(200, text="ok")
+
+    f = Fetcher(Store(path=tmp_path / "s.db"), "test", min_interval=0.25, transport=httpx.MockTransport(slow))
+    for i in range(3):
+        f.request("GET", f"https://pace.example/{i}")
+    gaps = [b - a for a, b in zip(starts, starts[1:])]
+    assert all(0.24 <= g < 0.4 for g in gaps), gaps  # not 0.25 + 0.2 latency

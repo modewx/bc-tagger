@@ -400,8 +400,8 @@ def test_estimate_and_pace(svc):
     assert live.min_interval == 0.5  # read before every request: a change applies to the next one
     svc.settings.update({"bandcamp_request_interval_s": 3})
     svc.bandcamp_fetcher = svc.default_bandcamp_fetcher
-    with pytest.raises(Exception, match="at least 0.5"):
-        svc.settings.update({"bandcamp_request_interval_s": 0.4})
+    with pytest.raises(Exception, match="at least 0.1"):
+        svc.settings.update({"bandcamp_request_interval_s": 0.05})
     assert svc.settings.get("bandcamp_browser_concurrency") == 2 and svc.settings.get("bandcamp_browser_spacing_ms") == 400
     svc.settings.update({"bandcamp_browser_concurrency": 4, "bandcamp_browser_spacing_ms": 100})
     for bad in ({"bandcamp_browser_concurrency": 5}, {"bandcamp_browser_concurrency": 1.5},
