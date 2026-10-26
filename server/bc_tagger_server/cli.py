@@ -100,8 +100,10 @@ def _diff_text(diff: dict[str, Any]) -> str:
         lines.append(f"  - {it['id']:12} {it['title']}  {it.get('tags') or ''}")
     for e in diff.get("errors", []):
         lines.append(f"ERROR: {e}")
+    for b in diff.get("blockers", []):
+        lines.append(f"BLOCKED ({b['code']}): {b['message']}")
     for w in diff.get("warnings", []):
-        lines.append(f"warning: {w}")
+        lines.append(f"warning ({w['code']}): {w['message']}")
     if diff.get("folders_created"):
         lines.append(f"folders to create: {', '.join(diff['folders_created'])}")
     lines.append(f"content: {len(diff['content_added'])} added, {diff['content_existing']} already present"
@@ -125,7 +127,7 @@ def _diff_text(diff: dict[str, Any]) -> str:
     if diff["skipped_items"]:
         lines.append("skipped: " + ", ".join(f"{s['id']} ({s['status']})" for s in diff["skipped_items"]))
     lines.append("changed: " + ("yes" if diff.get("changed") else "no (nothing to do)"))
-    if diff["dry_run"] and diff.get("confirm_token") and diff.get("changed"):
+    if diff["dry_run"] and diff.get("confirm_token") and diff.get("can_confirm"):
         lines.append(f"confirm with: --confirm {diff['confirm_token']}  (valid until {diff['token_expires_at']})")
     return "\n".join(lines)
 

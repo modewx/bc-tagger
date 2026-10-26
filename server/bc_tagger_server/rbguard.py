@@ -70,6 +70,8 @@ class GuardDecision:
     # True when rekordbox is running on another library and the commit check is bypassed.
     bypass_running_check: bool = False
     mode: str = "test"
+    # Machine-readable reason for a refusal (e.g. "rekordbox_running"), None when allowed.
+    code: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -118,42 +120,45 @@ def check_write(
 ) -> GuardDecision:
     target = resolve(db_path)
     t = str(target)
+
+    def refuse(code: str, message: str, **kw: Any) -> GuardDecision:
+        return GuardDecision(False, f"refusing: {message}", t, code=code, **kw)
+
     for d in (main_dir, PARKED_MAIN_LIBRARY_DIR):
         if is_within(target, d):
-            return GuardDecision(False, f"refusing: {t} is inside the main rekordbox library {d}", t)
+            return refuse("main_library_path", f"{t} is inside the main rekordbox library {d}")
     for d in protected_dirs:
         if is_within(target, d):
-            return GuardDecision(False, f"refusing: {t} is on the protected volume {d}", t)
+            return refuse("protected_volume", f"{t} is on the protected volume {d}")
     if not target.is_file():
-        return GuardDecision(False, f"refusing: {t} does not exist", t)
+        return refuse("db_missing", f"{t} does not exist")
     if not (target.parent / MARKER_NAME).is_file():
-        return GuardDecision(
-            False, f"refusing: no {MARKER_NAME} marker in {target.parent} (not a test library)", t
-        )
+        return refuse("not_test_library", f"no {MARKER_NAME} marker in {target.parent} (not a test library)")
     is_running = rekordbox_running() if running is None else running
     if not is_running:
         return GuardDecision(True, "ok: test library, rekordbox not running", t)
     opts = options_db_path() if options_db is _UNSET else options_db
     if opts is None:
-        return GuardDecision(
-            False,
-            "refusing: rekordbox is running and options.json db-path is unknown, "
-            "so it may have this DB open",
-            t,
+        return refuse(
+            "rekordbox_db_unknown",
+            "rekordbox is running and options.json db-path is unknown, so it may have this DB open",
             rekordbox_running=True,
         )
     opts = resolve(opts)
-    if opts == target:
-        return GuardDecision(
-            False,
-            f"refusing: rekordbox is running with this DB open ({opts})",
-            t,
+    # options.json isn't trustworthy: rekordbox 6.7.4 rewrote db-path to a Caches path it
+    # doesn't use while it kept ~/Library/Pioneer/rekordbox open. Treat both as possibly open.
+    possibly_open = {opts, resolve(main_dir / "master.db")}
+    if target in possibly_open or is_within(target, main_dir):
+        return refuse(
+            "rekordbox_has_db_open",
+            f"rekordbox is running and may have this DB open ({t})",
             rekordbox_running=True,
             options_db_path=str(opts),
         )
     return GuardDecision(
         True,
-        f"ok: rekordbox is running on another library ({opts}); bypassing pyrekordbox's running check",
+        f"ok: rekordbox is running (with {main_dir} or {opts}); {t} is neither, "
+        "so pyrekordbox's running check is bypassed",
         t,
         rekordbox_running=True,
         options_db_path=str(opts),
@@ -257,27 +262,31 @@ def check_write_main(
     target = resolve(db_path)
     t = str(target)
 
-    def refuse(reason: str, **kw: Any) -> GuardDecision:
-        return GuardDecision(False, f"refusing: {reason}", t, mode="main", **kw)
+    def refuse(code: str, reason: str, **kw: Any) -> GuardDecision:
+        return GuardDecision(False, f"refusing: {reason}", t, mode="main", code=code, **kw)
 
     if not _allowed(allow):
-        return refuse("writing to the main collection is turned off (Settings → Rekordbox)")
+        return refuse("main_writes_off", "writing to the main collection is turned off (Settings → Rekordbox)")
     configured_path = resolve(configured() if callable(configured) else configured)
     if target != configured_path:
-        return refuse(f"{t} is not the configured main collection ({configured_path})")
+        return refuse("not_configured_path", f"{t} is not the configured main collection ({configured_path})")
     for d in protected_dirs:
         if is_within(target, d):
-            return refuse(f"{t} is on the protected volume {d}")
+            return refuse("protected_volume", f"{t} is on the protected volume {d}")
     if not target.is_file():
-        return refuse(f"{t} does not exist")
+        return refuse("db_missing", f"{t} does not exist")
     if (target.parent / MARKER_NAME).is_file():
         return refuse(
+            "test_library_switched_in",
             f"{target.parent} holds the test library (marker file found). "
-            "Run `server/scripts/rb-switch-library.sh main` first"
+            "Run `server/scripts/rb-switch-library.sh main` first",
         )
     is_running = rekordbox_running() if running is None else running
     if is_running:
-        return refuse("rekordbox is running. Quit rekordbox before writing to your collection", rekordbox_running=True)
+        return refuse(
+            "rekordbox_running", "rekordbox is running. Quit rekordbox before writing to your collection",
+            rekordbox_running=True,
+        )
     return GuardDecision(True, "ok: main collection, writes allowed, rekordbox not running", t, mode="main")
 
 

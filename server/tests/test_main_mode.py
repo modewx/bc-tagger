@@ -178,7 +178,8 @@ def test_main_export_needs_dry_run_and_is_idempotent(svc, library, main_db, tmp_
     assert dry["playlists_created"] == [f"/{FOLDER}/Keepers", f"/{FOLDER}/Genres/Pool"]
     assert sorted(dry["content_added"]) == sorted(library["alpha"][1:] + [library["beta"]])
     assert dry["entries_kept_user"] == 1  # Alpha 1 is already in /DJ/Status/Must (the user's entry)
-    assert any("closer" in w for w in dry["warnings"])
+    assert {"code": "unmapped_tags", "message": "not exported (no playlist mapped): closer"} in dry["warnings"]
+    assert dry["blockers"] == [] and dry["can_confirm"] is True
     assert _files(lib) == before  # the dry run read a snapshot: nothing next to master.db changed
 
     result = svc.export(ids=["a100", "t200"], confirm_token=dry["confirm_token"])
@@ -367,3 +368,19 @@ def test_xml_only_touched_nodes_change(svc, library, main_db):
     assert changed == {must_id}  # the existing playlist we added tracks to; "Dup" stays as it was
     assert all(after[i]["Timestamp"] == "1000" for i in dup_ids) and after[must_id]["Timestamp"] != "1000"
     assert len(after) == len(before) + 4  # /bct-main, /bct-main/Genres, Keepers, Genres/Pool
+
+
+def test_dry_run_reports_blockers_before_confirm(svc, monkeypatch, main_db):
+    monkeypatch.setattr(rbguard, "rekordbox_running", lambda: True)
+    dry = svc.export(ids=["t200"], dry_run=True)
+    assert dry["blockers"] == [{"code": "rekordbox_running", "message": "rekordbox is running. Quit rekordbox before confirming."}]
+    assert dry["can_confirm"] is False and dry["changed"] is True
+    monkeypatch.setattr(rbguard, "rekordbox_running", lambda: False)
+    (main_db.parent / MARKER_NAME).write_text("x")
+    assert [b["code"] for b in svc.export(ids=["t200"], dry_run=True)["blockers"]] == ["test_library_switched_in"]
+    (main_db.parent / MARKER_NAME).unlink()
+    off = svc.export(ids=["t200"], dry_run=True, guard_kwargs={"allow": False})
+    assert [b["code"] for b in off["blockers"]] == ["main_writes_off"]
+    svc.settings.update({"tag_playlist_map": {"pool": ["/DJ/Smart"]}})
+    bad = svc.export(ids=["t200"], dry_run=True)
+    assert [b["code"] for b in bad["blockers"]] == ["playlist_errors"] and not bad["can_confirm"]
