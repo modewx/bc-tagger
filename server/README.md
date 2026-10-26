@@ -237,16 +237,20 @@ Item views carry hints like `owned_but_only_in_not_owned_root`.
 
 ## Downloading owned releases
 
-For an owned item (or import row) that isn't located, `POST /api/download {ids: ["t123", "<batch>:<n>"]}`
-runs the user's `bandcamp-collection-downloader` (branch `bc-tagger-item-id`, `./gradlew fatJar`, JDK 11) with
-`--item-id a<id>|t<id>`: exactly that collection item, respecting the tool's cache unless `force`. Tracks map
-to their album when the album is owned, releases are deduped and downloaded one at a time (`--skip-hidden
---jobs=1`, the app's User-Agent, the cookies file), into `downloads_dir` (empty: the owned root; refused
-unless inside an owned root), in `download_format` (default `aiff-lossless`). After each release its folder is
-indexed and the affected items and rows are located. Bandcamp's bot check or a rate limit stops the rest.
-`dry_run: true` answers the plan (destination, releases, per-item state) without downloading.
+For an owned item (or import row) that isn't located, `POST /api/download {ids: ["t123", "<batch>:<n>"]}` runs
+the user's `bandcamp-collection-downloader` (its existing options; the jar in `downloader_dir`/`build/libs`, else
+`~/Scripts/bc-download/…`) once per release: `--string-filter=<the release's exact title> --number=1` (the tool
+applies `--number` after the filter, and respects its cache unless `force`), `--skip-hidden --jobs=1`, the
+cookies file, into `downloads_dir` (empty: the owned root; refused unless inside an owned root), in
+`download_format` (default `aiff-lossless`). Tracks map to their album when the album is owned; releases are
+deduped and downloaded one at a time. Short or generic titles ("Untitled", "EP", digits, < 5 characters, `;`)
+are refused. The tool logs what the filter matched before downloading; unless the first match (the one
+`--number=1` keeps) has exactly that title, the run is stopped there. After each download a quick scan picks
+up the new files and the affected items and rows are located. Bandcamp's bot check or a rate limit stops the
+rest. `dry_run: true` answers the plan (destination, releases with their filter, per-item state).
 Only the user's clicks download into the real Collection; tests and e2e use the stub
-(`BC_TAGGER_DOWNLOADER_STUB=server/tests/fixtures/stub_downloader.py`).
+(`BC_TAGGER_DOWNLOADER_STUB=server/tests/fixtures/stub_downloader.py`). An exact `--item-id` option for the tool
+waits on branch `bc-tagger-item-id` of its repo (the plan's Later list).
 
 `./bct download --filter "<artist or album substring>" -n 1` (agents) still wraps a filtered run, at most 5
 releases, into `test-downloads/` only.
