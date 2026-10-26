@@ -13,7 +13,7 @@ import { Jobs, progressText } from "./jobs";
 import { buildNav } from "./nav";
 import { sourceColumn, localPlayUrl } from "./columns";
 import { openPopover, closePopover } from "./popover";
-import { getBatch, updateRow, commitBatch, discardBatch, resumeLookups, setDefaultTags, relocateRows, relocateRow, searchFiles, rowToItem, matchSource, bandcampSearchUrl, openOnBandcampUrl, cleanBandcampUrl } from "./importApi";
+import { getBatch, updateRow, commitBatch, discardBatch, resumeLookups, setDefaultTags, relocateRows, relocateRow, searchFiles, listFolder, rowToItem, matchSource, bandcampSearchUrl, openOnBandcampUrl, cleanBandcampUrl } from "./importApi";
 import { statsLine } from "./importTab";
 import { rememberImport } from "./openImport";
 import { playableItem } from "./statusFilter";
@@ -535,19 +535,103 @@ function setFileForm(pop, row) {
   q.addEventListener("keydown", (e) => e.key === "Enter" && search());
   const go = el("button", "", "Search");
   go.addEventListener("click", search);
-  const paste = document.createElement("input");
-  paste.className = "pop-input set-file-path";
-  paste.placeholder = "…or paste a full path to the file";
-  const use = el("button", "", "Use path");
-  use.addEventListener("click", () => paste.value.trim() && patchRow(row, { path: paste.value.trim() }, "Setting the file…"));
+  const browse = el("button", "", "Browse…");
+  browse.id = "browseFiles";
+  browse.title = "Pick the file in your music folders";
+  browse.addEventListener("click", () => {
+    box.remove();
+    folderBrowser(pop, row);
+  });
   const a1 = el("div", "pop-actions");
-  a1.appendChild(go);
-  const a2 = el("div", "pop-actions");
-  a2.appendChild(use);
-  box.append(q, a1, results, paste, a2);
+  a1.append(go, browse);
+  box.append(q, a1, results);
   pop.appendChild(box);
   q.focus();
   search();
+}
+
+const dirOf = (p) => (p ? String(p).replace(/\/[^/]*$/, "") : null);
+
+// Pick the row's file in the music folders. Opens in the last folder a file
+// was picked from (the server's last_browse_dir), else the folder of the row's
+// best guess, else the list of music folders.
+async function folderBrowser(pop, row) {
+  const box = el("div", "pop-url folder-browser");
+  box.id = "folderBrowser";
+  const crumbs = el("div", "fb-crumbs");
+  const list = el("div", "fb-list");
+  const msg = el("div", "pop-meta fb-msg");
+  box.append(el("div", "pop-label", "Pick the file"), crumbs, msg, list);
+  pop.appendChild(box);
+
+  // A folder outside the music folders (or gone) is refused: say so, show the list of folders.
+  async function open(path, note = "") {
+    msg.textContent = note;
+    let d;
+    try {
+      d = await listFolder(path);
+    } catch (e) {
+      if (e.status === 404 && e.message === "Not Found") msg.textContent = "This server can't browse folders yet."; // no such route
+      else if (path) return open(null, `Can't open ${path}: ${e.message}`);
+      else msg.textContent = `Can't list your music folders: ${e.message}`;
+      return;
+    }
+    crumbs.innerHTML = "";
+    const top = el("button", "fb-crumb", "Music folders");
+    top.addEventListener("click", () => open(null));
+    crumbs.appendChild(top);
+    if (d.path) {
+      let acc = "";
+      d.path.split("/").filter(Boolean).forEach((part) => {
+        acc += "/" + part;
+        const at = acc;
+        crumbs.append(" / ");
+        const b = el("button", "fb-crumb", part);
+        b.dataset.path = at;
+        b.addEventListener("click", () => open(at));
+        crumbs.appendChild(b);
+      });
+    }
+    list.innerHTML = "";
+    if (d.path) {
+      const up = el("button", "fb-entry fb-up", "↑ Up");
+      up.addEventListener("click", () => open(d.parent || null));
+      list.appendChild(up);
+    }
+    d.dirs.forEach((f) => {
+      const b = el("button", "fb-entry fb-dir", `📁 ${f.name}`);
+      b.dataset.path = f.path;
+      b.addEventListener("click", () => open(f.path));
+      list.appendChild(b);
+    });
+    d.files.forEach((f) => {
+      const b = el("button", "fb-entry fb-file", `♪ ${f.name}`);
+      b.dataset.path = f.path;
+      const tagged = [f.title, f.artist].filter(Boolean).join(" — ");
+      if (tagged) b.appendChild(el("span", "muted", ` ${tagged}`));
+      b.addEventListener("click", () => patchRow(row, { path: f.path }, "Setting the file…"));
+      list.appendChild(b);
+    });
+    if (!d.dirs.length && !d.files.length) list.appendChild(el("div", "pop-meta", "No folders or audio files here."));
+    const first = list.querySelector(".fb-dir, .fb-file");
+    if (first) first.focus();
+  }
+
+  // Arrow keys move between entries; Enter opens / picks (they're buttons).
+  list.addEventListener("keydown", (e) => {
+    if (e.key !== "ArrowDown" && e.key !== "ArrowUp") return;
+    const items = [...list.querySelectorAll(".fb-entry")];
+    const i = items.indexOf(document.activeElement);
+    const next = items[Math.max(0, Math.min(items.length - 1, i + (e.key === "ArrowDown" ? 1 : -1)))];
+    if (next) next.focus();
+    e.preventDefault();
+  });
+
+  const settings = await apiJson("/api/settings").catch(() => ({}));
+  const last = (settings.settings || settings).last_browse_dir;
+  const local = row.local || {};
+  const guess = dirOf((local.best && local.best.path) || ((local.candidates || [])[0] || {}).path);
+  open(last || guess || null);
 }
 
 function locatedPopover(anchor, row) {

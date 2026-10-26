@@ -141,6 +141,22 @@ export const relocateRows = (id, rows = "missing") =>
 export const relocateRow = (id, n) => apiJson(`/api/import/${enc(id)}/rows/${enc(n)}/locate`, { method: "POST", body: {} }).then((r) => normRow(r, n));
 // Files in the index matching every word of `q` (artist, title, album, path).
 export const searchFiles = (q) => apiJson(`/api/index/search?q=${enc(q)}&limit=25`);
+
+// A folder of the music folders (no path: the roots), for picking a file:
+// {path, parent, dirs: [{name, path}], files: [{name, path, title, artist, album, format}]}.
+export async function listFolder(path) {
+  const d = await apiJson(path ? `/api/fs/list?path=${enc(path)}` : "/api/fs/list");
+  const isDir = (e) => e.type === "dir" || e.kind === "dir" || e.is_dir === true;
+  const entries = Array.isArray(d.entries) ? d.entries : [];
+  const name = (e) => e.name || String(e.path || "").replace(/\/$/, "").split("/").pop();
+  const withName = (e) => ({ ...e, name: name(e) });
+  return {
+    path: d.path || null,
+    parent: d.parent ?? null,
+    dirs: (d.dirs || d.roots || entries.filter(isDir)).map(withName),
+    files: (d.files || entries.filter((e) => !isDir(e))).map(withName),
+  };
+}
 // Lookups paused by Bandcamp's rate limiting: carry on (→ {job_id, estimate}).
 export const resumeLookups = (id) => apiJson(`/api/import/${enc(id)}/resume`, { method: "POST", body: {} });
 export const discardBatch = (id) => apiJson(`/api/import/${enc(id)}`, { method: "DELETE" });

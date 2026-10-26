@@ -1323,6 +1323,57 @@ test("import preview: Locate again finds a file added later; Set file by search;
   }
 });
 
+test("import preview: Set file → Browse from the music folders to a file; the next Browse opens there; a folder outside is refused (real server)", async () => {
+  fs.rmSync(E2E_MUSIC, { recursive: true, force: true });
+  const album = path.join(E2E_MUSIC, "Some Artist", "Some Album");
+  writeAiff(path.join(album, "01 Browse Me.aiff"), "Browse Me", "Some Artist", "Some Album");
+  writeAiff(path.join(album, "02 Browse Me Too.aiff"), "Browse Me Too", "Some Artist", "Some Album");
+  const before = await api("/api/settings").then((d) => d.settings || d);
+  await put({ extra_roots: [{ path: E2E_MUSIC, kind: "not_owned" }], ...("last_browse_dir" in before ? { last_browse_dir: null } : {}) });
+  const items = [
+    { line: 1, raw: "Nobody - First Unknown", artist: "Nobody", title: "First Unknown", tags: ["must"] },
+    { line: 2, raw: "Nobody - Second Unknown", artist: "Nobody", title: "Second Unknown", tags: ["must"] },
+  ];
+  const { batch_id: batchId } = await post("/api/import", { file: { format: "bc-tagger-import/1", source: "e2e-browse.txt", items }, default_tags: [], name: "e2e-browse" });
+  const page = await context.newPage();
+  const openBrowser = async (key) => {
+    await page.click(`tr[data-key='${key}'] .located-cell .chip`);
+    await page.click(".popover button:has-text('Set file…')");
+    await page.click(".popover #browseFiles");
+    await page.waitForSelector(".popover #folderBrowser .fb-entry, .popover #folderBrowser .fb-msg:not(:empty)");
+  };
+  try {
+    await waitFor(() => api(`/api/import/${batchId}`).then((b) => b.status === "ready"), { what: "the batch", timeout: 30000 });
+    await page.goto(`${SERVER}/import/?batch=${batchId}`);
+    await page.waitForFunction(() => document.querySelectorAll("#collectionTable tbody tr").length === 2);
+
+    // From the music folders down to the file.
+    await openBrowser("r0");
+    await page.click(`.popover .fb-dir[data-path="${E2E_MUSIC}"]`);
+    await page.click(`.popover .fb-dir[data-path="${path.join(E2E_MUSIC, "Some Artist")}"]`);
+    await page.click(`.popover .fb-dir[data-path="${album}"]`);
+    assert.match(await page.textContent(".popover .fb-crumbs"), /Some Artist \/ Some Album$/);
+    await page.click(`.popover .fb-file[data-path="${path.join(album, "01 Browse Me.aiff")}"]`);
+    await page.waitForFunction(() => document.querySelector("tr[data-key='r0'] .located-cell .chip").dataset.status === "located-manual");
+    assert.equal((await api(`/api/import/${batchId}`)).rows[0].located.best.path, path.join(album, "01 Browse Me.aiff"));
+
+    // The next Browse opens in that folder.
+    await openBrowser("r1");
+    await page.waitForSelector(`.popover .fb-file[data-path="${path.join(album, "02 Browse Me Too.aiff")}"]`);
+    assert.match(await page.textContent(".popover .fb-crumbs"), /Some Album$/);
+
+    // A folder above the music folders is refused, and the list of music folders shows instead.
+    await page.click(`.popover .fb-crumb[data-path="${E2E}"]`);
+    await page.waitForFunction(() => /Can't open/.test(document.querySelector(".popover .fb-msg").textContent));
+    assert.ok(await page.$(`.popover .fb-dir[data-path="${E2E_MUSIC}"]`), "back at the music folders");
+  } finally {
+    await api(`/api/import/${batchId}`, { method: "DELETE" });
+    await put({ extra_roots: [], ...("last_browse_dir" in before ? { last_browse_dir: before.last_browse_dir ?? null } : {}) });
+    fs.rmSync(E2E_MUSIC, { recursive: true, force: true });
+    await page.close();
+  }
+});
+
 // --- An open import survives navigation and reloads ---------------------------------
 
 test("import: a reload during lookups follows the same job on to the mapping step (stubbed API)", async () => {
