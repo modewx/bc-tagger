@@ -9,7 +9,7 @@ import { Jobs, progressText, resultText } from "./jobs";
 import { buildNav } from "./nav";
 import { appColumns, localPlayUrl } from "./columns";
 import { startDevReload } from "./devReload";
-import { createStatusFilter } from "./statusFilter";
+import { createStatusFilter, createSourceFilter, sourceOf } from "./statusFilter";
 import { runExport } from "./exportFlow";
 import { createIndexStatus } from "./indexStatus";
 
@@ -19,6 +19,7 @@ const ds = new HttpDataSource({ bridge, events });
 const jobs = new Jobs(events);
 const nav = buildNav("collection");
 const statusFilter = createStatusFilter();
+const sourceFilter = createSourceFilter();
 
 let page = null;
 
@@ -59,7 +60,7 @@ function jobButton(id, label, title, start) {
       button.disabled = false;
       updateScanBlocked();
       await page.reload();
-      if (statusFilter.active()) page.refilter(); // e.g. newly located items join "Located"
+      if (statusFilter.active() || sourceFilter.active()) page.refilter(); // e.g. newly located items join "Located"
     },
   };
 }
@@ -157,8 +158,16 @@ async function refreshHealth() {
       ),
     ],
     localPlayUrl,
-    filterItem: statusFilter.filterItem,
-    clearExtraFilters: () => statusFilter.reset(),
+    filterItem: (item) => sourceFilter.filterItem(item) && statusFilter.filterItem(item),
+    clearExtraFilters: () => {
+      statusFilter.reset();
+      sourceFilter.reset();
+    },
+    // `other` rows have no Bandcamp page: the title searches Discogs.
+    titleUrl: (item) =>
+      sourceOf(item) === "other"
+        ? item.discogs_url || `https://www.discogs.com/search/?type=all&q=${encodeURIComponent([item.artist, item.title].filter(Boolean).join(" "))}`
+        : null,
     onView: (shown, total) => {
       statusFilter.onView(shown, total);
       updateShownButtons(shown);
@@ -179,6 +188,7 @@ async function refreshHealth() {
   scroller.id = "tableScroll";
   table.before(scroller);
   scroller.appendChild(table);
+  sourceFilter.mount(document.getElementById("searchBar"), () => page.refilter());
   statusFilter.mount(document.getElementById("searchBar"), scroller, () => page.refilter());
 
   events.on("tags", () => refreshHealth());

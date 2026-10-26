@@ -4,6 +4,7 @@ import {
   getStatus,
   probeServer,
   pullTagEdits,
+  pullPendingAdds,
   queueItemsDiff,
   queueTags,
   refreshOwnership,
@@ -208,9 +209,12 @@ async function handleAppBridge(op, payload, sender) {
     }
     case "refreshOwnership":
       return refreshOwnership();
-    case "syncNow":
+    case "syncNow": {
       await fullSync("app", { force: true });
-      return pullTagEdits();
+      const edits = await pullTagEdits();
+      const adds = await pullPendingAdds().catch((e) => ({ error: e.message }));
+      return { ...edits, adds };
+    }
     case "status":
       return { serverUrl: await getServerUrl(), status: await getStatus() };
     default:
@@ -353,6 +357,7 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
   if (request.type === "syncNow") {
     fullSync("manual", { force: true })
       .then(() => pullTagEdits())
+      .then((r) => pullPendingAdds().then((adds) => ({ ...r, adds }), () => r))
       .then((r) => sendResponse({ ok: true, ...r }), (e) => sendResponse({ ok: false, error: e.message }));
     return true;
   }

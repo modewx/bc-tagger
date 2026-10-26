@@ -71,6 +71,11 @@ const SHELL_HTML = `
  * @param {function} [opts.filterItem]      (item) -> false hides the row (extra filters, e.g. statuses)
  * @param {function} [opts.onView]          (shown, total) after each filter/search
  * @param {function} [opts.clearExtraFilters] reset the extra filters (Go To Playing)
+ * @param {boolean}  [opts.baseToolbar]     false hides the Bandcamp tools (refresh players, ...)
+ * @param {function} [opts.rowClass]        (item, key) -> extra class names for the row
+ * @param {function} [opts.titleUrl]        (item) -> link for the title, instead of its Bandcamp page
+ *
+ * Columns may also have headerRender(th) to fill their header themselves.
  */
 export function createCollectionPage(opts) {
   const ds = opts.dataSource;
@@ -98,7 +103,7 @@ export function createCollectionPage(opts) {
   ];
   const toolbar = document.getElementById("toolbar");
   const statusEl = document.getElementById("refreshStatus");
-  [...BASE_TOOLBAR, ...(opts.extraToolbarButtons || [])].forEach((b) => {
+  [...(opts.baseToolbar === false ? [] : BASE_TOOLBAR), ...(opts.extraToolbarButtons || [])].forEach((b) => {
     const btn = document.createElement("button");
     btn.id = b.id;
     btn.className = "toolbar-btn" + (b.className ? " " + b.className : "");
@@ -692,7 +697,7 @@ export function createCollectionPage(opts) {
       compare: cmpText("title"),
       render: (cell, key, item) => {
         const a = document.createElement("a");
-        a.href = pageUrlFor(item) || "#";
+        a.href = (opts.titleUrl && opts.titleUrl(item)) || pageUrlFor(item) || "#";
         a.target = "_blank";
         a.textContent = item.title || ""; // text, never HTML: titles come from Bandcamp
         cell.appendChild(a);
@@ -737,7 +742,8 @@ export function createCollectionPage(opts) {
     columns.forEach((col) => {
       const th = document.createElement("th");
       th.className = `col-${col.id}`;
-      th.textContent = col.label;
+      if (col.headerRender) col.headerRender(th);
+      else th.textContent = col.label;
       if (col.title) th.title = col.title;
       if (col.sortKey) {
         th.style.cursor = "pointer";
@@ -773,6 +779,10 @@ export function createCollectionPage(opts) {
     entries.forEach(([key, item]) => {
       const row = tbody.insertRow();
       row.dataset.key = key;
+      if (opts.rowClass) {
+        const cls = opts.rowClass(item, key);
+        if (cls) row.className = cls;
+      }
       columns.forEach((col) => {
         const cell = row.insertCell();
         cell.classList.add(`col-${col.id}`);
@@ -1180,6 +1190,10 @@ export function createCollectionPage(opts) {
     const item = allItems[key];
     const row = document.querySelector(`#collectionTable tr[data-key="${key}"]`);
     if (!row || !item) return;
+    if (opts.rowClass) {
+      const keep = ["playing-row", "clickable-row"].filter((c) => row.classList.contains(c));
+      row.className = [opts.rowClass(item, key), ...keep].filter(Boolean).join(" ");
+    }
     columns.forEach((col, i) => {
       const old = row.cells[i];
       if (!old) return;

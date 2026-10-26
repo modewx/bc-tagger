@@ -8,6 +8,7 @@ html { background: #fff; color: #222; color-scheme: light; }
 /* Local-app columns. Tags (the tag editors) keeps a fixed width; Title and
    Artist share whatever is left. */
 #collectionTable .col-date { width: 84px; }
+#collectionTable .col-source { width: 58px; }
 #collectionTable .col-owned { width: 64px; }
 #collectionTable .col-located { width: 80px; }
 #collectionTable .col-rekordbox { width: 88px; }
@@ -124,3 +125,24 @@ button.chip:hover { filter: brightness(0.95); border-color: #bbb; }
   #globalPlayer { flex-wrap: wrap; }
   .toolbar-btn { padding: 5px 8px; font-size: 12px; }
 }
+
+/* Source column + collection checkboxes */
+.source-filter { display: inline-flex; gap: 10px; font-size: 13px; color: #444; margin-left: 6px; }
+.source-filter label { cursor: pointer; white-space: nowrap; }
+.src-icon {
+  display: inline-block;
+  min-width: 18px;
+  text-align: center;
+  font-size: 11px;
+  font-weight: 700;
+  line-height: 18px;
+  border-radius: 4px;
+  padding: 0 3px;
+  margin-right: 3px;
+  text-decoration: none;
+  color: #fff;
+}
+.src-bandcamp { background: #1da0c3; }
+.src-discogs { background: #222; }
+.src-youtube { background: #e62117; font-size: 9px; }
+.pending-chip { font-size: 10px; padding: 0 5px; background: #fff4d6; color: #8a5a00; }

@@ -61,8 +61,10 @@ export class HttpDataSource {
     const pendingIds = new Set((pending || []).map((e) => e.item_id || e.id));
     const list = Array.isArray(data) ? data : (data && data.items) || [];
     const items = {};
+    this.sources = {};
     list.forEach((it) => {
       if (!it || it.id == null) return;
+      this.sources[it.id] = it.source || "bandcamp";
       if (pendingIds.has(it.id)) it._tagsPending = true;
       items[it.id] = it;
     });
@@ -70,6 +72,15 @@ export class HttpDataSource {
   }
 
   async setItemTags(id, tags) {
+    // `other` items belong to the server, not the extension.
+    if (this.sources && this.sources[id] === "other") {
+      try {
+        await apiJson(`/api/items/${encodeURIComponent(id)}`, { method: "PUT", body: { tags } });
+        return { ok: true };
+      } catch (e) {
+        return { ok: false, error: e.message };
+      }
+    }
     if (this.bridge.connected) {
       try {
         await this.bridge.call("setItemTags", { id, tags });

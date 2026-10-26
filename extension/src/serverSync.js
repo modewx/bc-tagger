@@ -14,7 +14,7 @@
 // Status:    chrome.storage.session bcSyncStatus = {...} (shown in the popup)
 // ---------------------------------------------------------------------------
 
-import { withItems } from "./itemsStore";
+import { withItems, serialized, getStorage, setStorage } from "./itemsStore";
 
 // http://127.0.0.1:8765 unless the build sets BC_DEFAULT_SERVER_URL (e2e builds).
 export const DEFAULT_SERVER_URL = __DEFAULT_SERVER_URL__;
@@ -217,6 +217,55 @@ export async function pullTagEdits() {
   return { applied, dropped: dropped.length };
 }
 
+// --- Imported Bandcamp items queued by the server -------------------------------
+
+// Rows of an import that were found on Bandcamp become tagger items here
+// (the extension owns them). Never overwrite an existing item: only merge
+// tags. Entries may also carry new vocabulary tags ({tags: [...]}).
+export async function pullPendingAdds() {
+  const adds = await api("/api/tagger/pending-adds");
+  if (!Array.isArray(adds) || !adds.length) return { added: 0, merged: 0, tags: 0 };
+  let added = 0;
+  let merged = 0;
+  const vocab = [];
+  await withItems((items) => {
+    adds.forEach((entry) => {
+      (Array.isArray(entry.tags) ? entry.tags : []).forEach((t) => vocab.push(t));
+      const item = entry.item;
+      if (!item || !item.id) return;
+      (item.tags || []).forEach((t) => vocab.push(t));
+      const existing = items[item.id];
+      if (!existing) {
+        items[item.id] = { ...item, date_added: item.date_added || new Date().toISOString() };
+        added++;
+      } else {
+        const union = [...new Set([...(existing.tags || []), ...(item.tags || [])])];
+        if (union.length !== (existing.tags || []).length) {
+          existing.tags = union;
+          merged++;
+        }
+      }
+    });
+    if (!added && !merged) return { ok: false, reason: "nothing to change" }; // skip the write
+  });
+  let newTags = 0;
+  if (vocab.length) {
+    await serialized(async () => {
+      const { tags } = await getStorage("tags");
+      const current = Array.isArray(tags) ? tags : [];
+      const next = [...current];
+      vocab.forEach((t) => {
+        if (t && !next.includes(t)) next.push(t);
+      });
+      newTags = next.length - current.length;
+      if (newTags) await setStorage({ tags: next }); // onChanged pushes the vocabulary back
+    });
+  }
+  await api("/api/tagger/pending-adds/ack", { method: "POST", body: { ids: adds.map((e) => e.add_id) } });
+  await setStatus({ lastPendingAddsAt: Date.now(), lastPendingAdds: { added, merged, tags: newTags } });
+  return { added, merged, tags: newTags };
+}
+
 // --- Ownership ---------------------------------------------------------------
 
 // The logged-in fan's collection, keyed like our item IDs ("a<album>", "t<track>").
@@ -281,6 +330,7 @@ export async function syncTick(reason) {
     await fullSync(reason).catch(() => {});
   }
   await pullTagEdits().catch((e) => console.warn("[sync] pull failed", e.message));
+  await pullPendingAdds().catch((e) => console.warn("[sync] pending adds failed", e.message));
   const own = status.ownership || {};
   if (!own.at || Date.now() - own.at > OWNERSHIP_EVERY_MS) {
     await refreshOwnership().catch((e) => console.warn("[sync] ownership failed", e.message));

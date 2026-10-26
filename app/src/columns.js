@@ -5,6 +5,7 @@ import { apiJson } from "../../shared/datasource/HttpDataSource";
 import { openPopover, closePopover } from "./popover";
 import { progressText, resultText } from "./jobs";
 import { runExport } from "./exportFlow";
+import { sourceOf } from "./statusFilter";
 
 const LOCAL_RANK = { located: 0, candidates: 1, missing: 2, unknown: 3 };
 const OWNED_RANK = { owned: 0, not_owned: 1, unknown: 2 };
@@ -239,7 +240,50 @@ export function appColumns(ctx) {
     }
   }
 
+  // ---- Source: Bandcamp (tagger) or other (server), with search links ---------
+
+  function searchUrl(base, item) {
+    const q = [item.artist, item.title].filter(Boolean).join(" ");
+    return base + encodeURIComponent(q);
+  }
+
+  function renderSource(cell, key, item) {
+    cell.classList.add("status-cell", "no-row-play", "source-cell");
+    const link = (cls, text, href, title) => {
+      const a = el("a", `src-icon ${cls}`, text);
+      a.href = href;
+      a.target = "_blank";
+      a.rel = "noopener";
+      a.title = title;
+      return a;
+    };
+    if (sourceOf(item) === "other") {
+      cell.append(
+        link("src-discogs", "D", item.discogs_url || searchUrl("https://www.discogs.com/search/?type=all&q=", item), "Search Discogs"),
+        link("src-youtube", "▶", item.youtube_url || searchUrl("https://www.youtube.com/results?search_query=", item), "Search YouTube")
+      );
+    } else {
+      const url = item.url || item.item_url;
+      if (url) cell.appendChild(link("src-bandcamp", "bc", url, "Bandcamp page"));
+      else cell.appendChild(el("span", "src-icon src-bandcamp", "bc"));
+      if (item.pending_in_tagger || item.tagger_pending) {
+        const p = el("span", "chip pending-chip", "pending");
+        p.title = "Imported: waiting for the extension to add it to the tagger";
+        cell.appendChild(p);
+      }
+    }
+  }
+
   return [
+    {
+      id: "source",
+      label: "Src",
+      title: "Source: Bandcamp (tagger) or other",
+      after: "date",
+      sortKey: "source",
+      compare: (a, b) => sourceOf(a).localeCompare(sourceOf(b)),
+      render: renderSource,
+    },
     {
       id: "owned",
       label: "Owned",

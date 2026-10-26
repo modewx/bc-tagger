@@ -82,3 +82,56 @@ export function createStatusFilter() {
     },
   };
 }
+
+// "Bandcamp" / "Other" checkboxes: which collections to show. Items from an
+// older server have no `source`: they're Bandcamp (tagger) items.
+const SOURCE_KEY = "bc_app_source_filter";
+
+export const sourceOf = (item) => (item && item.source === "other" ? "other" : "bandcamp");
+
+export function createSourceFilter() {
+  let shown = { bandcamp: true, other: true };
+  try {
+    shown = { ...shown, ...JSON.parse(localStorage.getItem(SOURCE_KEY) || "{}") };
+  } catch (e) {
+    /* ignore */
+  }
+  const wrap = document.createElement("span");
+  wrap.className = "source-filter";
+  const boxes = {};
+  [
+    ["bandcamp", "Bandcamp"],
+    ["other", "Other"],
+  ].forEach(([id, label]) => {
+    const l = document.createElement("label");
+    const box = document.createElement("input");
+    box.type = "checkbox";
+    box.id = `source_${id}`;
+    box.checked = shown[id] !== false;
+    boxes[id] = box;
+    l.append(box, " " + label);
+    wrap.appendChild(l);
+  });
+  return {
+    filterItem: (item) => shown[sourceOf(item)] !== false,
+    active: () => !shown.bandcamp || !shown.other,
+    reset() {
+      shown = { bandcamp: true, other: true };
+      Object.values(boxes).forEach((b) => (b.checked = true));
+    },
+    mount(container, refilter) {
+      container.appendChild(wrap);
+      Object.entries(boxes).forEach(([id, box]) =>
+        box.addEventListener("change", () => {
+          shown[id] = box.checked;
+          try {
+            localStorage.setItem(SOURCE_KEY, JSON.stringify(shown));
+          } catch (e) {
+            /* ignore */
+          }
+          refilter();
+        })
+      );
+    },
+  };
+}
