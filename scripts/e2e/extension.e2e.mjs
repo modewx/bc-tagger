@@ -1130,6 +1130,13 @@ test("import: file → tag mapping → preview (tints, release, to confirm, matc
 
   // Preview: tints, rows to confirm, release info, where each match came from.
   await page.waitForFunction(() => document.querySelectorAll("#collectionTable tbody tr").length === 7);
+  // Selection first; Added and Modified (nothing has either yet) are off but listed in Columns ▾.
+  const previewCols = await page.$$eval("#collectionTable thead th", (ths) => ths.map((th) => th.className.replace(/^col-/, "")));
+  assert.equal(previewCols[0], "sel");
+  assert.ok(!previewCols.includes("modified") && !previewCols.includes("date"));
+  await page.click("#columnsChooser");
+  assert.equal(await page.isChecked('#columnsMenu label[data-col="modified"] input'), false);
+  await page.click("#columnsChooser");
   const rows = Object.fromEntries(
     (
       await page.$$eval("#collectionTable tbody tr", (trs) =>

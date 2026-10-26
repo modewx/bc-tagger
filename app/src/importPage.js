@@ -938,7 +938,7 @@ async function discard(statusEl) {
     topBarStart: top,
     colWidthKey: "bc_import_col_widths_v2",
     baseToolbar: false,
-    hideColumns: ["date", "thumb"], // nothing is added yet; no art is fetched here
+    hideColumns: ["date", "modified", "thumb"], // nothing is added or changed yet; no art is fetched here
     extraColumns: [selectColumn(), { ...sourceColumn(), after: "index" }, releaseColumn(), matchColumn(), locatedColumn(), notesColumn()],
     filterItem: showFilter,
     clearExtraFilters: () => (showSel.value = "all"),
