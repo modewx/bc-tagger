@@ -23,6 +23,9 @@ class Service:
         self.settings = settings or Settings()
         self.store = store or Store()
         self.jobs = JobManager()
+        # Jobs live in memory: a batch whose job ran under another boot_id was interrupted by a restart.
+        self.boot_id = __import__("secrets").token_hex(4)
+        self.committing: set[str] = set()  # import batches being committed by this process
         self._scanning: dict[str, Any] | None = None
         self._scan_job_id: str | None = None
         self._scan_lock = threading.Lock()
@@ -644,8 +647,8 @@ class Service:
 
         batch = importer.create_batch(self, file_obj, default_tags, name)
         job = self.jobs.submit("import", lambda ctx: importer.run_batch(self, batch["batch_id"], ctx))
+        importer.set_job(self, batch["batch_id"], job)
         batch["job_id"] = job.id
-        importer._save_batch(self.store, batch)
         return batch, job
 
     def start_import_job(self, batch_id: str, what: str):
@@ -655,6 +658,7 @@ class Service:
         fn = {"resume": importer.resume_batch, "details": importer.fetch_details}[what]
         estimate = importer.prepare_job(self, batch_id, what)
         job = self.jobs.submit(f"import-{what}", lambda ctx: fn(self, batch_id, ctx))
+        importer.set_job(self, batch_id, job)
         return job, estimate
 
     # -- health -----------------------------------------------------------------------

@@ -164,8 +164,9 @@ def _lookup_rows(svc, batch: dict, rows: list[dict], todo, phase: str, ctx=None)
     for i, row in enumerate(rows, 1):
         state["i"] = i
         _check_duplicate(dups, row)
-        if row["source"] == "bandcamp" and (row.get("match") or {}).get("status") in ("pending", None):
-            row["match"] = {**_empty_match(), "status": "in_collection", "source": "collection"}
+        if (row.get("bandcamp") or {}).get("via") == "collection":  # already in the collection: no lookup
+            if (row.get("match") or {}).get("status") in ("pending", None, "in_collection"):
+                row["match"] = {**_empty_match(), "status": "in_collection", "source": "collection"}
         elif todo(row):
             if stop:
                 row["match"] = _unavailable(*stop)
@@ -391,7 +392,8 @@ def create_batch(svc, file_obj: dict, default_tags: list[str], name: str | None 
         "created_at": now_iso(), "status": "resolving", "error": None, "default_tags": default_tags,
         "unknown_tags": unknown, "new_tags": [], "tag_mapping": None, "source_file": file_obj.get("source"),
         "revision": file_obj.get("revision"), "pending_releases": list(file_obj.get("pending_releases") or []),
-        "job_id": None, "stats": {}, "committed_at": None, "commit_result": None,
+        "job_id": None, "job_kind": None, "job_boot": svc.boot_id, "phase": "resolving", "stats": {},
+        "committed_at": None, "commit_result": None,
     }
     batch["estimate"] = _plan(svc, svc.bandcamp_fetcher(), rows, _needs_lookup)[0]
     _save_rows(svc.store, batch["batch_id"], rows)
@@ -414,12 +416,15 @@ def run_batch(svc, batch_id: str, ctx=None) -> dict:
 
     fetcher = None
     try:
+        batch["phase"] = "resolving"
         fetcher = _lookup_rows(svc, batch, rows, _needs_lookup, "resolving", ctx)
         event("locating", 0, len(rows))
+        batch["phase"] = "locating"
+        _save_batch(store, batch)
         batch["scan"] = _refresh_index(svc, ctx)
         _locate(svc, rows)
         _save_rows(store, batch_id, rows)
-        batch["status"] = "ready"
+        batch.update(status="ready", phase=None)
         event("done", len(rows), len(rows))
     except Exception as e:
         batch.update(status="error", error=f"{type(e).__name__}: {e}")
@@ -446,21 +451,26 @@ def _needs_details(row: dict) -> bool:
 def prepare_job(svc, batch_id: str, what: str) -> dict[str, Any]:
     """Check a resume/details job may run now; returns its time estimate."""
     batch = load_batch(svc.store, batch_id)
-    if batch["status"] != "ready":
+    _live(svc, batch)  # a restart may have interrupted it
+    interrupted = batch["status"] == "interrupted"
+    if batch["status"] != "ready" and not (what == "resume" and interrupted):
         raise ImportError_(f"the batch isn't ready ({batch['status']})")
     lookups = batch.get("bandcamp_lookups") or {}
     if what == "resume":
-        if lookups.get("state") != "paused":
+        if not interrupted and lookups.get("state") != "paused":
             raise ImportError_("nothing to resume: the batch's Bandcamp lookups aren't paused")
-        batch["bandcamp_lookups"] = {"state": "on"}
+        if lookups.get("state") == "paused":
+            batch["bandcamp_lookups"] = {"state": "on"}
+        if interrupted:
+            batch.update(status="resolving", phase="resolving", error=None)
         _save_batch(svc.store, batch)
     stop = _stop_reason(svc, batch)
-    if stop:
+    if stop and not interrupted:  # an interrupted batch still finishes: its rows end unavailable
         raise ImportError_(stop[1])
     rows = load_rows(svc.store, batch_id)
     fetcher = svc.bandcamp_fetcher()
     if what == "resume":
-        return _plan(svc, fetcher, rows, _paused)[0]
+        return _plan(svc, fetcher, rows, _resumable_row)[0]
     pages = [r for r in rows if _needs_details(r)]
     uncached = sum(not fetcher.is_cached("GET", r["bandcamp"]["item"]["item_url"]) for r in pages)
     seconds = uncached * fetcher.min_interval
@@ -469,16 +479,36 @@ def prepare_job(svc, batch_id: str, what: str) -> dict[str, Any]:
             "text": f"~{uncached} pages ≈ {_fmt_duration(seconds)}" if uncached else "no Bandcamp requests needed"}
 
 
+def _resumable_row(row: dict) -> bool:
+    """Paused by a rate limit, or never looked up (a restart interrupted the batch)."""
+    return _paused(row) or _needs_lookup(row)
+
+
 def resume_batch(svc, batch_id: str, ctx=None) -> dict:
-    """Look up the rows a rate limit paused, then locate them again."""
+    """Look up the rows a rate limit paused or a restart interrupted (what was already fetched comes
+    from the cache), then locate."""
     store = svc.store
     batch = load_batch(store, batch_id)
     rows = load_rows(store, batch_id)
-    targets = [r for r in rows if _paused(r)]
+    interrupted = batch["status"] == "resolving"  # prepare_job reopened an interrupted batch
+    targets = [r for r in rows if _resumable_row(r)]
     for r in targets:
         r["match"] = _empty_match()
-    _lookup_rows(svc, batch, rows, lambda r: any(r is t for t in targets), "resolving", ctx)
-    _locate(svc, targets)
+    try:
+        _lookup_rows(svc, batch, rows, lambda r: any(r is t for t in targets), "resolving", ctx)
+        if interrupted:  # it may not have located anything yet
+            batch["phase"] = "locating"
+            _save_batch(store, batch)
+            batch["scan"] = _refresh_index(svc, ctx)
+            _locate(svc, rows)
+        else:
+            _locate(svc, targets)
+    except Exception as e:
+        batch.update(status="error", error=f"{type(e).__name__}: {e}")
+        _save_rows(store, batch_id, rows)
+        _refresh_stats(store, batch, rows)
+        raise
+    batch.update(status="ready", phase=None)
     _save_rows(store, batch_id, rows)
     _refresh_stats(store, batch, rows)
     svc.jobs.bus.publish("import", {"batch_id": batch_id, "phase": "done", "current": len(rows), "total": len(rows)})
@@ -520,15 +550,62 @@ def fetch_details(svc, batch_id: str, ctx=None) -> dict:
 # -- review ----------------------------------------------------------------------------------------
 
 
+def set_job(svc, batch_id: str, job) -> None:
+    """Remember the batch's current job (and which server run it belongs to)."""
+    batch = load_batch(svc.store, batch_id)
+    batch.update(job_id=job.id, job_kind=job.kind, job_boot=svc.boot_id)
+    _save_batch(svc.store, batch)
+
+
+def _live(svc, batch: dict) -> dict:
+    """The batch as the UI needs it to reopen it: ``step``, ``progress``, the running ``job``. A batch
+    caught mid-lookup or mid-commit by a server restart is marked here (and saved)."""
+    ours = batch.get("job_boot") == svc.boot_id
+    job = svc.jobs.get(batch["job_id"]) if ours and batch.get("job_id") else None
+    if batch["status"] == "resolving" and not ours:
+        batch.update(status="interrupted", error="The server restarted during the lookups. Resume to continue "
+                                                 "(answers already fetched come from the cache).")
+        _save_batch(svc.store, batch)
+    elif batch["status"] == "committing" and batch["batch_id"] not in svc.committing:
+        batch.update(status="ready", error="The server restarted during the import. Import again: rows "
+                                           "already imported are skipped.")
+        _save_batch(svc.store, batch)
+    status = batch["status"]
+    if status == "resolving":
+        step = batch.get("phase") or "resolving"
+    elif status == "ready":
+        step = "mapping" if batch.get("unknown_tags") else "ready"
+    else:
+        step = status  # interrupted, committing, committed, error
+    running = job is not None and job.status in ("queued", "running")
+    lookups = batch.get("bandcamp_lookups") or {}
+    return {
+        "step": step,
+        "progress": dict(job.progress) if running else None,
+        "job": {"id": job.id, "kind": job.kind, "status": job.status} if running else None,
+        "resumable": status == "interrupted" or (status == "ready" and lookups.get("state") == "paused"),
+    }
+
+
+LIST_FIELDS = ("batch_id", "name", "created_at", "status", "error", "stats", "estimate", "bandcamp_lookups",
+               "default_tags", "committed_at")
+
+
 def get_batch(svc, batch_id: str) -> dict:
     batch = load_batch(svc.store, batch_id)
-    return {**batch, "rows": load_rows(svc.store, batch_id)}
+    live = _live(svc, batch)
+    return {**batch, **live, "rows": load_rows(svc.store, batch_id)}
 
 
 def list_batches(svc) -> list[dict]:
-    rows = svc.store.query("SELECT data FROM import_batches ORDER BY created_at DESC")
-    return [{k: b[k] for k in ("batch_id", "name", "created_at", "status", "stats")}
-            for b in (json.loads(r["data"]) for r in rows)]
+    """``[{batch_id, name, created_at, status, step, progress, job, resumable, error, stats, estimate,
+    bandcamp_lookups, default_tags, committed_at, unknown_tags}]``, newest first."""
+    out = []
+    for r in svc.store.query("SELECT data FROM import_batches ORDER BY created_at DESC"):
+        b = json.loads(r["data"])
+        live = _live(svc, b)
+        out.append({**{k: b.get(k) for k in LIST_FIELDS}, **live, "unknown_tags": len(b.get("unknown_tags") or {})})
+    return out
 
 
 def _editable(store, batch_id: str, n: int) -> tuple[dict, list[dict], dict]:
@@ -743,6 +820,22 @@ def commit(svc, batch_id: str) -> dict:
         raise ImportError_("the batch was already imported")
     if batch["status"] != "ready":
         raise ImportError_(f"the batch isn't ready ({batch['status']})")
+    svc.committing.add(batch_id)
+    batch.update(status="committing", error=None)
+    _save_batch(store, batch)
+    try:
+        return _commit(svc, batch)
+    except Exception as e:
+        batch.update(status="ready", error=f"The import stopped: {type(e).__name__}: {e}. Import again: rows "
+                                            "already imported are skipped.")
+        _save_batch(store, batch)
+        raise
+    finally:
+        svc.committing.discard(batch_id)
+
+
+def _commit(svc, batch: dict) -> dict:
+    store, batch_id = svc.store, batch["batch_id"]
     rows = load_rows(store, batch_id)
     dups = DuplicateIndex(store)
     vocab = store.get_tags()
@@ -750,11 +843,12 @@ def commit(svc, batch_id: str) -> dict:
     stamp = now_ms_iso()
     used_tags: list[str] = []
     for row in rows:
+        if row.get("checked"):
+            used_tags += row["tags"]  # also rows done before a restart: their new tags still count
         if not row.get("checked") or row.get("committed"):
             result["skipped"] += 1
             continue
         tags = row["tags"]
-        used_tags += tags
         _check_duplicate(dups, row)
         dup = row["duplicate"]
         if dup and dup["source"] == "bandcamp":
@@ -785,6 +879,7 @@ def commit(svc, batch_id: str) -> dict:
             dups.add(item)
             row["committed"] = "other"
             result["other_added"] += 1
+        _save_rows(store, batch_id, [row])  # done rows are skipped if a restart makes the user import again
     new_tags = [t for t in dict.fromkeys(used_tags) if t not in vocab]
     if new_tags:
         svc.sync_tags(vocab + new_tags)

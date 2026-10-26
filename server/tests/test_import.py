@@ -4,6 +4,7 @@ replayed by an offline fetcher), never the live site."""
 from __future__ import annotations
 
 import json
+import time
 from pathlib import Path
 
 import pytest
@@ -400,8 +401,8 @@ def test_estimate_and_pace(svc):
     assert live.min_interval == 0.5  # read before every request: a change applies to the next one
     svc.settings.update({"bandcamp_request_interval_s": 3})
     svc.bandcamp_fetcher = svc.default_bandcamp_fetcher
-    with pytest.raises(Exception, match="at least 0.5"):
-        svc.settings.update({"bandcamp_request_interval_s": 0.4})
+    with pytest.raises(Exception, match="at least 0.1"):
+        svc.settings.update({"bandcamp_request_interval_s": 0.05})
     assert svc.settings.get("bandcamp_browser_concurrency") == 2 and svc.settings.get("bandcamp_browser_spacing_ms") == 400
     svc.settings.update({"bandcamp_browser_concurrency": 4, "bandcamp_browser_spacing_ms": 100})
     for bad in ({"bandcamp_browser_concurrency": 5}, {"bandcamp_browser_concurrency": 1.5},
@@ -441,3 +442,73 @@ def test_pasted_bandcamp_url_and_offline_switch(svc, monkeypatch):
     assert f.offline and f.request("GET", url)[0] == 200
     with pytest.raises(bandcamp.Unavailable):
         f.request("GET", "https://superdrama.bandcamp.com/album/not-recorded")
+
+
+def test_batch_list_tells_the_ui_where_a_batch_is(svc):
+    import threading
+
+    batch = run(svc, recorded_rows())
+    bid = batch["batch_id"]
+    listed = importer.list_batches(svc)[0]
+    assert listed["batch_id"] == bid and listed["status"] == "ready" and listed["step"] == "mapping"
+    assert listed["unknown_tags"] >= 2 and listed["job"] is None and listed["progress"] is None
+    assert listed["resumable"] is False and listed["estimate"]["lookups"] == 0
+    importer.apply_tag_mapping(svc, bid, {}, "create")
+    assert importer.list_batches(svc)[0]["step"] == "ready"
+    # a running job: its id, kind and progress
+    release = threading.Event()
+
+    def work(ctx):
+        ctx.progress(3, 10, "resolving 3/10 · ~1 min left")
+        release.wait(5)
+
+    job = svc.jobs.submit("import-details", work)
+    importer.set_job(svc, bid, job)
+    for _ in range(50):
+        listed = importer.list_batches(svc)[0]
+        if listed["progress"]:
+            break
+        time.sleep(0.02)
+    assert listed["job"] == {"id": job.id, "kind": "import-details", "status": "running"}
+    assert listed["progress"]["current"] == 3 and listed["progress"]["message"].startswith("resolving 3/10")
+    release.set()
+    svc.jobs.wait(job.id, timeout=5)
+    assert importer.list_batches(svc)[0]["job"] is None
+
+
+def test_restart_mid_lookup_is_interrupted_and_resumes_from_the_cache(svc):
+    batch = importer.create_batch(svc, {"format": "bc-tagger-import/1", "items": recorded_rows()}, ["must"])
+    bid = batch["batch_id"]
+    assert importer.list_batches(svc)[0]["step"] == "resolving"  # not started yet: not interrupted
+    svc.boot_id = "after-restart"  # the server restarted; the job is gone
+    listed = importer.list_batches(svc)[0]
+    assert listed["status"] == listed["step"] == "interrupted" and listed["resumable"] and "Resume" in listed["error"]
+    with TestClient(create_app(svc)) as c:
+        r = c.post(f"/api/import/{bid}/resume").json()
+        assert r["estimate"]["lookups"] == 0  # everything already fetched is cached
+        assert svc.jobs.wait(r["job_id"], timeout=30).status == "done"
+        done = c.get(f"/api/import/{bid}").json()
+    bad = [(r["line"], r["match"].get("error")) for r in done["rows"] if r["match"]["status"] == "unavailable"]
+    assert done["status"] == "ready" and done["error"] is None and not bad, bad
+    assert row_at(done, 13)["match"]["status"] == "accepted" and row_at(done, 206)["located"]["status"] == "located"
+    assert row_at(done, 211)["match"]["status"] == "in_collection"
+
+
+def test_restart_mid_commit_lets_the_user_import_again(svc):
+    batch = run(svc, recorded_rows())
+    bid = batch["batch_id"]
+    importer.apply_tag_mapping(svc, bid, {}, "create")
+    # the commit got through the first row, then the server restarted
+    rows = importer.load_rows(svc.store, bid)
+    first = next(r for r in rows if r["line"] == 211)
+    first["committed"] = "tag_merge"
+    importer._save_rows(svc.store, bid, [first])
+    b = importer.load_batch(svc.store, bid)
+    b["status"] = "committing"
+    importer._save_batch(svc.store, b)
+    batch = importer.get_batch(svc, bid)
+    assert batch["status"] == "ready" and "Import again" in batch["error"]
+    result = importer.commit(svc, bid)
+    assert result["skipped"] == 1 and result["tag_merges"] == 1  # the done row isn't merged twice
+    assert set(result["new_tags"]) >= {"muertos", "dubstep"}  # its new tags still reach the vocabulary
+    assert importer.list_batches(svc)[0]["step"] == "committed"
