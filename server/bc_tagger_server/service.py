@@ -29,7 +29,7 @@ class Service:
         self.last_prepare: dict[str, Any] | None = None
         self._file_index = None
         # Bandcamp lookups for imports; tests swap in an offline fetcher with recorded responses.
-        self.bandcamp_fetcher = lambda: __import__("bc_tagger_server.bandcamp", fromlist=["x"]).make_fetcher(self.store)
+        self.bandcamp_fetcher = self.default_bandcamp_fetcher
         if seed:
             self.seed_items()
         self._migrate_playlist_keys()
@@ -275,8 +275,9 @@ class Service:
             return None
         return min(dates) - timedelta(days=float(self.settings.get("quick_scan_margin_days")))
 
-    def prepare_index(self, items: list[dict], scan: str | None = None, ctx=None) -> dict[str, Any]:
-        """Bring the index up to date before matching ``items``: "quick" (default), "none" or "full"."""
+    def prepare_index(self, items: list[dict], scan: str | None = None, ctx=None, cutoff=None) -> dict[str, Any]:
+        """Bring the index up to date before matching ``items``: "quick" (default), "none" or "full".
+        ``cutoff`` overrides the quick scan's date (else it comes from the items)."""
         from .indexer import quick_scan
 
         mode = scan or self.default_scan_mode
@@ -286,7 +287,7 @@ class Service:
             return {"mode": "none"}
         if mode == "full":
             return self.scan(ctx)
-        cutoff = self.quick_scan_cutoff(items)
+        cutoff = cutoff or self.quick_scan_cutoff(items)
         if cutoff is None:
             return {"mode": "quick", "skipped": "the selected items have no tag dates"}
         self._scanning = {"kind": "quick", "job_id": ctx.job.id if ctx else None, "progress": {}}
@@ -632,6 +633,12 @@ class Service:
 
     # -- imports (Phase 3) --------------------------------------------------------------
 
+    def default_bandcamp_fetcher(self):
+        """Paced by the ``bandcamp_request_interval_s`` setting (and the BC_TAGGER_BANDCAMP_* switches)."""
+        from .bandcamp import make_fetcher
+
+        return make_fetcher(self.store, min_interval=float(self.settings.get("bandcamp_request_interval_s")))
+
     def start_import(self, file_obj: dict, default_tags: list[str], name: str | None = None):
         from . import importer
 
@@ -640,6 +647,15 @@ class Service:
         batch["job_id"] = job.id
         importer._save_batch(self.store, batch)
         return batch, job
+
+    def start_import_job(self, batch_id: str, what: str):
+        """Resume a batch's paused lookups, or fetch Bandcamp details for its rows: a job."""
+        from . import importer
+
+        fn = {"resume": importer.resume_batch, "details": importer.fetch_details}[what]
+        estimate = importer.prepare_job(self, batch_id, what)
+        job = self.jobs.submit(f"import-{what}", lambda ctx: fn(self, batch_id, ctx))
+        return job, estimate
 
     # -- health -----------------------------------------------------------------------
 

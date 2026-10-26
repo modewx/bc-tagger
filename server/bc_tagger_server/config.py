@@ -88,6 +88,8 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     "quick_scan_margin_days": 2,
     # Suggest a manual full rescan when the last one is older than this.
     "full_rescan_hint_days": 30,
+    # Imports: seconds between Bandcamp requests (one at a time; never below 1).
+    "bandcamp_request_interval_s": 2.5,
     # Seed for the items mirror until the extension pushes its own data.
     "seed_export_json": str(DEFAULT_EXPORT_JSON),
     # Where the built local app (Session B) lives; served at "/".
@@ -182,6 +184,13 @@ def _validate(merged: dict[str, Any]) -> dict[str, Any]:
         if v < 0:
             raise SettingsError(f"{key} must not be negative")
         out[key] = int(v) if v == int(v) else v
+    try:
+        interval = float(out["bandcamp_request_interval_s"])
+    except (TypeError, ValueError):
+        raise SettingsError("bandcamp_request_interval_s must be a number") from None
+    if interval < 1:
+        raise SettingsError("bandcamp_request_interval_s must be at least 1 (one request per second at most)")
+    out["bandcamp_request_interval_s"] = interval
     if out.get("rekordbox_target") not in ("test", "main"):
         raise SettingsError("rekordbox_target must be 'test' or 'main'")
     if not isinstance(out.get("allow_main_writes"), bool):

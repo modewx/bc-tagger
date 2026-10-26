@@ -80,20 +80,22 @@ def test_lookup_duplicates_locate_and_stats(svc):
         assert r["source"] == "bandcamp" and r["bandcamp"]["via"] == "collection"
         assert r["bandcamp"]["item"]["id"] == item_id and "tags" not in r["bandcamp"]["item"]
         assert r["duplicate"]["of"] == item_id and r["match"]["status"] == "in_collection" and r["checked"]
+        assert r["match"]["source"] == "collection" and r["match"]["item"]["id"] == item_id
     # the file's Bandcamp URL (a release page): the track is picked from its tracklist, no search
     sd = row_at(batch, 1)
-    assert sd["match"]["source"] == "file_url" and sd["match"]["status"] == "accepted"
+    assert sd["match"]["source"] == "file" and sd["match"]["status"] == "accepted" and sd["match_source"] == "file"
     assert sd["source"] == "bandcamp" and sd["bandcamp"]["via"] == "resolved"
     assert sd["bandcamp"]["item"]["album_url"] == "https://superdrama.bandcamp.com/album/select-edits-2017-2020"
     assert sd["links"]["bandcamp"] == sd["hints"]["bandcamp_url"] and sd["links"]["bandcamp_is_hint"]
-    # found by search: the full item from the page's data-tralbum
+    assert sd["bandcamp"]["item"].get("partial") is None and sd["bandcamp"]["item"]["file"]  # the file's URL: full page
+    # found by search: the search answer only (no page request); the page comes later, if asked for
     butterfly = row_at(batch, 13)
     assert butterfly["match"]["source"] == "search" and butterfly["match"]["status"] == "accepted"
     item = butterfly["bandcamp"]["item"]
-    assert item["id"].startswith("t") and item["album_id"].startswith("a") and item["file"]["mp3-128"]
-    # a custom domain that redirects forever: the search data only
-    squadra = row_at(batch, 14)
-    assert squadra["source"] == "bandcamp" and squadra["bandcamp"]["item"]["partial"] is True
+    assert item["id"] == "t3425186059" and item["album_id"].startswith("a") and item["partial"] is True
+    assert item["item_url"].startswith("https://") and "file" not in item
+    assert butterfly["match"]["item"] == item  # also under match.item
+    assert batch["estimate"]["lookups"] == 0 and batch["estimate"]["cached"] >= 8  # all recorded
     # not found: other, with the file's Discogs URL and a Bandcamp search to open in the browser
     carbon = [r for r in batch["rows"] if r["line"] == 48]
     assert all(r["source"] == "other" for r in carbon)
@@ -109,6 +111,7 @@ def test_lookup_duplicates_locate_and_stats(svc):
     assert s["total"] == len(rows) and s["duplicates"] == 2 and s["in_collection"] == 2
     assert s["bandcamp"] == s["in_collection"] + s["found"] and s["found"] >= 4 and s["linked"] == 0
     assert s["bandcamp"] + s["other"] == len(rows) and s["located"] >= 2 and s["pending_releases"] == 1
+    assert s["unavailable"] == 0 and batch["bandcamp_lookups"] == {"state": "on"}
     # default tags only for rows without tags
     assert row_at(batch, 297)["tags"] == ["must"]
     assert row_at(batch, 211)["tags"] == ["muertos", "dubstep", "industrial", "ritual"]
@@ -212,6 +215,7 @@ def test_api_flow(svc):
         assert changed["source"] == "other" and changed["match"]["status"] == "manual"
         changed = c.put(f"/api/import/{bid}/rows/{row['n']}", json={"choose": row["match"]["candidates"][0]["id"]}).json()
         assert changed["source"] == "bandcamp" and changed["bandcamp"]["via"] == "chosen"
+        assert changed["match"]["source"] == "picked"
         assert c.put(f"/api/import/{bid}/rows/{row['n']}", json={"choose": "t1"}).status_code == 400
         uf0 = next(x for x in batch["rows"] if x["line"] == 181)
         assert c.post("/api/import/link-candidates", json={"item": PAGE_ITEM}).json()[0]["n"] == uf0["n"]
@@ -248,3 +252,160 @@ def test_other_items_locate_with_the_rest(svc):
     view = svc.get_item_view("o0123456789")
     assert view["source"] == "other" and view["owned"]["status"] == "unknown"
     assert view["links"]["youtube"] and view["links"]["bandcamp"].startswith("https://bandcamp.com/search?")
+
+
+def test_user_set_url_link_item_and_open_rows(svc):
+    batch = run(svc, recorded_rows())
+    bid = batch["batch_id"]
+    uf0, carbon = row_at(batch, 181), row_at(batch, 48)
+    with TestClient(create_app(svc)) as c:
+        open_rows = c.get("/api/import/open-rows").json()
+        assert {(r["batch_id"], r["n"]) for r in open_rows} == {(bid, r["n"]) for r in batch["rows"] if r["source"] == "other"}
+        assert next(r for r in open_rows if r["n"] == carbon["n"])["position"] == "B1"
+        # a Bandcamp page the user found: stored, not fetched; it becomes the row's Bandcamp link
+        url = "https://example-label.bandcamp.com/track/the-human-being-disgusts"
+        row = c.put(f"/api/import/{bid}/rows/{uf0['n']}", json={"match_url": url + "?from=search"}).json()
+        assert row["match"]["status"] == "manual" and row["match"]["source"] == "url" and row["match"]["url"] == url
+        assert row["source"] == "other" and row["links"]["bandcamp"] == url and row["match"]["item"] is None
+        assert next(r for r in c.get("/api/import/open-rows").json() if r["n"] == uf0["n"])["match_url"] == url
+        assert c.put(f"/api/import/{bid}/rows/{uf0['n']}", json={"match_url": "https://x.com/nope"}).status_code == 400
+        # the item the extension saved from that page
+        row = c.put(f"/api/import/{bid}/rows/{uf0['n']}", json={"link_item": PAGE_ITEM}).json()
+        assert row["source"] == "bandcamp" and row["match"]["source"] == "linked" and row["match"]["status"] == "manual"
+        assert row["match"]["chosen"]["id"] == row["match"]["item"]["id"] == "t1111111111"
+        assert uf0["n"] not in {r["n"] for r in c.get("/api/import/open-rows").json()}
+        # a URL-only row is imported as an "other" item that keeps the URL
+        c.put(f"/api/import/{bid}/rows/{carbon['n']}", json={"match_url": "https://x.bandcamp.com/album/cosmic-function"})
+        c.post(f"/api/import/{bid}/commit")
+        other = [i for i in c.get("/api/items", params={"source": "other"}).json() if i.get("position") == "B1"]
+        assert other[0]["links"]["bandcamp"] == "https://x.bandcamp.com/album/cosmic-function"
+        assert c.get("/api/import/open-rows").json() == []
+
+
+def _challenge_fetcher(store, calls):
+    import httpx
+
+    def handler(request):
+        calls.append(str(request.url))
+        return httpx.Response(403, text="<html><head><title>Client Challenge</title></head><body>…</body></html>")
+
+    return Fetcher(store, "test", min_interval=0, transport=httpx.MockTransport(handler))
+
+
+def test_bot_check_stops_the_batch(svc):
+    with svc.store.tx() as c:
+        c.execute("DELETE FROM http_cache")  # nothing recorded: every lookup goes to the (stub) site
+    calls: list[str] = []
+    svc.bandcamp_fetcher = lambda: _challenge_fetcher(svc.store, calls)
+    batch = run(svc, recorded_rows())
+    assert len(calls) == 1  # the first lookup got the bot check; nothing after it, no retry
+    looked_up = [r for r in batch["rows"] if r["match"]["status"] != "in_collection"]
+    assert looked_up and all(r["match"]["status"] == "unavailable" and r["match"]["reason"] == "challenge"
+                             for r in looked_up)
+    assert all("Client Challenge" in r["match"]["error"] or "bot check" in r["match"]["error"] for r in looked_up)
+    assert batch["bandcamp_lookups"]["state"] == "stopped" and batch["stats"]["unavailable"] == len(looked_up)
+    sd = row_at(batch, 1)
+    assert sd["hints"]["bandcamp_url"].startswith("https://superdrama.bandcamp.com/")  # hints kept
+    assert svc.store.query_one("SELECT count(*) AS n FROM http_cache WHERE body LIKE '%Client Challenge%'")["n"] == 0
+    # re_resolve while stopped: the same state, no request
+    row = importer.update_row(svc, batch["batch_id"], row_at(batch, 13)["n"], {"re_resolve": True})
+    assert row["match"]["status"] == "unavailable" and len(calls) == 1
+    # other batches don't ask either (for an hour)
+    batch2 = run(svc, recorded_rows()[:3])
+    assert len(calls) == 1 and batch2["bandcamp_lookups"]["state"] == "stopped"
+    # the rest of the flow still works: duplicates, locate, commit
+    assert row_at(batch, 211)["source"] == "bandcamp" and row_at(batch, 206)["located"]["status"] == "located"
+    assert importer.commit(svc, batch["batch_id"])["tag_merges"] == 2
+
+
+def test_lookups_off_and_fixtures_switches(svc, monkeypatch):
+    monkeypatch.setenv("BC_TAGGER_BANDCAMP", "off")
+    calls: list[str] = []
+    svc.bandcamp_fetcher = lambda: _challenge_fetcher(svc.store, calls)
+    batch = run(svc, recorded_rows())
+    assert calls == [] and batch["bandcamp_lookups"]["state"] == "off"
+    assert {r["match"]["status"] for r in batch["rows"]} == {"in_collection", "unavailable"}
+    monkeypatch.delenv("BC_TAGGER_BANDCAMP")
+    # recorded answers only, from a file: what B's e2e uses
+    from bc_tagger_server import bandcamp
+
+    monkeypatch.setenv("BC_TAGGER_BANDCAMP_FIXTURES", str(FIXTURES))
+    svc.store.set_meta("bandcamp_challenge", None)
+    svc.bandcamp_fetcher = lambda: bandcamp.make_fetcher(svc.store)
+    batch = run(svc, recorded_rows())
+    assert row_at(batch, 13)["match"]["status"] == "accepted" and batch["stats"]["unavailable"] == 0
+
+
+def test_details_job_fetches_pages_only_when_asked(svc):
+    batch = run(svc, recorded_rows())
+    bid = batch["batch_id"]
+    est = importer.prepare_job(svc, bid, "details")
+    assert est["requests"] == 0 and est["cached"] >= 1  # the recorded pages
+    result = importer.fetch_details(svc, bid)
+    assert result["fetched"] >= 1 and result["stopped"] is None
+    item = row_at(importer.get_batch(svc, bid), 13)["bandcamp"]["item"]
+    assert item.get("partial") is None and item["file"]["mp3-128"] and item["track_num"]
+    with pytest.raises(importer.ImportError_, match="aren't paused"):
+        importer.prepare_job(svc, bid, "resume")
+
+
+def test_rate_limit_pauses_and_resume_continues(svc):
+    import httpx
+
+    with svc.store.tx() as c:
+        c.execute("DELETE FROM http_cache")
+    calls: list[str] = []
+    sleeps: list[float] = []
+
+    def limited(request):
+        calls.append(str(request.url))
+        return httpx.Response(429, headers={"Retry-After": "7"} if len(calls) == 1 else {}, text="slow down")
+
+    def fetcher_for(handler):
+        f = Fetcher(svc.store, "test", min_interval=2.5, transport=httpx.MockTransport(handler))
+        f.sleep = sleeps.append
+        return f
+
+    svc.bandcamp_fetcher = lambda: fetcher_for(limited)
+    batch = run(svc, recorded_rows())
+    # Retry-After honored once, then 30/60/120 s waits; then the batch pauses (no more requests)
+    assert len(calls) == 4 and [round(w) for w in sleeps if w > 3][:3] == [7, 30, 60]
+    assert batch["bandcamp_lookups"]["state"] == "paused" and batch["bandcamp_lookups"]["error"] == importer.RATE_LIMITED
+    paused = [r for r in batch["rows"] if r["match"]["status"] == "unavailable"]
+    assert paused and all(r["match"]["reason"] == "rate_limited" for r in paused)
+    assert svc.store.get_meta("bandcamp_challenge") is None  # not a bot check: other batches may still ask
+    row = importer.update_row(svc, batch["batch_id"], paused[0]["n"], {"re_resolve": True})
+    assert row["match"]["reason"] == "rate_limited" and len(calls) == 4  # paused: no request
+    # later: the user resumes; the recorded answers stand in for Bandcamp
+    load_recorded(svc.store)
+    svc.bandcamp_fetcher = lambda: Fetcher(svc.store, "test", offline=True)
+    est = importer.prepare_job(svc, batch["batch_id"], "resume")
+    assert est["lookups"] == 0 and est["cached"] == len(paused)
+    importer.resume_batch(svc, batch["batch_id"])
+    batch = importer.get_batch(svc, batch["batch_id"])
+    assert batch["bandcamp_lookups"] == {"state": "on"} and batch["stats"]["unavailable"] == 0
+    assert row_at(batch, 13)["match"]["status"] == "accepted"
+    assert row_at(batch, 206)["located"]["status"] == "located"
+
+
+def test_estimate_and_pace(svc):
+    import httpx
+
+    with svc.store.tx() as c:
+        c.execute("DELETE FROM http_cache")
+    svc.settings.update({"bandcamp_request_interval_s": 3})
+    assert svc.default_bandcamp_fetcher().min_interval == 3.0
+    svc.bandcamp_fetcher = svc.default_bandcamp_fetcher
+    with pytest.raises(Exception, match="at least 1"):
+        svc.settings.update({"bandcamp_request_interval_s": 0.5})
+    batch = importer.create_batch(svc, {"format": "bc-tagger-import/1", "items": recorded_rows()}, ["must"])
+    est = batch["estimate"]
+    looked_up = len(recorded_rows()) - 2  # Elhwah and Atacama are in the collection
+    assert est["lookups"] == looked_up and est["cached"] == 0 and est["interval_s"] == 3.0
+    assert est["requests"] == -(-looked_up * 13 // 10) and est["seconds"] == est["requests"] * 3
+    assert est["text"].startswith(f"~{looked_up} lookups ≈ ")
+    with TestClient(create_app(svc)) as c, pytest.MonkeyPatch.context() as mp:
+        mp.setenv("BC_TAGGER_BANDCAMP", "off")
+        r = c.post("/api/import", json={"file": {"format": "bc-tagger-import/1", "items": recorded_rows()}}).json()
+        assert r["estimate"]["lookups"] >= 0 and "text" in r["estimate"]
+        svc.jobs.wait(r["job_id"], timeout=30)

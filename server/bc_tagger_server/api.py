@@ -80,6 +80,8 @@ class RowChanges(BaseModel):
     title: Optional[str] = None
     album: Optional[str] = None
     re_resolve: bool = False
+    match_url: Optional[str] = None  # a Bandcamp page the user found (stored, not fetched)
+    link_item: Optional[dict] = None  # the item the extension saved from the open Bandcamp page
 
 
 class LinkBody(BaseModel):
@@ -205,11 +207,25 @@ def create_app(service: Service | None = None) -> FastAPI:
             batch, job = svc.start_import(body.file, body.default_tags, body.name)
         except imp.ImportError_ as e:
             raise HTTPException(400, str(e)) from e
-        return {"batch_id": batch["batch_id"], "job_id": job.id}
+        return {"batch_id": batch["batch_id"], "job_id": job.id, "estimate": batch["estimate"]}
+
+    @app.post("/api/import/{batch_id}/resume")
+    def import_resume(batch_id: str) -> dict:
+        job, estimate = _import_call(svc.start_import_job, batch_id, "resume")
+        return {"job_id": job.id, "estimate": estimate}
+
+    @app.post("/api/import/{batch_id}/details")
+    def import_details(batch_id: str) -> dict:
+        job, estimate = _import_call(svc.start_import_job, batch_id, "details")
+        return {"job_id": job.id, "estimate": estimate}
 
     @app.get("/api/import")
     def import_list() -> list[dict]:
         return imp.list_batches(svc)
+
+    @app.get("/api/import/open-rows")
+    def import_open_rows() -> list[dict]:
+        return imp.open_rows(svc)
 
     @app.get("/api/import/{batch_id}")
     def import_get(batch_id: str) -> dict:

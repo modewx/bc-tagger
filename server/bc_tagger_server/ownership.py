@@ -17,10 +17,12 @@ from typing import Any
 
 import httpx
 
+from .fetcher import is_challenge
+
 log = logging.getLogger(__name__)
 
 SUMMARY_URL = "https://bandcamp.com/api/fan/2/collection_summary"
-USER_AGENT = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) bc-tagger/0.1"
+USER_AGENT = "bc-tagger-dev/0.1 (personal collection tool; not used for AI training; https://github.com/modewx/bc-tagger)"
 
 
 class OwnershipError(RuntimeError):
@@ -56,6 +58,9 @@ def fetch_collection(cookies_file: str | Path, client: httpx.Client | None = Non
     finally:
         if own_client:
             client.close()
+    if is_challenge(r.text):  # the bot check: report it, don't retry or work around it
+        raise OwnershipError("Bandcamp answered with its bot check (Client Challenge); not retried. "
+                             "The extension's ownership push still works.")
     if r.status_code != 200:
         raise OwnershipError(f"Bandcamp answered HTTP {r.status_code} (cookies expired?)")
     data = r.json()
