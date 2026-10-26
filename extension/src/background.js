@@ -15,7 +15,7 @@ import {
   sameServerOrigin,
   syncTick,
 } from "./serverSync";
-import { serialized, withItems, getStorage, setStorage } from "./itemsStore";
+import { serialized, withItems, getStorage, setStorage, nowIso, sameTags } from "./itemsStore";
 import { isChallengePage } from "../../shared/bandcampChallenge";
 
 // ---------------------------------------------------------------------------
@@ -120,7 +120,9 @@ function updateItemFields(updates) {
 function updateItemTags(id, tags) {
   return withItems((items) => {
     if (!items[id]) return { ok: false, reason: "not-found" };
-    items[id].tags = Array.isArray(tags) ? tags : [];
+    const next = Array.isArray(tags) ? tags : [];
+    if (!sameTags(items[id].tags, next)) items[id].modified_at = nowIso();
+    items[id].tags = next;
     return { ok: true };
   });
 }
@@ -321,8 +323,13 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
   }
 
   if (request.type === "addTaggedItem") {
+    // Starring / tagging on a Bandcamp page: a new item, or new tags, is a modification.
     withItems((items) => {
-      items[request.item.id] = request.item;
+      const prev = items[request.item.id];
+      const item = { ...request.item };
+      item.modified_at = !prev || !sameTags(prev.tags, item.tags) ? nowIso() : prev.modified_at || item.modified_at;
+      if (!item.modified_at) delete item.modified_at;
+      items[item.id] = item;
     });
     return false;
   }

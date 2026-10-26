@@ -14,7 +14,7 @@
 // Status:    chrome.storage.session bcSyncStatus = {...} (shown in the popup)
 // ---------------------------------------------------------------------------
 
-import { withItems, serialized, getStorage, setStorage } from "./itemsStore";
+import { withItems, serialized, getStorage, setStorage, nowIso, sameTags, laterIso } from "./itemsStore";
 import { CHALLENGE_TEXT, isChallengePage } from "../../shared/bandcampChallenge";
 
 // http://127.0.0.1:8765 unless the build sets BC_DEFAULT_SERVER_URL (e2e builds).
@@ -204,6 +204,8 @@ export async function pullTagEdits() {
     edits.forEach((edit) => {
       const id = edit.item_id || edit.id;
       if (items[id] && Array.isArray(edit.tags)) {
+        // The edit's own time (made in the local app), else now.
+        if (!sameTags(items[id].tags, edit.tags) || edit.modified_at) items[id].modified_at = edit.modified_at || nowIso();
         items[id].tags = edit.tags;
         applied++;
       } else {
@@ -236,13 +238,17 @@ export async function pullPendingAdds() {
       if (!item || !item.id) return;
       (item.tags || []).forEach((t) => vocab.push(t));
       const existing = items[item.id];
+      const stamp = item.modified_at || nowIso(); // the import commit's time when the server sends it
       if (!existing) {
-        items[item.id] = { ...item, date_added: item.date_added || new Date().toISOString() };
+        items[item.id] = { ...item, date_added: item.date_added || nowIso(), modified_at: stamp };
         added++;
       } else {
         const union = [...new Set([...(existing.tags || []), ...(item.tags || [])])];
-        if (union.length !== (existing.tags || []).length) {
+        const newer = laterIso(existing.modified_at, stamp) !== existing.modified_at;
+        // A merge is a modification even without new tags (it was just imported again).
+        if (union.length !== (existing.tags || []).length || newer) {
           existing.tags = union;
+          existing.modified_at = laterIso(existing.modified_at, stamp);
           merged++;
         }
       }

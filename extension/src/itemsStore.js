@@ -33,3 +33,13 @@ export function withItems(mutate) {
 }
 
 export { get as getStorage, set as setStorage };
+
+// modified_at: when an item's tags last changed (ISO, like date_added).
+export const nowIso = () => new Date().toISOString();
+export const sameTags = (a, b) => {
+  const x = new Set(a || []);
+  const y = new Set(b || []);
+  return x.size === y.size && [...x].every((t) => y.has(t));
+};
+// The later of two ISO dates (either may be missing).
+export const laterIso = (a, b) => (!a ? b : !b ? a : a > b ? a : b);
