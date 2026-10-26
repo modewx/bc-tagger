@@ -16,6 +16,7 @@ from typing import Any
 from . import downloader
 from .downloader import DownloadRefused
 from .items import album_name
+from .store import now_iso
 from .tagread import AUDIO_EXTS
 
 _one_at_a_time = threading.Lock()
@@ -162,7 +163,42 @@ def run(svc, refs: list[str], force: bool = False, ctx=None, full_release: bool 
 
     for e in p["items"]:
         publish(e)
-    results = []
+    results: list[dict] = []
+    try:
+        stop = _run_releases(svc, p, by_ref, force, ctx, job_id, publish, results)
+    finally:
+        _record(svc, p["items"], results, full_release, job_id)
+    if ctx:
+        ctx.progress(len(p["releases"]), len(p["releases"]), "downloads done")
+    return {"destination": p["destination"], "releases": results, "items": p["items"], "stopped": stop}
+
+
+def _record(svc, entries: list[dict], results: list[dict], full_release: bool, job_id: str | None) -> None:
+    """Keep what each item got (done or failed; not skipped ones) for the import logs."""
+    folders = {r["release"]: r.get("folder") for r in results}
+    at = now_iso()
+    with svc.store.tx() as c:
+        for e in entries:
+            if e["state"] in ("done", "failed"):
+                c.execute("INSERT INTO download_log(ref, item_id, release, full_release, state, message, folder, job_id, at) "
+                          "VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                          (e["ref"], e.get("item_id"), e.get("release"), int(bool(full_release)), e["state"],
+                           e.get("message"), folders.get(e.get("release")), job_id, at))
+
+
+def downloads_for(store, item_ids: list[str], refs: list[str], since: str) -> list[dict]:
+    """Downloads recorded for these items (since ``since``) or these refs, oldest first."""
+    ids, refs = [i for i in item_ids if i], [r for r in refs if r]
+    if not ids and not refs:
+        return []
+    marks = lambda xs: ",".join("?" * len(xs)) or "NULL"  # noqa: E731
+    return [dict(r) for r in store.query(
+        f"SELECT ref, item_id, release, full_release, state, message, folder, at FROM download_log "
+        f"WHERE (item_id IN ({marks(ids)}) AND at >= ?) OR ref IN ({marks(refs)}) ORDER BY seq",
+        (*ids, since, *refs))]
+
+
+def _run_releases(svc, p: dict, by_ref: dict, force: bool, ctx, job_id, publish, results: list[dict]) -> str | None:
     stop = None
     with _one_at_a_time:
         for i, rel in enumerate(p["releases"], 1):
@@ -218,6 +254,4 @@ def run(svc, refs: list[str], force: bool = False, ctx=None, full_release: bool 
                 publish(e)
             results.append({**{k: v for k, v in res.items() if k != "log_tail"}, "indexed": indexed,
                             "refs": rel["refs"]})
-    if ctx:
-        ctx.progress(len(p["releases"]), len(p["releases"]), "downloads done")
-    return {"destination": p["destination"], "releases": results, "items": p["items"], "stopped": stop}
+    return stop

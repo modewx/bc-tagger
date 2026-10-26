@@ -100,6 +100,7 @@ for `export` and `xml`.
 | `cookies_file`, `bandcamp_username` | the fresh cookies file, `herrasti` |
 | `downloads_dir` / `download_format` | `""` (= the owned root; must be inside an owned root) / `aiff-lossless` |
 | `lookup_source` | `bandcamp` (`musicbrainz`: hints only, no Bandcamp requests; `both`) |
+| `import_log_dir` | `""` (= `<data dir>/import-logs`; never inside a root or on the music drive) |
 | `bandcamp_request_interval_s` | `1.0` (≥ 0.1; the server's pace for Bandcamp lookups) |
 | `bandcamp_browser_concurrency` / `bandcamp_browser_spacing_ms` | `2` / `400` (for the extension's own fetches) |
 | `watch_roots` / `watch_debounce_seconds` | `false` / `3` |
@@ -329,6 +330,29 @@ More import options:
   (`PUT …/rows/<n> {path}`, with `GET /api/fs/list` to browse the roots and `GET /api/index/search`), and
   **reopen** a batch after a restart (`GET /api/import` gives each batch's `step`, `progress`, `job`,
   `resumable`; a batch caught mid-lookup becomes `interrupted` and `resume` finishes it from the cache).
+
+### Import logs
+
+Every commit writes a log to `import_log_dir`: `YYYY-MM-DD_HHMMSS_<batch name>_<batch_id>.json` (local time),
+with a Markdown summary beside it (`.md`: counts and a table of rows and outcomes). A commit that stops part
+way writes one too (`status: "partial"`, with the error), and so does the retry; rows done the first time are
+marked `imported_earlier`. The JSON (`bc-tagger-import-log/1`) has:
+
+- `batch`: id, name, source file, created/committed times, default tags and `default_tags_all`, `lookup`
+  (server/browser), `lookup_source`, the tag mapping, new tags and the stats;
+- `counts`: `added_to_tagger`, `merged`, `added_to_other`, `merged_into_other`, `unchecked`, `not_imported`,
+  `imported_earlier`, `located`, `downloaded`, `total`;
+- `rows[]`: line and raw text; the final artist, title and album; `tags`, `tags_from_defaults`, `mapped_tags`
+  (`{unknown tag: what it became}`; null for batches mapped before logs existed) and `new_tags`; `outcome`,
+  `item_id` and, for merges, `tags_before` → `tags_after`; `match` (source, status, via) and `bandcamp_url`;
+  `located` (status, path); `downloads` (each one started for the row, or for its item since the batch
+  began: state, message, release, folder).
+
+The commit result names the files (`log`, `log_md`, `log_dir`; `log_error` if it couldn't be written, which
+never fails the import), and the batch lists them (`logs`). `GET /api/import/logs` lists them newest first
+(name, `logged_at`, batch, status, counts); `GET /api/import/logs/<name>` returns the JSON or the Markdown;
+`POST /api/import/logs/reveal {name?}` shows a log in Finder (`open -R`) or opens the folder (requests from
+this Mac only).
 
 ## Tests
 
