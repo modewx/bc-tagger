@@ -796,9 +796,15 @@ LIST_FIELDS = ("batch_id", "name", "created_at", "status", "error", "stats", "es
 
 
 def get_batch(svc, batch_id: str) -> dict:
+    from .views import ownership_status
+
     batch = load_batch(svc.store, batch_id)
     live = _live(svc, batch)
-    return {**batch, **live, "rows": load_rows(svc.store, batch_id)}
+    rows = load_rows(svc.store, batch_id)
+    for row in rows:  # what Download can fetch for Bandcamp rows (not stored: ownership changes)
+        item = (row.get("bandcamp") or {}).get("item")
+        row["owned"] = ownership_status(svc.store, item) if item else None
+    return {**batch, **live, "rows": rows}
 
 
 def list_batches(svc) -> list[dict]:

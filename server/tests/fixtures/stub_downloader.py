@@ -6,6 +6,8 @@ jar's lines and writes ``<folder>/<artist>/<year> - <title>/NN <track>.aiff`` wi
 ``BC_TAGGER_STUB_RELEASES=<json file>``: ``{"a123": {"artist", "title", "year", "tracks": [..],
 "fail": "not_in_collection"|"challenge"|"rate_limit"|"error"}}``; unknown ids get a generic release.
 ``BC_TAGGER_STUB_DELAY=<seconds>``: wait that long before writing (to see progress in a UI).
+``BC_TAGGER_STUB_RETRY=1``: the first download attempt fails and is retried, like the tool's retries.
+Download progress is printed like the tool does: "Progress: 42.00 %" ending in "\r", no newline.
 """
 
 import argparse
@@ -86,6 +88,11 @@ def main() -> int:
         release_folder = folder / rel["artist"] / f'{rel["year"]} - {rel["title"]}'
         log(f"Starting the download of {name}.")
         log(f"Release folder: {release_folder}")
+        if os.environ.get("BC_TAGGER_STUB_RETRY"):
+            log('Error while trying: "java.net.SocketTimeoutException: Read timed out".')
+            log("Retrying (1/3).")
+        for pct in (0, 12.5, 12.9, 50, 99.99):
+            print(f"Progress: {pct:.2f} %" + " " * 20 + "\r", end="", flush=True)
         time.sleep(float(os.environ.get("BC_TAGGER_STUB_DELAY", "0")))
         if release_folder.exists() and not args.force:
             log(f"{name} already exists on disk, skipping.")

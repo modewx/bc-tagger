@@ -268,6 +268,12 @@ to their album when the album is owned, releases are deduped and downloaded one 
 --jobs=1`, the app's User-Agent, the cookies file), into `downloads_dir` (empty: the owned root; refused
 unless inside an owned root), in `download_format` (default `aiff-lossless`). After each release its folder is
 indexed and the affected items and rows are located. Bandcamp's bot check or a rate limit stops the rest.
+`full_release: true` ("Download Full Release") fetches the whole album/EP of each track, when that release is
+owned; without it ("Download File") a track bought alone is fetched by itself. Item views say what's possible
+(`owned.track_owned`, `owned.album_owned`, `owned.full_release`). If the tool's cache says a release was
+downloaded before but its files aren't in the index (moved or deleted), it is fetched again once
+(`--force`). Progress reads "downloading 42 %" (SSE `download` events carry `percent`), and a retry names
+the error behind it.
 `dry_run: true` answers the plan (destination, releases, per-item state) without downloading.
 Only the user's clicks download into the real Collection; tests and e2e use the stub
 (`BC_TAGGER_DOWNLOADER_STUB=server/tests/fixtures/stub_downloader.py`).

@@ -24,6 +24,7 @@ MESSAGES = {
     "downloaded": "downloaded",
     "on_disk": "already on disk",
     "cached": "downloaded before (the downloader's cache): nothing new; download again with force",
+    "redownloaded": "downloaded again: the downloader's cache listed it, but its files weren't found",
     "not_in_collection": "not in your Bandcamp collection",
     "challenged": "Bandcamp answered with its bot check; downloads stopped",
     "rate_limited": "Bandcamp is rate-limiting; try again later",
@@ -39,14 +40,20 @@ def _owned(store, ids: list[str]) -> set[str]:
     return {r["id"] for r in store.query(f"SELECT id FROM owned_ids WHERE id IN ({marks})", ids)}
 
 
-def release_for(store, item: dict) -> str | None:
-    """The collection item to download for ``item``: its album if owned, else itself if owned."""
+def release_for(store, item: dict, full_release: bool = False) -> str | None:
+    """The collection item to download for ``item``. Default ("Download File"): the track itself when it
+    was bought alone, else its album (the only way to get it). ``full_release``: always the album or EP
+    the track is on, which must be owned. An album item is its own release either way."""
     album = item.get("album_id")
     album = f"a{album}" if isinstance(album, int) else album
+    if str(item["id"]).startswith("a"):
+        album = item["id"]
     owned = _owned(store, [album if isinstance(album, str) and album.startswith("a") else None, item["id"]])
-    if album in owned:
-        return album
-    return item["id"] if item["id"] in owned else None
+    if full_release:
+        return album if album in owned else None
+    if item["id"] in owned:
+        return item["id"]
+    return album if album in owned else None
 
 
 def _resolve(svc, ref: str, collection: dict[str, dict]) -> dict[str, Any]:
@@ -75,7 +82,7 @@ def _resolve(svc, ref: str, collection: dict[str, dict]) -> dict[str, Any]:
     return {"ref": ref, "item": item, "located": bool(located) and located["status"] == "located"}
 
 
-def plan(svc, refs: list[str], force: bool = False) -> dict[str, Any]:
+def plan(svc, refs: list[str], force: bool = False, full_release: bool = False) -> dict[str, Any]:
     """What a download would do: ``{destination, format, releases: [{release, refs, title, artist}], items:
     [{ref, item_id, title, artist, release, state: "queued"|"skipped"|"failed", message}]}``."""
     folder = downloader.downloads_dir(svc.settings)
@@ -87,9 +94,11 @@ def plan(svc, refs: list[str], force: bool = False) -> dict[str, Any]:
         entry = {"ref": ref, "item_id": item.get("id"), "title": item.get("title"), "artist": item.get("artist"),
                  "release": None, "state": "failed", "message": r.get("error")}
         if item:
-            release = release_for(svc.store, item)
+            release = release_for(svc.store, item, full_release)
             if release is None:
                 entry["message"] = "not owned"
+                if full_release and release_for(svc.store, item) is not None:
+                    entry["message"] = "the full release isn't owned (only this track)"
             elif r["located"] and not force:
                 entry.update(release=release, state="skipped", message="already located")
             else:
@@ -142,8 +151,8 @@ def _locate_refs(svc, entries: list[dict]) -> dict[str, bool]:
     return located
 
 
-def run(svc, refs: list[str], force: bool = False, ctx=None) -> dict[str, Any]:
-    p = plan(svc, refs, force)
+def run(svc, refs: list[str], force: bool = False, ctx=None, full_release: bool = False) -> dict[str, Any]:
+    p = plan(svc, refs, force, full_release)
     job_id = ctx.job.id if ctx else None
     by_ref = {e["ref"]: e for e in p["items"]}
 
@@ -168,14 +177,33 @@ def run(svc, refs: list[str], force: bool = False, ctx=None) -> dict[str, Any]:
                 publish(e)
             if ctx:
                 ctx.progress(i - 1, len(p["releases"]), f"downloading {i}/{len(p['releases'])}: {rel['title']}")
+            def report(message, percent=None, i=i, rel=rel, entries=entries):
+                name = rel["title"] or rel["release"]
+                if ctx:
+                    ctx.progress(i - 1, len(p["releases"]), f"{name}: {message}")
+                for e in entries:  # per-row progress for the UI
+                    svc.jobs.bus.publish("download", {"job_id": job_id, "ref": e["ref"], "item_id": e["item_id"],
+                                                      "release": rel["release"], "state": "downloading",
+                                                      "message": message, "percent": percent, "located": None})
+
             try:
-                res = downloader.run_release(svc.settings, rel["release"], p["format"], force,
-                                             on_line=lambda line: ctx.progress(i - 1, len(p["releases"]), line) if ctx else None)
+                res = downloader.run_release(svc.settings, rel["release"], p["format"], force, on_line=report)
             except (DownloadRefused, OSError) as err:
                 res = {"release": rel["release"], "outcome": "failed", "ok": False, "folder": None, "files": [],
                        "errors": [str(err)]}
                 if "not mounted" in str(err):
                     stop = str(err)  # the drive went away: don't try the rest
+            if res["outcome"] == "cached" and not force and not all(_locate_refs(svc, entries).values()):
+                # The tool's cache says "downloaded", but the files aren't in the index (moved, renamed or
+                # deleted): the user asked for them, so fetch it again, ignoring that cache once.
+                report("the downloader's cache lists it, but its files weren't found: downloading again")
+                try:
+                    again = downloader.run_release(svc.settings, rel["release"], p["format"], True, on_line=report)
+                except (DownloadRefused, OSError) as err:
+                    again = {"outcome": "failed", "ok": False, "folder": None, "files": [], "errors": [str(err)]}
+                if again["outcome"] == "downloaded":
+                    again["outcome"] = "redownloaded"
+                res = {**again, "release": rel["release"], "retries": res.get("retries", []) + again.get("retries", [])}
             if res["outcome"] in ("challenged", "rate_limited"):
                 stop = MESSAGES[res["outcome"]]
             indexed = _index_folder(svc, res.get("folder")) if res["ok"] else 0

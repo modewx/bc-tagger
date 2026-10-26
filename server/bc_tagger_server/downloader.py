@@ -135,10 +135,22 @@ def release_command(settings, release_id: str, audio_format: str = "aiff-lossles
     ]
 
 
+_PROGRESS = re.compile(r"Progress(?:es)?:\s*(?:\[[^\]]*\]\s*)?([\d.,]+)\s*%")
+_TRY_ERROR = re.compile(r'Error while trying: "(.*)"\.?\s*$')
+_RETRY = re.compile(r"Retrying \((\d+)/(\d+)\)")
+
+
+def _short_error(error: str | None) -> str:
+    """"java.net.SocketTimeoutException: Read timed out" → "SocketTimeoutException: Read timed out"."""
+    return re.sub(r"^(?:[a-z_][a-z0-9_]*\.)+", "", (error or "an error").strip())[:160]
+
+
 def run_release(settings, release_id: str, audio_format: str = "aiff-lossless", force: bool = False,
-                on_line: Callable[[str], None] | None = None) -> dict[str, Any]:
+                on_line: Callable[..., None] | None = None) -> dict[str, Any]:
     """Download one release; ``outcome``: downloaded | on_disk | cached | not_in_collection |
-    challenged | rate_limited | failed."""
+    challenged | rate_limited | failed. ``on_line(message, percent)`` gets the tool's output in plain
+    words: the download's percentage (the tool prints it without line breaks), and on a retry the
+    error that caused it."""
     cmd = release_command(settings, release_id, audio_format, force)
     target, root = _downloads_root(settings)  # again: the drive may have gone since the job started
     try:
@@ -146,16 +158,40 @@ def run_release(settings, release_id: str, audio_format: str = "aiff-lossless", 
     except NotMounted as e:
         raise DownloadRefused(str(e)) from None
     lines: list[str] = []
+    retries: list[str] = []
     folder: str | None = None
+    percent: float | None = None
+    last_error: str | None = None
+    say = on_line or (lambda message, percent=None: None)
     proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
     assert proc.stdout is not None
-    for raw in proc.stdout:
-        line = redact(raw.rstrip())
+    for raw in proc.stdout:  # text mode: the tool's "\r" progress updates arrive as lines too
+        line = redact(raw.strip())
+        if not line:
+            continue
+        progress = _PROGRESS.search(line)
+        if progress:  # thousands of these: report whole percents, don't keep them
+            p = float(progress.group(1).replace(",", "."))
+            if percent is None or int(p) > int(percent):
+                percent = p
+                say(f"downloading {int(p)} %", p)
+            continue
         lines.append(line)
         if "Release folder: " in line:
             folder = line.split("Release folder: ", 1)[1].strip()
-        if on_line:
-            on_line(line[-200:])
+        if (m := _TRY_ERROR.search(line)) is not None:
+            last_error = m.group(1)
+            retries.append(_short_error(last_error))
+            say(f"Bandcamp error: {_short_error(last_error)}", percent)
+        elif (m := _RETRY.search(line)) is not None:
+            percent = None
+            say(f"retrying {m.group(1)}/{m.group(2)} after: {_short_error(last_error)}", None)
+        elif "Starting the download of" in line:
+            say("downloading…", None)
+        elif "successfully downloaded" in line:
+            say("downloaded; unpacking done", 100.0)
+        else:
+            say(line[-200:], percent)
     code = proc.wait()
     text = "\n".join(lines)
     errors = [ln for ln in lines if "ERROR" in ln or "Could not download item" in ln]
@@ -177,7 +213,8 @@ def run_release(settings, release_id: str, audio_format: str = "aiff-lossless", 
     if folder and Path(folder).is_dir():
         new_files = sorted(str(p) for p in Path(folder).rglob("*") if p.is_file() and not p.name.startswith("."))
     return {"release": release_id, "outcome": outcome, "ok": outcome in ("downloaded", "on_disk", "cached"),
-            "exit_code": code, "folder": folder, "files": new_files, "errors": errors[-5:], "log_tail": lines[-20:]}
+            "exit_code": code, "folder": folder, "files": new_files, "errors": errors[-5:], "retries": retries,
+            "log_tail": lines[-20:]}
 
 
 def redact(line: str) -> str:
