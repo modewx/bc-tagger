@@ -78,29 +78,93 @@ async function refreshOwnership(onProgress) {
   return jobs.run("/api/ownership/refresh", {}, onProgress);
 }
 
-// "… shown" buttons act on the rows currently shown (search + tags + Show).
-function shownIds() {
-  return Object.keys(page.getView());
+// The rows the bulk buttons act on: the selected ones (checkbox column) when
+// there are any, else the rows currently shown (search + tags + Show).
+const selected = new Set();
+function selectedIds() {
+  const items = page.getItems();
+  return [...selected].filter((k) => k in items);
+}
+function targetIds() {
+  const sel = selectedIds();
+  return sel.length ? sel : Object.keys(page.getView());
 }
 
 function locateShown(onProgress) {
-  const ids = shownIds();
-  if (!ids.length) return Promise.resolve({ status: "done", result: { message: "no items shown" } });
+  const ids = targetIds();
+  if (!ids.length) return Promise.resolve({ status: "done", result: { message: "nothing selected or shown" } });
   return jobs.run("/api/locate", { ids }, onProgress);
 }
 
 // Export writes rekordbox, so preview it with a dry run and ask first.
 function exportShown(onProgress) {
-  const ids = shownIds();
-  if (!ids.length) return Promise.resolve({ status: "done", result: { message: "no items shown" } });
+  const ids = targetIds();
+  if (!ids.length) return Promise.resolve({ status: "done", result: { message: "nothing selected or shown" } });
   return runExport(jobs, { ids }, onProgress, { ask: true });
 }
 
-function updateShownButtons(shown) {
+function updateShownButtons() {
+  const sel = selectedIds().length;
+  const shown = Object.keys(page.getView()).length;
   const loc = document.getElementById("locateShown");
   const exp = document.getElementById("exportShown");
-  if (loc) loc.textContent = `Locate shown (${shown})`;
-  if (exp) exp.textContent = `Export shown (${shown})…`;
+  const dl = document.getElementById("downloadOwnedMissing");
+  const clear = document.getElementById("clearSelection");
+  if (loc) loc.textContent = sel ? `Locate selected (${sel})` : `Locate shown (${shown})`;
+  if (exp) exp.textContent = sel ? `Export selected (${sel})…` : `Export shown (${shown})…`;
+  if (dl) dl.textContent = sel ? "Download owned missing (selected)" : "Download owned missing";
+  if (clear) {
+    clear.hidden = !sel;
+    clear.textContent = `Clear selection (${sel})`;
+  }
+  syncSelectAll();
+}
+
+// The checkbox column: select rows for the bulk buttons; the header box
+// selects / clears every row shown.
+function syncSelectAll() {
+  const all = document.getElementById("selectAll");
+  if (!all) return;
+  const shown = Object.keys(page.getView());
+  const n = shown.filter((k) => selected.has(k)).length;
+  all.checked = shown.length > 0 && n === shown.length;
+  all.indeterminate = n > 0 && n < shown.length;
+}
+
+function selectColumn() {
+  return {
+    id: "sel",
+    first: true,
+    label: "",
+    headerRender(th) {
+      const all = document.createElement("input");
+      all.type = "checkbox";
+      all.id = "selectAll";
+      all.title = "Select all shown / none";
+      all.addEventListener("click", (e) => e.stopPropagation());
+      all.addEventListener("change", () => {
+        const shown = Object.keys(page.getView());
+        shown.forEach((k) => (all.checked ? selected.add(k) : selected.delete(k)));
+        document.querySelectorAll("#collectionTable .row-check").forEach((b) => (b.checked = selected.has(b.closest("tr").dataset.key)));
+        updateShownButtons();
+      });
+      th.appendChild(all);
+      setTimeout(syncSelectAll);
+    },
+    render(cell, key) {
+      cell.classList.add("no-row-play", "sel-cell");
+      const box = document.createElement("input");
+      box.type = "checkbox";
+      box.className = "row-check";
+      box.checked = selected.has(key);
+      box.addEventListener("change", () => {
+        if (box.checked) selected.add(key);
+        else selected.delete(key);
+        updateShownButtons();
+      });
+      cell.appendChild(box);
+    },
+  };
 }
 
 async function refreshHealth() {
@@ -124,12 +188,15 @@ async function refreshHealth() {
     topBarStart: nav.el,
     // By column id (v1 was by position and got shifted when Src was added).
     colWidthKey: "bc_app_col_widths_v2",
-    extraColumns: appColumns({
-      jobs,
-      events,
-      page: () => page,
-      statusEl: () => page.statusEl,
-    }),
+    extraColumns: [
+      selectColumn(),
+      ...appColumns({
+        jobs,
+        events,
+        page: () => page,
+        statusEl: () => page.statusEl,
+      }),
+    ],
     extraToolbarButtons: [
       jobButton("locateLatest", "Locate latest 10", "Match the 10 most recently tagged items to local files", (p) =>
         jobs.run("/api/locate", { latest: 10 }, p)
@@ -153,22 +220,32 @@ async function refreshHealth() {
           await page.reload();
         },
       },
-      jobButton("locateShown", "Locate shown", "Match the items shown below to local files", locateShown),
+      jobButton("locateShown", "Locate", "Match the selected items (or, with none selected, the ones shown) to local files", locateShown),
       jobButton(
         "exportShown",
-        "Export shown",
-        "Add the located items shown below to rekordbox (previews the changes first)",
+        "Export",
+        "Add the selected located items (or, with none selected, the ones shown) to rekordbox (previews the changes first)",
         exportShown
       ),
       {
+        id: "clearSelection",
+        label: "Clear selection",
+        title: "Unselect every row (the buttons then act on the rows shown)",
+        run: () => {
+          selected.clear();
+          document.querySelectorAll("#collectionTable .row-check").forEach((b) => (b.checked = false));
+          updateShownButtons();
+        },
+      },
+      {
         id: "downloadOwnedMissing",
         label: "Download owned missing",
-        title: "Download the shown items you own on Bandcamp that aren't on your drive (shows the releases first)",
+        title: "Download the selected (or shown) items you own on Bandcamp that aren't on your drive (shows the releases first)",
         className: "job-btn",
         run: async (statusEl, button) => {
           button.disabled = true;
-          const view = page.getView();
-          const keys = Object.keys(view).filter((k) => downloadable(view[k]));
+          const items = page.getItems();
+          const keys = targetIds().filter((k) => downloadable(items[k]));
           if (await downloadFlow(keys, "collection", { jobs, statusEl })) {
             await page.reload();
             keys.forEach((k) => page.refreshRow(k));
@@ -191,7 +268,7 @@ async function refreshHealth() {
         : null,
     onView: (shown, total) => {
       statusFilter.onView(shown, total);
-      updateShownButtons(shown);
+      updateShownButtons();
     },
   });
 

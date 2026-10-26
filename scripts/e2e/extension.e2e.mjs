@@ -1429,6 +1429,68 @@ test("import preview: Set file → Browse from the music folders to a file; the 
   }
 });
 
+// --- Collection: the checkbox column and bulk actions -----------------------------------
+
+test("collection: with rows selected, Locate / Export / Download act on them; with none, on the rows shown", async () => {
+  const app = await context.newPage();
+  const posts = [];
+  app.on("request", (r) => {
+    const p = new URL(r.url()).pathname;
+    if (r.method() === "POST" && /^\/api\/(locate|rekordbox\/export|download)$/.test(p)) posts.push({ path: p, body: JSON.parse(r.postData() || "{}") });
+  });
+  try {
+    await app.goto(SERVER + "/");
+    await app.waitForFunction(() => document.querySelectorAll("#collectionTable tbody tr").length > 2);
+    const shown = await app.$$eval("#collectionTable tbody tr", (r) => r.length);
+    assert.equal(await app.textContent("#locateShown"), `Locate shown (${shown})`);
+    assert.equal(await app.isVisible("#clearSelection"), false);
+    const keys = await app.$$eval("#collectionTable tbody tr", (r) => r.slice(0, 2).map((x) => x.dataset.key));
+    for (const k of keys) await app.check(`tr[data-key="${k}"] .row-check`);
+    assert.equal(await app.textContent("#locateShown"), "Locate selected (2)");
+    assert.equal(await app.textContent("#exportShown"), "Export selected (2)…");
+    assert.equal(await app.textContent("#downloadOwnedMissing"), "Download owned missing (selected)");
+    assert.equal(await app.textContent("#clearSelection"), "Clear selection (2)");
+    assert.equal(await app.$eval("#selectAll", (b) => b.indeterminate), true);
+
+    // Locate selected: just those two.
+    await app.click("#locateShown");
+    await waitFor(async () => posts.some((p) => p.path === "/api/locate"), { what: "the locate call" });
+    assert.deepEqual(posts.find((p) => p.path === "/api/locate").body.ids.slice().sort(), keys.slice().sort());
+    await app.waitForFunction(() => /^Locate: /.test(document.getElementById("refreshStatus").textContent) && !document.getElementById("locateShown").disabled, null, { timeout: 120000 });
+
+    // Export selected: the dry run is for those two (cancelled if it asks; nothing written).
+    await app.click("#exportShown");
+    await waitFor(async () => posts.some((p) => p.path === "/api/rekordbox/export"), { what: "the export dry run", timeout: 60000 });
+    await app.waitForFunction(
+      () => document.querySelector(".confirm-dialog .dialog-cancel") || !document.getElementById("exportShown").disabled,
+      null,
+      { timeout: 60000 }
+    );
+    if (await app.$(".confirm-dialog .dialog-cancel")) await app.click(".confirm-dialog .dialog-cancel");
+    const dry = posts.find((p) => p.path === "/api/rekordbox/export");
+    assert.equal(dry.body.dry_run, true);
+    assert.deepEqual(dry.body.ids.slice().sort(), keys.slice().sort());
+    await app.waitForFunction(() => !document.getElementById("exportShown").disabled);
+    assert.equal(posts.filter((p) => p.path === "/api/rekordbox/export").length, 1, "only the dry run");
+
+    // Download (selected): neither is an owned missing item, so nothing is asked of the server.
+    await app.click("#downloadOwnedMissing");
+    await app.waitForFunction(() => /^Download: nothing to download/.test(document.getElementById("refreshStatus").textContent));
+    assert.equal(posts.filter((p) => p.path === "/api/download").length, 0);
+
+    // Clear: back to the rows shown. Select all: every row shown.
+    await app.click("#clearSelection");
+    assert.equal(await app.textContent("#locateShown"), `Locate shown (${shown})`);
+    assert.equal(await app.isChecked(`tr[data-key="${keys[0]}"] .row-check`), false);
+    await app.check("#selectAll");
+    assert.equal(await app.textContent("#locateShown"), `Locate selected (${shown})`);
+    await app.uncheck("#selectAll");
+    assert.equal(await app.textContent("#locateShown"), `Locate shown (${shown})`);
+  } finally {
+    await app.close();
+  }
+});
+
 // --- Phase 4: downloading owned releases (Session A's stub downloader) ----------------
 // The test server's owned folder is .e2e/owned (downloads go there) and its
 // cookies file a dummy; both are restored afterwards. No real downloads.
