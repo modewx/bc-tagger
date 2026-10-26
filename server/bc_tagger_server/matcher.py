@@ -86,6 +86,7 @@ class FileView:
     hosts: set[str]
     urls: set[str]
     display: dict = field(default_factory=dict)
+    created: float | None = None  # file creation time (epoch), for the date tie-break
 
 
 def _clean(values: Iterable[str | None]) -> list[str]:
@@ -144,6 +145,7 @@ def file_view(row: dict) -> FileView:
         titles=titles,
         artists=artists,
         real_artists=real_artists,
+        created=row.get("created"),
         albums=_clean([row.get("album"), pf.get("album"), pd.get("album")]),
         hosts=hosts,
         urls=urls,
@@ -331,6 +333,7 @@ def _file_entry(f: FileView, scores: dict[str, Any]) -> dict[str, Any]:
         "method": scores["method"],
         "root_kind": f.root_kind,
         "track_num": f.track,
+        "created": f.created,
         **f.display,
         "scores": {k: v for k, v in scores.items() if k not in ("confidence", "method")},
     }
@@ -347,6 +350,7 @@ def _release_entry(key: str, files: list[FileView], scores: dict[str, Any], pref
         "confidence": scores["confidence"],
         "method": scores["method"],
         "root_kind": first.root_kind,
+        "created": min((f.created for f in files if f.created), default=None),
         "album": first.display.get("album"),
         "artist": first.display.get("artist"),
         "scores": {k: v for k, v in scores.items() if k not in ("confidence", "method")},
@@ -357,7 +361,30 @@ def _release_entry(key: str, files: list[FileView], scores: dict[str, Any], pref
     }
 
 
-def _decide(entries: list[dict], overrides: dict[str, str], cfg: MatchConfig) -> dict[str, Any]:
+DATE_SLACK_S = 2 * 86400  # files created up to 2 days before the tag still count as "after"
+
+
+def _date_rank(entry: dict, tagged_at: float | None) -> tuple[int, float]:
+    """Tie-break: files created shortly after the item was tagged first (a new download is
+    usually close to the tag date). Never a filter: the downloader may run much later."""
+    created = entry.get("created")
+    if tagged_at is None or not created:
+        return (1, float("inf"))
+    delta = created - tagged_at
+    return (0, delta + DATE_SLACK_S) if delta >= -DATE_SLACK_S else (1, -delta)
+
+
+def _tagged_at(item: dict) -> float | None:
+    from datetime import datetime
+
+    try:
+        return datetime.fromisoformat(str(item.get("date_added")).replace("Z", "+00:00")).timestamp()
+    except ValueError:
+        return None
+
+
+def _decide(entries: list[dict], overrides: dict[str, str], cfg: MatchConfig,
+            tagged_at: float | None = None) -> dict[str, Any]:
     entries = [e for e in entries if overrides.get(e["path"]) != "reject"]
     entries.sort(key=lambda e: -e["confidence"])
     confirmed = [e for e in entries if overrides.get(e["path"]) == "confirm"]
@@ -377,6 +404,7 @@ def _decide(entries: list[dict], overrides: dict[str, str], cfg: MatchConfig) ->
             key=lambda e: (
                 format_rank(e["format"], cfg.format_preference),
                 e.get("root_kind") != "owned",  # same format: prefer the Bandcamp download
+                _date_rank(e, tagged_at),  # then the copy created closest after tagging
                 -e["confidence"],
                 e["path"],
             ),
@@ -414,7 +442,7 @@ def locate_item(item: dict, index: FileIndex, cfg: MatchConfig, overrides: dict[
         for path, decision in overrides.items():
             if decision == "confirm" and path in index.by_path and all(e["path"] != path for e in entries):
                 entries.append(_file_entry(index.by_path[path], {"confidence": 0.0, "method": "manual"}))
-    return _decide(entries, overrides, cfg)
+    return _decide(entries, overrides, cfg, _tagged_at(item))
 
 
 def load_overrides(store: Store, item_id: str) -> dict[str, str]:

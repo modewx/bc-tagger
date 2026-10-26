@@ -14,7 +14,7 @@ from .conftest import EXPORT_JSON, TEST_TRACKS
 CFG = MatchConfig()
 
 
-def row(path, title=None, artist=None, album=None, track=None, fmt="aiff", root_kind="not_owned", albumartist=None, urls=()):
+def row(path, title=None, artist=None, album=None, track=None, fmt="aiff", root_kind="not_owned", albumartist=None, urls=(), created=None):
     from pathlib import Path
 
     from bc_tagger_server.indexer import release_dir_of
@@ -33,6 +33,7 @@ def row(path, title=None, artist=None, album=None, track=None, fmt="aiff", root_
         "tracknumber": track,
         "discnumber": None,
         "bc_urls": list(urls),
+        "created": created,
         "parsed": {"file": parse_filename(p.stem), "dir": parse_release_dir(rel.name, rel.parent.name)},
     }
 
@@ -299,3 +300,20 @@ def test_glued_digits_and_repeated_artist_prefix():
     g = row("/s/Dub Squad - Blown Fruit/01 Blown Fruit.aiff", "Blown Fruit", "Dub Squad", "Blown Fruit", 1)
     item = {"id": "t2", "artist": "Dub Squad", "title": "Dub Squad - Dub Squad - Blown Fruit", "album_title": "Blown Fruit", "track_num": 1}
     assert locate_item(item, FileIndex([g]), CFG)["status"] == "located"
+
+
+def test_date_tie_break_prefers_the_copy_made_after_tagging():
+    from datetime import datetime, timezone
+
+    tagged = datetime(2026, 10, 20, 12, tzinfo=timezone.utc).timestamp()
+    old = row("/s/old rip/03 Song.aiff", "Song", "Artist", "Record", 3, created=tagged - 400 * 86400)
+    new = row("/s/new download/03 Song.aiff", "Song", "Artist", "Record", 3, created=tagged + 3 * 86400)
+    later = row("/s/much later/03 Song.aiff", "Song", "Artist", "Record", 3, created=tagged + 90 * 86400)
+    item = {"id": "t1", "artist": "Artist", "title": "Song", "album_title": "Record", "track_num": 3,
+            "date_added": "2026-10-20T12:00:00Z"}
+    for rows in ([old, new, later], [later, old, new]):
+        assert locate_item(item, FileIndex(rows), CFG)["best"]["path"] == new["path"]
+    # Never a filter: an old copy alone still matches, and format preference still wins.
+    assert locate_item(item, FileIndex([old]), CFG)["best"]["path"] == old["path"]
+    mp3 = row("/s/new mp3/03 Song.mp3", "Song", "Artist", "Record", 3, fmt="mp3-320", created=tagged + 86400)
+    assert locate_item(item, FileIndex([old, mp3]), CFG)["best"]["path"] == old["path"]
