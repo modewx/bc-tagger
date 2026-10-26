@@ -729,3 +729,36 @@ test("Main target, real server: dry run, confirm, and write to a sandbox copy", 
   await put({ allow_main_writes: false, tag_playlist_mode: "auto" });
   fs.rmSync(path.dirname(sandboxDir), { recursive: true, force: true });
 });
+
+// Album pages: the header widget is the album (a<id>), each row its own track
+// (t<id>), paired by position with the page's data. If Bandcamp's markup ever
+// shifts that pairing, album items would be saved/removed under track ids.
+test("album page: the header widget is the album item; track rows never touch it (Bandcamp)", async () => {
+  const albumId = "a563830364"; // Synergy Trilogy (in the imported export)
+  const trackId = "t3738475288"; // Holo Law, one of its tracks
+  const page = await context.newPage();
+  await page.goto("https://infiniteexpanse.bandcamp.com/album/synergy-trilogy");
+  await page.waitForSelector(`#tagger_${albumId}`, { state: "attached", timeout: 30000 });
+  // Every row tagger is a t<id> of this album, in page order; the header is the album.
+  const ids = await page.$$eval("select[id^='tagger_']", (sels) => sels.map((s) => s.id.slice("tagger_".length)));
+  assert.equal(ids[ids.length - 1], albumId, "the last widget (header) is the album");
+  assert.ok(ids.slice(0, -1).every((i) => /^t\d+$/.test(i)), `rows are tracks: ${ids.join(",")}`);
+  assert.ok(ids.includes(trackId));
+  const before = (await storage("taggedItems")).taggedItems[albumId];
+  assert.ok(before, "album saved before");
+  const headerTags = await page.$eval(`#tagger_${albumId}`, (s) => [...s.selectedOptions].map((o) => o.value));
+  assert.deepEqual(headerTags, before.tags, "the header shows the album's tags");
+
+  // Star the track (save it), then un-star it: only t<id> changes.
+  const trackStar = page.locator(`#tagger_${trackId}`).locator("xpath=ancestor::div[contains(@class,'tagger-container')]").locator(".tag-button");
+  await trackStar.click();
+  await waitFor(async () => !!(await storage("taggedItems")).taggedItems[trackId], { what: "the track saved" });
+  let items = (await storage("taggedItems")).taggedItems;
+  assert.equal(items[trackId].album_id, albumId);
+  assert.deepEqual(items[albumId], before, "the album item is untouched");
+  await trackStar.click();
+  await waitFor(async () => !(await storage("taggedItems")).taggedItems[trackId], { what: "the track un-saved" });
+  items = (await storage("taggedItems")).taggedItems;
+  assert.deepEqual(items[albumId], before, "still untouched after un-saving the track");
+  await page.close();
+});
