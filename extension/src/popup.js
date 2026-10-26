@@ -212,6 +212,7 @@ $(function () {
       serverText.title =
         `${res.health.items} items on the server.` +
         (own.error ? ` Ownership: ${own.error}.` : own.count != null ? ` ${own.count} owned items.` : "") +
+        (st.syncWarning ? ` Note: ${st.syncWarning}.` : "") +
         (st.lastError ? ` Last error: ${st.lastError}` : "");
     } else {
       serverDot.className = "dot down";

@@ -222,7 +222,7 @@ async function handleAppBridge(op, payload, sender) {
     case "refreshOwnership":
       return refreshOwnership();
     case "syncNow":
-      await fullSync("app");
+      await fullSync("app", { force: true });
       return pullTagEdits();
     case "status":
       return { serverUrl: await getServerUrl(), status: await getStatus() };
@@ -368,7 +368,7 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
   }
 
   if (request.type === "syncNow") {
-    fullSync("manual")
+    fullSync("manual", { force: true })
       .then(() => pullTagEdits())
       .then((r) => sendResponse({ ok: true, ...r }), (e) => sendResponse({ ok: false, error: e.message }));
     return true;

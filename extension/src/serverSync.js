@@ -132,8 +132,12 @@ async function pushPending() {
       });
     }
     if (batch.tags) {
-      const { tags } = await chrome.storage.local.get("tags");
-      await api("/api/sync/tags", { method: "POST", body: { tags: Array.isArray(tags) ? tags : [] } });
+      // A fresh install only has the tags.json seed: don't let it replace the
+      // server's vocabulary.
+      const { tags, taggedItems } = await chrome.storage.local.get(["tags", "taggedItems"]);
+      if (taggedItems && Object.keys(taggedItems).length) {
+        await api("/api/sync/tags", { method: "POST", body: { tags: Array.isArray(tags) ? tags : [] } });
+      }
     }
     await setStatus({ lastPushAt: Date.now(), lastPushCount: ids.length + batch.deleted.size, lastError: null, serverUp: true });
     notifyAppTabs("synced");
@@ -144,22 +148,39 @@ async function pushPending() {
 }
 
 // Push everything; the server drops items that are no longer in storage.
-export async function fullSync(reason) {
+// Automatic syncs never let an empty or much smaller storage (a fresh
+// install, a new profile) wipe the server's mirror: they then only upsert.
+// Manual syncs (popup "sync", the app) pass {force: true}.
+export async function fullSync(reason, { force = false } = {}) {
   const { taggedItems, tags } = await chrome.storage.local.get(["taggedItems", "tags"]);
   const items = taggedItems || {};
+  const count = Object.keys(items).length;
+  let full = true;
+  let skipped = null;
+  if (!force) {
+    const health = await probeServer(1500);
+    const serverItems = (health && health.items) || 0;
+    if (count === 0 || (serverItems > 0 && count < serverItems / 2)) {
+      full = false;
+      skipped = `kept the server's ${serverItems} items: this extension has only ${count} (use "sync" to replace them)`;
+    }
+  }
   try {
-    await api("/api/sync/items", { method: "POST", body: { items, deleted: [], full: true }, timeoutMs: 60000 });
-    await api("/api/sync/tags", { method: "POST", body: { tags: Array.isArray(tags) ? tags : [] } });
+    if (count || full) {
+      await api("/api/sync/items", { method: "POST", body: { items, deleted: [], full }, timeoutMs: 60000 });
+    }
+    if (count) await api("/api/sync/tags", { method: "POST", body: { tags: Array.isArray(tags) ? tags : [] } });
     await setStatus({
       lastFullAt: Date.now(),
-      lastFullCount: Object.keys(items).length,
+      lastFullCount: count,
       lastFullReason: reason || "",
       needsFull: false,
       lastError: null,
+      syncWarning: skipped,
       serverUp: true,
     });
     notifyAppTabs("synced");
-    return { items: Object.keys(items).length };
+    return { items: count, full };
   } catch (e) {
     await setStatus({ needsFull: true, lastError: e.message, serverUp: false });
     throw e;
