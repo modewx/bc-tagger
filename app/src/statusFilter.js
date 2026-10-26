@@ -44,8 +44,22 @@ export function createStatusFilter() {
   empty.id = "emptyState";
   empty.hidden = true;
 
+  const save = () => {
+    try {
+      localStorage.setItem(STORAGE_KEY, current);
+    } catch (e) {
+      /* ignore */
+    }
+  };
+
   return {
     active: () => current !== "all",
+    // Back to "All items" (Go To Playing clears every filter); the page re-renders.
+    reset() {
+      current = "all";
+      select.value = current;
+      save();
+    },
     filterItem: (item) => predicate()(item),
     onView: (shown, total) => {
       count.textContent = shown === total ? `${total} items` : `${shown} of ${total}`;
@@ -62,11 +76,7 @@ export function createStatusFilter() {
       afterTable.after(empty);
       select.addEventListener("change", () => {
         current = select.value;
-        try {
-          localStorage.setItem(STORAGE_KEY, current);
-        } catch (e) {
-          /* ignore */
-        }
+        save();
         refilter();
       });
     },

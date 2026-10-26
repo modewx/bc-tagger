@@ -146,6 +146,7 @@ async function refreshHealth() {
     ],
     localPlayUrl,
     filterItem: statusFilter.filterItem,
+    clearExtraFilters: () => statusFilter.reset(),
     onView: (shown, total) => {
       statusFilter.onView(shown, total);
       updateShownButtons(shown);

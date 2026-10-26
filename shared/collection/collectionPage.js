@@ -70,6 +70,7 @@ const SHELL_HTML = `
  * @param {function} [opts.localPlayUrl]    (item, key) -> url of a local file to play, or null
  * @param {function} [opts.filterItem]      (item) -> false hides the row (extra filters, e.g. statuses)
  * @param {function} [opts.onView]          (shown, total) after each filter/search
+ * @param {function} [opts.clearExtraFilters] reset the extra filters (Go To Playing)
  */
 export function createCollectionPage(opts) {
   const ds = opts.dataSource;
@@ -353,6 +354,7 @@ export function createCollectionPage(opts) {
       // Playing track is filtered/searched out -> clear filters and re-render.
       document.getElementById("searchInput").value = "";
       $("#tagFilterSelect").val([]).trigger("chosen:updated");
+      if (opts.clearExtraFilters) opts.clearExtraFilters();
       computeView();
       row = document.querySelector(`#collectionTable tr[data-key="${playingKey}"]`);
     }
@@ -491,10 +493,18 @@ export function createCollectionPage(opts) {
 
   // Save an inline tag edit. The local app may only be able to queue it (when
   // the extension is unreachable); mark the editor so that's visible.
+  // Tag edits made here that the data source may not reflect yet (the local
+  // app reads the server mirror, which catches up after the extension's
+  // debounced push). A reload in between must not undo them.
+  const localTagEdits = new Map(); // key -> {tags, at}
+  const LOCAL_EDIT_TTL_MS = 30000;
+
   function onTagsEdited(key, tags, wrap) {
+    localTagEdits.set(key, { tags: tags.slice(), at: Date.now() });
     Promise.resolve(ds.setItemTags(key, tags)).then((res) => {
       const pending = !!(res && res.queued);
       const failed = !!(res && res.ok === false);
+      if (failed) localTagEdits.delete(key);
       const item = allItems[key];
       if (item) item._tagsPending = pending;
       wrap.classList.toggle("tags-pending", pending);
@@ -666,8 +676,11 @@ export function createCollectionPage(opts) {
       sortKey: "title",
       compare: cmpText("title"),
       render: (cell, key, item) => {
-        const link = pageUrlFor(item) || "#";
-        cell.innerHTML = `<a href="${link}" target="_blank">${item.title || ""}</a>`;
+        const a = document.createElement("a");
+        a.href = pageUrlFor(item) || "#";
+        a.target = "_blank";
+        a.textContent = item.title || ""; // text, never HTML: titles come from Bandcamp
+        cell.appendChild(a);
       },
     },
     {
@@ -1051,6 +1064,7 @@ export function createCollectionPage(opts) {
         try { localStorage.setItem("bc_global_player_mode", globalMode ? "1" : "0"); } catch (e) { /* ignore */ }
         // Stop playback and reset, then re-render in the new mode.
         try { if (playingAudio) playingAudio.pause(); } catch (e) { /* ignore */ }
+        if (playingAudio && playingAudio.parentElement) playingAudio.remove();
         if (playingTagWrap && playingTagWrap.parentElement) playingTagWrap.remove();
         playingAudio = null;
         playingKey = null;
@@ -1102,8 +1116,30 @@ export function createCollectionPage(opts) {
     return out;
   }
 
-  // Re-render one row's cells from its (updated) item. The player cell is kept
-  // while that row is playing, and live tag editors are updated in place.
+  // Point every live tag editor of `key` (in its row or docked in the top
+  // bar) at the item's current tags.
+  function syncTagEditors(key) {
+    const item = allItems[key];
+    if (!item) return 0;
+    const sels = document.querySelectorAll(`.tag-editor-wrap[data-key="${key}"] select.tag-editor`);
+    sels.forEach((sel) => {
+      [...sel.options].forEach((o) => (o.selected = (item.tags || []).includes(o.value)));
+      $(sel).trigger("chosen:updated");
+      sel.parentElement.classList.toggle("tags-pending", !!item._tagsPending);
+    });
+    return sels.length;
+  }
+
+  // A player cell that is in use: the current track, a loaded Bandcamp embed
+  // (albums, fallback), or any audio that is playing.
+  function playerInUse(cell, key) {
+    if (key === playingKey) return true;
+    if (cell.querySelector("iframe")) return true;
+    return [...cell.querySelectorAll("audio")].some((a) => !a.paused);
+  }
+
+  // Re-render one row's cells from its (updated) item. A player in use is
+  // kept, and live tag editors are updated in place.
   function refreshRow(key) {
     const item = allItems[key];
     const row = document.querySelector(`#collectionTable tr[data-key="${key}"]`);
@@ -1111,17 +1147,9 @@ export function createCollectionPage(opts) {
     columns.forEach((col, i) => {
       const old = row.cells[i];
       if (!old) return;
-      if (col.id === "player" && key === playingKey) return;
+      if (col.id === "player" && playerInUse(old, key)) return;
       if (col.id === "tags") {
-        const sels = document.querySelectorAll(`.tag-editor-wrap[data-key="${key}"] select.tag-editor`);
-        if (sels.length) {
-          sels.forEach((sel) => {
-            [...sel.options].forEach((o) => (o.selected = (item.tags || []).includes(o.value)));
-            $(sel).trigger("chosen:updated");
-            sel.parentElement.classList.toggle("tags-pending", !!item._tagsPending);
-          });
-          return;
-        }
+        if (syncTagEditors(key)) return;
         tagEditorObserver.unobserve(old);
       }
       if (col.id === "thumb") thumbObserver.unobserve(old);
@@ -1132,26 +1160,31 @@ export function createCollectionPage(opts) {
     });
   }
 
-  // Apply a fresh copy of the items: update changed ones in place (keeping
-  // object identity, so players and editors keep working) and re-render only
-  // their rows. Added/removed items re-render the whole view.
+  function sameTags(a, b) {
+    return JSON.stringify(a || []) === JSON.stringify(b || []);
+  }
+
+  // Apply a fresh copy of the items. Existing items are updated in place
+  // (keeping object identity, so players, editors and the playing track stay
+  // bound to them); only changed rows re-render, unless items were added or
+  // removed, which re-renders the view.
   function applyItemUpdates(fresh) {
     fresh = fresh || {};
     const keys = Object.keys(fresh);
     const structural =
       keys.length !== Object.keys(allItems).length || keys.some((k) => !(k in allItems));
-    if (structural) {
-      keys.forEach((k) => {
-        const old = allItems[k];
-        if (old && old._localFailed) fresh[k]._localFailed = true;
-        if (k === playingKey) playingItem = fresh[k];
-      });
-      setItems(fresh);
-      return;
-    }
+    const changed = [];
     keys.forEach((k) => {
       const old = allItems[k];
       const nu = fresh[k];
+      // Keep a recent local tag edit until the source reflects it.
+      const local = localTagEdits.get(k);
+      if (local) {
+        if (sameTags(nu.tags, local.tags) || Date.now() - local.at > LOCAL_EDIT_TTL_MS) localTagEdits.delete(k);
+        else nu.tags = local.tags.slice();
+      }
+      if (!old) return;
+      fresh[k] = old;
       const oldData = dataOf(old);
       if (JSON.stringify(oldData) === JSON.stringify(dataOf(nu)) && !!old._tagsPending === !!nu._tagsPending) {
         return;
@@ -1161,7 +1194,16 @@ export function createCollectionPage(opts) {
       });
       Object.assign(old, nu);
       if (!nu._tagsPending) delete old._tagsPending;
+      changed.push(k);
+    });
+    if (structural) {
+      setItems(fresh);
+      changed.forEach(syncTagEditors); // e.g. the playing track's editor in the top bar
+      return;
+    }
+    changed.forEach((k) => {
       if (k in currentView) refreshRow(k);
+      else syncTagEditors(k);
     });
   }
 

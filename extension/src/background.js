@@ -10,6 +10,7 @@ import {
   sameServerOrigin,
   syncTick,
 } from "./serverSync";
+import { serialized, withItems, getStorage, setStorage } from "./itemsStore";
 
 // ---------------------------------------------------------------------------
 // Tag vocabulary helpers
@@ -80,21 +81,6 @@ function broadcastTags(tags) {
 // Item updates (shared by the extension pages and the local app bridge)
 // ---------------------------------------------------------------------------
 
-// Read-modify-write taggedItems; `mutate(items)` returns the response.
-function withItems(mutate) {
-  return new Promise((resolve) => {
-    chrome.storage.local.get("taggedItems", ({ taggedItems }) => {
-      const items = taggedItems || {};
-      const result = mutate(items);
-      if (result && result.ok === false) {
-        resolve(result);
-        return;
-      }
-      chrome.storage.local.set({ taggedItems: items }, () => resolve(result || { ok: true }));
-    });
-  });
-}
-
 // Merge refreshed stream URLs back in: { [id]: { "mp3-128": url } }.
 function updateItemFiles(files) {
   return withItems((items) => {
@@ -149,35 +135,35 @@ async function importData(data, mode) {
   Object.entries(data.taggedItems).forEach(([id, item]) => {
     if (item && typeof item === "object" && !Array.isArray(item)) incoming[id] = item;
   });
-  const { taggedItems: existing = {}, tags: existingTags = [] } = await chrome.storage.local.get([
-    "taggedItems",
-    "tags",
-  ]);
-  let taggedItems;
-  if (mode === "replace") taggedItems = incoming;
-  else if (mode === "keep") taggedItems = { ...incoming, ...existing };
-  else taggedItems = { ...existing, ...incoming };
-  // Keep the existing storage order first (it drives the "#" column), new items after.
-  if (mode !== "replace") {
-    const ordered = {};
-    Object.keys(existing).forEach((id) => (ordered[id] = taggedItems[id]));
-    Object.keys(incoming).forEach((id) => {
-      if (!(id in ordered)) ordered[id] = taggedItems[id];
-    });
-    taggedItems = ordered;
-  }
   const seed = await fetch(chrome.runtime.getURL("tags.json"))
     .then((r) => r.json())
     .catch(() => []);
-  const tags = unionTags(
-    seed,
-    mode === "replace" ? [] : existingTags,
-    Array.isArray(data.tags) ? data.tags : [],
-    [...usedTagsFrom(taggedItems)]
-  );
-  await chrome.storage.local.set({ taggedItems, tags });
-  broadcastTags(tags);
-  return { ok: true, items: Object.keys(taggedItems).length, tags: tags.length };
+  // Read and write inside the queue so no other update lands in between.
+  return serialized(async () => {
+    const { taggedItems: existing = {}, tags: existingTags = [] } = await getStorage(["taggedItems", "tags"]);
+    let taggedItems;
+    if (mode === "replace") taggedItems = incoming;
+    else if (mode === "keep") taggedItems = { ...incoming, ...existing };
+    else taggedItems = { ...existing, ...incoming };
+    // Keep the existing storage order first (it drives the "#" column), new items after.
+    if (mode !== "replace") {
+      const ordered = {};
+      Object.keys(existing).forEach((id) => (ordered[id] = taggedItems[id]));
+      Object.keys(incoming).forEach((id) => {
+        if (!(id in ordered)) ordered[id] = taggedItems[id];
+      });
+      taggedItems = ordered;
+    }
+    const tags = unionTags(
+      seed,
+      mode === "replace" ? [] : existingTags,
+      Array.isArray(data.tags) ? data.tags : [],
+      [...usedTagsFrom(taggedItems)]
+    );
+    await setStorage({ taggedItems, tags });
+    broadcastTags(tags);
+    return { ok: true, items: Object.keys(taggedItems).length, tags: tags.length };
+  });
 }
 
 // ---------------------------------------------------------------------------
@@ -217,6 +203,7 @@ async function handleAppBridge(op, payload, sender) {
       const res = await fetch(payload.url, {
         credentials: payload.credentials === "include" ? "include" : "omit",
       });
+      if (res.url && !isBandcampUrl(res.url)) throw new Error("redirected away from bandcamp.com");
       return { status: res.status, text: res.ok ? await res.text() : "" };
     }
     case "refreshOwnership":
@@ -306,19 +293,15 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
   }
 
   if (request.type === "addTaggedItem") {
-    chrome.storage.local.get("taggedItems", ({ taggedItems }) => {
-      const items = taggedItems || {};
+    withItems((items) => {
       items[request.item.id] = request.item;
-      chrome.storage.local.set({ taggedItems: items });
     });
     return false;
   }
 
   if (request.type === "removeTaggedItem") {
-    chrome.storage.local.get("taggedItems", ({ taggedItems }) => {
-      const items = taggedItems || {};
+    withItems((items) => {
       delete items[request.id];
-      chrome.storage.local.set({ taggedItems: items });
     });
     return false;
   }

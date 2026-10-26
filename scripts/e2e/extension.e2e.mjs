@@ -102,9 +102,7 @@ before(async () => {
     env: { ...process.env, BC_DEFAULT_SERVER_URL: SERVER },
     stdio: "ignore",
   });
-  if (!fs.existsSync(path.join(ROOT, "app/dist/index.html"))) {
-    execFileSync("npm", ["run", "build:app"], { cwd: ROOT, stdio: "ignore" });
-  }
+  execFileSync("npm", ["run", "build:app"], { cwd: ROOT, stdio: "ignore" }); // test the current source
 
   server = spawn(path.join(ROOT, "server/bct"), ["serve", "--port", String(PORT)], {
     cwd: ROOT,
@@ -335,4 +333,124 @@ test("Fix album IDs reads the real album from track pages (Bandcamp)", async () 
   assert.match(String(items.t1011914860.album_id), /^a\d+$/);
   assert.equal(items.t1011914860.album_checked, true);
   await page.close();
+});
+
+// --- Regression tests for the code review findings -----------------------------
+
+test("concurrent item updates in the background don't overwrite each other", async () => {
+  const [a, b] = ["t283914533", "t1004723757"];
+  const before = await itemTags(a);
+  await probe.evaluate(
+    ([a, b, tags]) =>
+      Promise.all([
+        chrome.runtime.sendMessage({ type: "updateTaggedItemTags", id: a, tags }),
+        chrome.runtime.sendMessage({ type: "updateTaggedItemArt", art: { [b]: "https://f4.bcbits.com/img/a0000000001_16.jpg" } }),
+        chrome.runtime.sendMessage({ type: "updateTaggedItemFields", updates: { [b]: { e2e_field: 1 } } }),
+      ]),
+    [a, b, [...before, "race"]]
+  );
+  const items = (await storage("taggedItems")).taggedItems;
+  assert.deepEqual(items[a].tags, [...before, "race"]);
+  assert.equal(items[b].art_url, "https://f4.bcbits.com/img/a0000000001_16.jpg");
+  assert.equal(items[b].e2e_field, 1);
+  await probe.evaluate(([a, tags]) => chrome.runtime.sendMessage({ type: "updateTaggedItemTags", id: a, tags }), [a, before]);
+});
+
+test("titles are rendered as text, not HTML (extension page and local app)", async () => {
+  const id = "t999000001";
+  const evil = '<img src=x onerror="window.__xss = 1">Evil';
+  await probe.evaluate(
+    ([id, title]) =>
+      chrome.runtime.sendMessage({
+        type: "importData",
+        mode: "keep",
+        data: { taggedItems: { [id]: { id, title, tralbum_type: "t", raw_id: 999000001, tags: ["must"] } } },
+      }),
+    [id, evil]
+  );
+  await waitFor(() => api(`/api/items/${id}`).then((it) => it.title === evil).catch(() => false), { what: "the item on the server" });
+  for (const url of [extPage("collection.html"), SERVER + "/"]) {
+    const page = await context.newPage();
+    await page.goto(url);
+    await page.waitForSelector(`tr[data-key="${id}"]`, { state: "attached" });
+    await sleep(300);
+    assert.equal(await page.evaluate(() => window.__xss), undefined, url);
+    assert.equal(await page.textContent(`tr[data-key="${id}"] .col-title a`), evil, url);
+    await page.close();
+  }
+  await probe.evaluate((id) => chrome.runtime.sendMessage({ type: "removeTaggedItem", id }), id);
+  await waitFor(() => fetch(`${SERVER}/api/items/${id}`).then((r) => r.status === 404), { what: "the deletion on the server" });
+});
+
+test("local app: a reload before an edit reaches the server doesn't undo it", async () => {
+  const app = await context.newPage();
+  await app.goto(SERVER + "/");
+  await app.waitForFunction(() => /extension connected/.test(document.getElementById("navExt").textContent));
+  const before = await itemTags(ITEM);
+  const set = async (tags) => {
+    await app.locator(`tr[data-key="${ITEM}"]`).scrollIntoViewIfNeeded();
+    await app.waitForSelector(`tr[data-key="${ITEM}"] select.tag-editor`, { state: "attached" });
+    await app.evaluate(([id, t]) => $(`tr[data-key="${id}"] select.tag-editor`).val(t).trigger("change"), [ITEM, tags]);
+  };
+  const editorTags = async () => [...((await app.evaluate((id) => $(`tr[data-key="${id}"] select.tag-editor`).val(), ITEM)) || [])].sort();
+  // A vocabulary tag the item doesn't have (the editor only offers vocabulary tags).
+  const extra = (await storage("tags")).tags.find((t) => !before.includes(t));
+  const want = [...before, extra].sort();
+
+  await set([...before, extra]);
+  // Force a reload now, while the server mirror still has the old tags (the
+  // extension pushes ~0.8 s after the edit): any server event does it.
+  await post("/api/ownership", { owned_ids: ["a1460820700"], source: "e2e", full: false });
+  await sleep(650);
+  assert.notDeepEqual(
+    [...(await api(`/api/items/${ITEM}`)).tags].sort(),
+    want,
+    "test setup: the server should not have the edit yet"
+  );
+  assert.deepEqual(await editorTags(), want, "the reload must not undo the edit in the editor");
+  await waitFor(() => api(`/api/items/${ITEM}`).then((it) => JSON.stringify([...it.tags].sort()) === JSON.stringify(want)), {
+    what: "the edit on the server",
+  });
+  assert.deepEqual([...(await itemTags(ITEM))].sort(), want);
+  assert.deepEqual(await editorTags(), want);
+  await set(before);
+  await sleep(1500);
+  await app.close();
+});
+
+test("local app: editing an item the extension doesn't have shows an error instead of queueing", async () => {
+  const id = "t999000002";
+  await post("/api/sync/items", { items: { [id]: { id, title: "Server only", tralbum_type: "t", tags: ["must"] } }, deleted: [], full: false });
+  const app = await context.newPage();
+  await app.goto(SERVER + "/");
+  await app.waitForFunction(() => /extension connected/.test(document.getElementById("navExt").textContent));
+  await app.locator(`tr[data-key="${id}"]`).scrollIntoViewIfNeeded();
+  await app.waitForSelector(`tr[data-key="${id}"] select.tag-editor`, { state: "attached" });
+  await app.evaluate((id) => $(`tr[data-key="${id}"] select.tag-editor`).val(["must", "pool"]).trigger("change"), id);
+  await app.waitForSelector(`tr[data-key="${id}"] .tag-editor-wrap.tags-error`, { state: "attached" });
+  assert.equal((await api("/api/tag-edits/pending")).length, 0);
+  await post("/api/sync/items", { items: {}, deleted: [id], full: false });
+  await app.close();
+});
+
+test("local app: a loaded album embed survives an unrelated update of its row", async () => {
+  const app = await context.newPage();
+  await app.goto(SERVER + "/");
+  await app.waitForFunction(() => document.querySelectorAll("#collectionTable tbody tr").length > 0);
+  const album = await app.evaluate(() => {
+    const btn = [...document.querySelectorAll("td.player-cell button")].find((b) => b.textContent === "Play album");
+    const key = btn.closest("tr").dataset.key;
+    btn.click();
+    return key;
+  });
+  await app.waitForSelector(`tr[data-key="${album}"] td.player-cell iframe`, { state: "attached" });
+  // Change the album's ownership on the server → item event → in-place row update.
+  await post("/api/ownership", { owned_ids: [album], source: "e2e", full: false });
+  await app.waitForFunction(
+    (key) => /owned/.test(document.querySelector(`tr[data-key="${key}"] .col-owned`).textContent),
+    album,
+    { timeout: 10000 }
+  );
+  assert.equal(await app.locator(`tr[data-key="${album}"] td.player-cell iframe`).count(), 1);
+  await app.close();
 });

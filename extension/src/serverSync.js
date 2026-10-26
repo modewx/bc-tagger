@@ -14,6 +14,8 @@
 // Status:    chrome.storage.session bcSyncStatus = {...} (shown in the popup)
 // ---------------------------------------------------------------------------
 
+import { withItems } from "./itemsStore";
+
 // http://127.0.0.1:8765 unless the build sets BC_DEFAULT_SERVER_URL (e2e builds).
 export const DEFAULT_SERVER_URL = __DEFAULT_SERVER_URL__;
 const FULL_SYNC_EVERY_MS = 15 * 60 * 1000;
@@ -193,21 +195,22 @@ export async function fullSync(reason, { force = false } = {}) {
 export async function pullTagEdits() {
   const edits = await api("/api/tag-edits/pending");
   if (!Array.isArray(edits) || !edits.length) return { applied: 0, dropped: 0 };
-  const { taggedItems } = await chrome.storage.local.get("taggedItems");
-  const items = taggedItems || {};
   let applied = 0;
   const dropped = [];
-  // Oldest first, so the newest edit for an item wins.
-  edits.forEach((edit) => {
-    const id = edit.item_id || edit.id;
-    if (items[id] && Array.isArray(edit.tags)) {
-      items[id].tags = edit.tags;
-      applied++;
-    } else {
-      dropped.push(id);
-    }
+  // Oldest first, so the newest edit for an item wins. onChanged pushes the
+  // applied tags back to the server.
+  await withItems((items) => {
+    edits.forEach((edit) => {
+      const id = edit.item_id || edit.id;
+      if (items[id] && Array.isArray(edit.tags)) {
+        items[id].tags = edit.tags;
+        applied++;
+      } else {
+        dropped.push(id);
+      }
+    });
+    if (!applied) return { ok: false, reason: "nothing to apply" }; // skip the write
   });
-  if (applied) await chrome.storage.local.set({ taggedItems: items }); // onChanged pushes them back
   await api("/api/tag-edits/ack", { method: "POST", body: { ids: edits.map((e) => e.edit_id) } });
   if (dropped.length) console.warn("[sync] dropped queued tag edits for unknown items", dropped);
   await setStatus({ lastPullAt: Date.now(), lastPullApplied: applied });

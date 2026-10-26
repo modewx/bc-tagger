@@ -75,6 +75,11 @@ export class HttpDataSource {
         await this.bridge.call("setItemTags", { id, tags });
         return { ok: true };
       } catch (e) {
+        // The extension doesn't have this item (it only exists on the server):
+        // a queued edit would be dropped by the extension, so don't queue it.
+        if (/not-found/.test(e.message)) {
+          return { ok: false, error: "this item isn't in the extension's collection" };
+        }
         console.warn("[tags] extension write failed, queueing on the server", e.message);
       }
     }
