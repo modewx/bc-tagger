@@ -26,8 +26,24 @@ function selectedMode() {
   return document.querySelector('input[name="mode"]:checked').value;
 }
 
+// An order file ({format: "bc-tagger-order/1", order: [ids]}) only sets "#".
+const isOrderFile = (d) => !!d && Array.isArray(d.order) && !d.taggedItems;
+
 async function preview() {
   const existing = (await send({ type: "getTaggedItems" })) || {};
+  if (selectedMode() === "order") {
+    const ids = isOrderFile(data) ? data.order : Object.keys(data.taggedItems);
+    const listed = ids.filter((id) => id in existing).length;
+    show(
+      summary,
+      [
+        `File: ${ids.length} items in order.`,
+        `Here now: ${Object.keys(existing).length} items.`,
+        `→ ${listed} get their "#" from the file; ${Object.keys(existing).length - listed} others go after, in their current order. Nothing else changes.`,
+      ].join("\n")
+    );
+    return;
+  }
   const incoming = data.taggedItems;
   const ids = Object.keys(incoming);
   const both = ids.filter((id) => id in existing);
@@ -53,10 +69,14 @@ fileInput.addEventListener("change", async () => {
   if (!file) return;
   try {
     const parsed = JSON.parse(await file.text());
-    if (!parsed || typeof parsed.taggedItems !== "object" || Array.isArray(parsed.taggedItems)) {
-      throw new Error("this is not a Bc Tagger export (no taggedItems)");
+    const orderOnly = isOrderFile(parsed);
+    if (!orderOnly && (!parsed || typeof parsed.taggedItems !== "object" || Array.isArray(parsed.taggedItems))) {
+      throw new Error("this is not a Bc Tagger export (no taggedItems) or order file");
     }
     data = parsed;
+    // An order file has no items: only "Set the # order only" can use it.
+    document.querySelectorAll('input[name="mode"]').forEach((r) => (r.disabled = orderOnly && r.value !== "order"));
+    if (orderOnly) document.querySelector('input[name="mode"][value="order"]').checked = true;
     modes.hidden = false;
     await preview();
     importBtn.disabled = false;
@@ -73,7 +93,11 @@ importBtn.addEventListener("click", async () => {
   if (mode === "replace" && !confirm("Replace all items in this extension with the file's items?")) return;
   importBtn.disabled = true;
   const res = await send({ type: "importData", data, mode });
-  if (res && res.ok) {
+  if (res && res.ok && mode === "order") {
+    show(result, `"#" set for ${res.numbered} items from the file; ${res.after} others after them.`, "ok");
+    collectionLink.hidden = false;
+    await preview();
+  } else if (res && res.ok) {
     show(result, `Imported. Storage now has ${res.items} items and ${res.tags} tags.`, "ok");
     collectionLink.hidden = false;
     await preview();

@@ -242,7 +242,70 @@ test("Import (replace) loads the export into the extension", async () => {
   await page.waitForSelector("#result:not([hidden])");
   assert.match(await page.textContent("#result"), new RegExp(`Storage now has ${exportCount} items`));
   assert.equal(Object.keys((await storage("taggedItems")).taggedItems).length, exportCount);
+  // "#" is explicit: the file had none, so items are numbered in the file's order.
+  const items = (await storage("taggedItems")).taggedItems;
+  assert.deepEqual(
+    Object.keys(exportData.taggedItems).map((k) => items[k].order),
+    Object.keys(exportData.taggedItems).map((k, i) => i + 1)
+  );
   await page.close();
+});
+
+test("\"#\" is explicit: a new tag goes last, a re-tag keeps its number, \"Set the # order only\" renumbers from a file; the app shows the same", async () => {
+  const send = (msg) => probe.evaluate((m) => new Promise((r) => chrome.runtime.sendMessage(m, r)), msg);
+  const items = async () => (await storage("taggedItems")).taggedItems;
+  const ordered = (its) => Object.keys(its).sort((a, b) => its[a].order - its[b].order);
+  const before = await items();
+  const max = Math.max(...Object.values(before).map((i) => i.order));
+  const NEW = "t9000000001";
+  const page = await context.newPage();
+  try {
+    // A new tag from a Bandcamp page: last.
+    await send({ type: "addTaggedItem", item: { id: NEW, raw_id: 9000000001, tralbum_type: "t", artist: "E2E Artist", title: "E2E Newest", tags: ["must"] } });
+    await waitFor(async () => (await items())[NEW], { what: "the new item" });
+    assert.equal((await items())[NEW].order, max + 1);
+    // Re-tagging an existing item (the page sends its own copy, without "order"): same number.
+    const first = ordered(before)[0];
+    const { order: _o, ...copy } = before[first];
+    await send({ type: "addTaggedItem", item: { ...copy, tags: [...(copy.tags || []), "e2e-retag"] } });
+    await waitFor(async () => ((await items())[first].tags || []).includes("e2e-retag"), { what: "the re-tag" });
+    assert.equal((await items())[first].order, before[first].order);
+    // The local app: the same numbers ("#" sorted), the new one last.
+    await page.goto(SERVER + "/");
+    await waitFor(() => api(`/api/items/${NEW}`).then((it) => it.order === max + 1).catch(() => false), { what: "the new item's order on the server" });
+    await page.reload();
+    await page.waitForFunction((id) => document.querySelector(`tr[data-key="${id}"]`), NEW);
+    const rows = await page.$$eval("#collectionTable tbody tr", (trs) => trs.map((tr) => [tr.dataset.key, tr.querySelector(".col-index").textContent]));
+    const bc = rows.filter(([k]) => !/^o/.test(k));
+    assert.deepEqual(bc[bc.length - 1], [NEW, String(max + 1)], "the new tag is last");
+    assert.deepEqual(bc[0], [first, String(before[first].order)]);
+
+    // "Set the # order only" from an order file: these three first, the rest after in their order.
+    const top = ordered(before).slice(-3).reverse();
+    const file = path.join(E2E, "order-file.json");
+    fs.writeFileSync(file, JSON.stringify({ format: "bc-tagger-order/1", order: top }));
+    await page.goto(extPage("import.html"));
+    await page.setInputFiles("#file", file);
+    await page.waitForSelector("#summary:not([hidden])");
+    assert.equal(await page.isChecked('input[name="mode"][value="order"]'), true);
+    assert.equal(await page.isDisabled('input[name="mode"][value="replace"]'), true, "an order file can't replace items");
+    assert.match(await page.textContent("#summary"), /3 get their "#" from the file/);
+    await page.click("#import");
+    await page.waitForSelector("#result:not([hidden])");
+    assert.match(await page.textContent("#result"), /"#" set for 3 items from the file/);
+    const after = await items();
+    assert.deepEqual(top.map((k) => after[k].order), [1, 2, 3]);
+    const rest = ordered(before).filter((k) => !top.includes(k));
+    assert.deepEqual(rest.map((k) => after[k].order), rest.map((k, i) => i + 4), "the rest keep their relative order");
+    assert.equal(after[first].tags.includes("e2e-retag"), true, "nothing else changed");
+  } finally {
+    // Back to the export's numbering, without the e2e item and tag.
+    await send({ type: "removeTaggedItem", id: NEW });
+    const first = Object.keys(exportData.taggedItems)[0];
+    await send({ type: "updateTaggedItemTags", id: first, tags: exportData.taggedItems[first].tags });
+    await send({ type: "importData", data: { format: "bc-tagger-order/1", order: Object.keys(exportData.taggedItems) }, mode: "order" });
+    await page.close();
+  }
 });
 
 test("Import modes: keep mine leaves tags, merge takes the file's", async () => {

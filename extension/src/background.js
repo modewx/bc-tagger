@@ -15,7 +15,7 @@ import {
   sameServerOrigin,
   syncTick,
 } from "./serverSync";
-import { serialized, withItems, getStorage, setStorage, nowIso, sameTags } from "./itemsStore";
+import { serialized, withItems, getStorage, setStorage, nowIso, sameTags, maxOrder, fillOrder, orderFloor } from "./itemsStore";
 import { isChallengePage } from "../../shared/bandcampChallenge";
 
 // ---------------------------------------------------------------------------
@@ -117,6 +117,46 @@ function updateItemFields(updates) {
 }
 
 // Update one item's tags (inline editing from the collection page / local app).
+// "#" from a file, nothing else: an order file ({format: "bc-tagger-order/1",
+// order: [ids]}) numbers its ids 1, 2, …; an Export uses each item's `order`,
+// else its place in the file. Items here that the file doesn't number keep
+// their relative order, after the file's.
+async function importOrder(data) {
+  const fileOrder = {};
+  if (data && Array.isArray(data.order)) {
+    data.order.forEach((id, i) => {
+      if (typeof id === "string" && !(id in fileOrder)) fileOrder[id] = i + 1;
+    });
+  } else if (data && data.taggedItems && typeof data.taggedItems === "object") {
+    const ids = Object.keys(data.taggedItems);
+    const numbered = ids.some((id) => Number.isFinite((data.taggedItems[id] || {}).order));
+    ids.forEach((id, i) => (fileOrder[id] = numbered ? (data.taggedItems[id] || {}).order : i + 1));
+    Object.keys(fileOrder).forEach((id) => !Number.isFinite(fileOrder[id]) && delete fileOrder[id]);
+  } else {
+    throw new Error("not a Bc Tagger export or order file");
+  }
+  return withItems((items) => {
+    let numbered = 0;
+    Object.entries(fileOrder).forEach(([id, n]) => {
+      if (!items[id]) return;
+      items[id].order = n;
+      numbered++;
+    });
+    let next = Math.max(0, ...Object.values(fileOrder));
+    const rest = Object.keys(items)
+      .filter((id) => !(id in fileOrder))
+      .sort((a, b) => (items[a].order ?? Infinity) - (items[b].order ?? Infinity) || (a < b ? -1 : a > b ? 1 : 0));
+    rest.forEach((id) => (items[id].order = ++next));
+    return { ok: true, items: Object.keys(items).length, numbered, after: rest.length };
+  });
+}
+
+// Items without an explicit `order` (data from before it existed) get the next numbers.
+async function ensureOrder() {
+  const floor = await orderFloor();
+  return withItems((items) => (fillOrder(items, floor) ? { ok: true } : { ok: false, reason: "all numbered" }));
+}
+
 function updateItemTags(id, tags) {
   return withItems((items) => {
     if (!items[id]) return { ok: false, reason: "not-found" };
@@ -132,10 +172,14 @@ function updateItemTags(id, tags) {
 //   mode "merge":   add new items, the file's copy wins for items in both
 //   mode "keep":    add new items only, existing items stay as they are
 //   mode "replace": storage becomes exactly the file's items
+//   mode "order":   only the "#" order changes (importOrder)
 // The vocabulary always ends up as tags.json ∪ existing ∪ file ∪ used tags.
+// "#" (`order`): new items go after everything here, in the file's order;
+// items in both keep their number unless the file's copy has one (merge).
 // ---------------------------------------------------------------------------
 
 async function importData(data, mode) {
+  if (mode === "order") return importOrder(data);
   if (!data || typeof data !== "object" || !data.taggedItems || typeof data.taggedItems !== "object") {
     throw new Error("not a Bc Tagger export (no taggedItems)");
   }
@@ -146,6 +190,7 @@ async function importData(data, mode) {
   const seed = await fetch(chrome.runtime.getURL("tags.json"))
     .then((r) => r.json())
     .catch(() => []);
+  const floor = await orderFloor();
   // Read and write inside the queue so no other update lands in between.
   return serialized(async () => {
     const { taggedItems: existing = {}, tags: existingTags = [] } = await getStorage(["taggedItems", "tags"]);
@@ -153,15 +198,23 @@ async function importData(data, mode) {
     if (mode === "replace") taggedItems = incoming;
     else if (mode === "keep") taggedItems = { ...incoming, ...existing };
     else taggedItems = { ...existing, ...incoming };
-    // Keep the existing storage order first (it drives the "#" column), new items after.
     if (mode !== "replace") {
+      // Existing items first, then the new ones in the file's order: they're numbered after the rest.
       const ordered = {};
-      Object.keys(existing).forEach((id) => (ordered[id] = taggedItems[id]));
+      Object.keys(existing).forEach((id) => {
+        const it = { ...taggedItems[id] };
+        if (!Number.isFinite(it.order) && existing[id] && Number.isFinite(existing[id].order)) it.order = existing[id].order;
+        ordered[id] = it;
+      });
       Object.keys(incoming).forEach((id) => {
-        if (!(id in ordered)) ordered[id] = taggedItems[id];
+        if (id in ordered) return;
+        const it = { ...taggedItems[id] };
+        delete it.order;
+        ordered[id] = it;
       });
       taggedItems = ordered;
     }
+    fillOrder(taggedItems, floor);
     const tags = unionTags(
       seed,
       mode === "replace" ? [] : existingTags,
@@ -301,12 +354,14 @@ chrome.runtime.onInstalled.addListener(() => {
     }
   });
   ensureTagsComplete();
+  ensureOrder();
   syncTick("installed");
 });
 
 // Also heal on browser startup, in case anything was ever written partially.
 chrome.runtime.onStartup.addListener(() => {
   ensureTagsComplete();
+  ensureOrder();
   syncTick("startup");
 });
 
@@ -324,13 +379,17 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
 
   if (request.type === "addTaggedItem") {
     // Starring / tagging on a Bandcamp page: a new item, or new tags, is a modification.
-    withItems((items) => {
-      const prev = items[request.item.id];
-      const item = { ...request.item };
-      item.modified_at = !prev || !sameTags(prev.tags, item.tags) ? nowIso() : prev.modified_at || item.modified_at;
-      if (!item.modified_at) delete item.modified_at;
-      items[item.id] = item;
-    });
+    // "#": an item keeps its place; a new one goes last.
+    orderFloor().then((floor) =>
+      withItems((items) => {
+        const prev = items[request.item.id];
+        const item = { ...request.item };
+        item.modified_at = !prev || !sameTags(prev.tags, item.tags) ? nowIso() : prev.modified_at || item.modified_at;
+        if (!item.modified_at) delete item.modified_at;
+        item.order = prev && Number.isFinite(prev.order) ? prev.order : Math.max(maxOrder(items), floor) + 1;
+        items[item.id] = item;
+      })
+    );
     return false;
   }
 

@@ -18,6 +18,9 @@ reachable, edits are queued on the server and applied by the extension on its ne
 
 ## The local app
 
+- **#** is each item's own number (`order`), the same on the extension's page and in the app: a new tag goes last,
+  and an import's rows (Bandcamp and Other) get the next numbers in the file's order. The Src column and the
+  Bandcamp / Other filter tell the two apart.
 - **Collection** (`/`): Owned / Located / Rekordbox columns, Bandcamp and Other collections, a selection
   column (select-all for the rows shown), **Columns ▾** to show or hide columns (remembered per page; Track # is
   off by default), and **Modified** (when an item's tags last changed) next to **Added**.
@@ -61,7 +64,9 @@ server/bct serve     # local server + app on http://127.0.0.1:8765
 - The popup shows the local server's status; "edit" changes its URL (default `http://127.0.0.1:8765`),
   "sync" pushes everything now. **See Collection** opens the local app when the server answers, else the
   built-in page (Shift-click: always the built-in page).
-- **Import** (popup) loads an Export file: merge (the file wins), merge keeping existing items, or replace.
+- **Import** (popup) loads an Export file: merge (the file wins), merge keeping existing items, or replace. **Set
+  the # order only** renumbers "#" from an Export or an order file (`{"format": "bc-tagger-order/1", "order": [ids]}`)
+  and changes nothing else.
 
 ## Tests
 

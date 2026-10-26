@@ -14,7 +14,7 @@
 // Status:    chrome.storage.session bcSyncStatus = {...} (shown in the popup)
 // ---------------------------------------------------------------------------
 
-import { withItems, serialized, getStorage, setStorage, nowIso, sameTags, laterIso } from "./itemsStore";
+import { withItems, serialized, getStorage, setStorage, nowIso, sameTags, laterIso, maxOrder, orderFloor, setOrderFloor } from "./itemsStore";
 import { CHALLENGE_TEXT, isChallengePage } from "../../shared/bandcampChallenge";
 
 // http://127.0.0.1:8765 unless the build sets BC_DEFAULT_SERVER_URL (e2e builds).
@@ -79,7 +79,10 @@ async function api(path, { method = "GET", body, timeoutMs = 15000 } = {}) {
 export async function probeServer(timeoutMs = 800) {
   try {
     const health = await api("/api/health", { timeoutMs });
-    return health && health.ok && health.name === "bc-tagger" ? health : null;
+    if (!(health && health.ok && health.name === "bc-tagger")) return null;
+    // The highest "#" on the server (its Other items too): new tags go after it.
+    if (Number.isFinite(health.max_order)) setOrderFloor(health.max_order);
+    return health;
   } catch (e) {
     return null;
   }
@@ -231,7 +234,10 @@ export async function pullPendingAdds() {
   let added = 0;
   let merged = 0;
   const vocab = [];
+  const floor = await orderFloor();
   await withItems((items) => {
+    // "#": the server numbers an import's new items in row order; else they go last here.
+    let next = Math.max(maxOrder(items), floor);
     adds.forEach((entry) => {
       (Array.isArray(entry.tags) ? entry.tags : []).forEach((t) => vocab.push(t));
       const item = entry.item;
@@ -240,7 +246,9 @@ export async function pullPendingAdds() {
       const existing = items[item.id];
       const stamp = item.modified_at || nowIso(); // the import commit's time when the server sends it
       if (!existing) {
-        items[item.id] = { ...item, date_added: item.date_added || nowIso(), modified_at: stamp };
+        const order = Number.isFinite(item.order) ? item.order : ++next;
+        next = Math.max(next, order);
+        items[item.id] = { ...item, date_added: item.date_added || nowIso(), modified_at: stamp, order };
         added++;
       } else {
         const union = [...new Set([...(existing.tags || []), ...(item.tags || [])])];

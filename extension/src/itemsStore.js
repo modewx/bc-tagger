@@ -43,3 +43,37 @@ export const sameTags = (a, b) => {
 };
 // The later of two ISO dates (either may be missing).
 export const laterIso = (a, b) => (!a ? b : !b ? a : a > b ? a : b);
+
+// "#": each item's explicit place in the collection (`order`: 1, 2, …), one
+// sequence with the server's Other items. The server reports its highest as
+// health.max_order (kept here as `orderFloor`), so new items go after both.
+export function maxOrder(items) {
+  let max = 0;
+  Object.values(items || {}).forEach((it) => {
+    if (it && Number.isFinite(it.order) && it.order > max) max = it.order;
+  });
+  return max;
+}
+
+// Number the items that have no `order` yet, after the highest, in storage
+// order (what "#" showed before it was explicit). Returns how many.
+export function fillOrder(items, floor = 0) {
+  let next = Math.max(maxOrder(items), floor || 0);
+  let n = 0;
+  Object.values(items).forEach((it) => {
+    if (it && typeof it === "object" && !Number.isFinite(it.order)) {
+      it.order = ++next;
+      n++;
+    }
+  });
+  return n;
+}
+
+export async function orderFloor() {
+  const { orderFloor: floor } = await get("orderFloor");
+  return Number.isFinite(floor) ? floor : 0;
+}
+
+export async function setOrderFloor(floor) {
+  if ((await orderFloor()) !== floor) await set({ orderFloor: floor });
+}

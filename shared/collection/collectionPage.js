@@ -519,8 +519,8 @@ export function createCollectionPage(opts) {
   let allItems = {};
   let currentView = {}; // items currently shown (after search + tag filter)
   let allTagsVocab = []; // tag vocabulary, for the inline tag editors
-  let indexByKey = {}; // key -> position in the stored JSON order (the "#" column)
-  let sortColumn = "index"; // "index" (JSON order, default) | a column's sortKey
+  let indexByKey = {}; // key -> its "#": the item's `order` (see setItems)
+  let sortColumn = "index"; // "index" ("#", default) | a column's sortKey
   let sortDir = 1; // 1 = ascending, -1 = descending
 
   // Recompute the visible set from the search box + tag filter, then render.
@@ -739,7 +739,7 @@ export function createCollectionPage(opts) {
       sortKey: "index",
       render: (cell, key) => {
         cell.classList.add("index-cell");
-        cell.textContent = (indexByKey[key] || 0) + 1;
+        cell.textContent = indexByKey[key] || "";
       },
     },
     {
@@ -931,11 +931,11 @@ export function createCollectionPage(opts) {
       headerRow.appendChild(th);
     });
 
-    // Keep original (storage/JSON) order until a column is clicked.
+    // "#" order until another column is clicked.
     const entries = Object.entries(items);
     const sortCol = allColumns.find((c) => c.sortKey === sortColumn); // hidden columns still sort
     if (sortColumn === "index") {
-      entries.sort((x, y) => ((indexByKey[x[0]] || 0) - (indexByKey[y[0]] || 0)) * sortDir);
+      entries.sort((x, y) => ((indexByKey[x[0]] || 0) - (indexByKey[y[0]] || 0) || (x[0] < y[0] ? -1 : x[0] > y[0] ? 1 : 0)) * sortDir);
     } else if (sortCol && sortCol.compare) {
       entries.sort((x, y) => sortCol.compare(x[1], y[1]) * sortDir);
     }
@@ -1247,10 +1247,20 @@ export function createCollectionPage(opts) {
   // Bootstrap
   // ---------------------------------------------------------------------------
 
+  // "#" is each item's explicit `order` (the extension numbers Bandcamp items,
+  // the server an import's rows; one sequence). Items without one (older data)
+  // follow, in the order they came.
   function setItems(items) {
     allItems = items || {};
     indexByKey = {};
-    Object.keys(allItems).forEach((k, i) => { indexByKey[k] = i; });
+    let next = 0;
+    Object.values(allItems).forEach((it) => {
+      if (it && Number.isFinite(it.order) && it.order > next) next = it.order;
+    });
+    Object.keys(allItems).forEach((k) => {
+      const order = allItems[k] && allItems[k].order;
+      indexByKey[k] = Number.isFinite(order) ? order : ++next;
+    });
     computeView();
   }
 
@@ -1400,7 +1410,8 @@ export function createCollectionPage(opts) {
     fresh = fresh || {};
     const keys = Object.keys(fresh);
     const structural =
-      keys.length !== Object.keys(allItems).length || keys.some((k) => !(k in allItems));
+      keys.length !== Object.keys(allItems).length ||
+      keys.some((k) => !(k in allItems) || (fresh[k] || {}).order !== allItems[k].order); // new "#" → re-sort
     const changed = [];
     keys.forEach((k) => {
       const old = allItems[k];

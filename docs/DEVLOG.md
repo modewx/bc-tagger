@@ -85,7 +85,13 @@ npm run test:e2e                         # Playwright e2e: own profile, server :
   - In windows narrower than 1570 px the app's table scrolls sideways, so Title and Artist keep their width. Tag
     editors are built when their row comes into view, not their cell, because the Tags column can be scrolled off
     to the right.
-  - One player per row.
+  - One player per row. Hovering a player that's already playing no longer reloads it (that stopped it).
+  - The Artist cell has a copy button at its right edge: "Artist Title".
+  - **"#" is explicit** (user request): each item has `order`, one sequence across Bandcamp (numbered by the
+    extension) and Other (numbered by the server at import). Before this, "#" was Chrome's storage order (item IDs
+    sorted) on the extension page and date added in the app. Items without one are numbered in storage order
+    when the extension updates. A new tag gets max(own, the server's `max_order`) + 1, and a re-tag keeps its
+    number. Import → **Set the # order only** restores an order from a file.
 - **Extension:**
   - Syncs to the server (diffs, a guarded full sync) and is the bridge for the local app (tag edits, page fetches,
     pending adds from imports).
