@@ -345,3 +345,25 @@ def test_test_mode_never_touches_parked_main(tmp_path, monkeypatch):
     monkeypatch.setattr(rbguard, "PARKED_MAIN_LIBRARY_DIR", parked)
     assert not rbguard.check_write(parked / "master.db", running=False).allowed
     assert config.PARKED_MAIN_LIBRARY_DIR.name == "rekordbox_main"
+
+
+def test_xml_only_touched_nodes_change(svc, library, main_db):
+    """pyrekordbox would 'sync' every node whose Timestamp differs from the DB; only playlists
+    the export created or changed may be touched."""
+    xml_path = main_db.parent / "masterPlaylists6.xml"
+    root = ET.parse(xml_path)
+    with _raw(main_db) as db:
+        dup_ids = [f"{int(p.ID):X}" for p in db.get_playlist() if p.Name == "Dup"]
+        must_id = f"{int(next(p for p in db.get_playlist() if p.Name == 'Must').ID):X}"
+    for n in root.getroot().iter("NODE"):
+        if n.get("Id") in dup_ids + [must_id]:
+            n.set("Timestamp", "1000")  # out of sync with the DB, like many real libraries
+    root.write(xml_path, encoding="UTF-8", xml_declaration=True)
+    before = {n.get("Id"): dict(n.attrib) for n in ET.parse(xml_path).getroot().iter("NODE")}
+    dry = svc.export(ids=["a100", "t200"], dry_run=True)
+    svc.export(ids=["a100", "t200"], confirm_token=dry["confirm_token"])
+    after = {n.get("Id"): dict(n.attrib) for n in ET.parse(xml_path).getroot().iter("NODE")}
+    changed = {k for k in before if before[k] != after.get(k)}
+    assert changed == {must_id}  # the existing playlist we added tracks to; "Dup" stays as it was
+    assert all(after[i]["Timestamp"] == "1000" for i in dup_ids) and after[must_id]["Timestamp"] != "1000"
+    assert len(after) == len(before) + 4  # /bct-main, /bct-main/Genres, Keepers, Genres/Pool
