@@ -8,12 +8,21 @@
 // `unavailable`, which get the bot-check error A's resolver reports; "Maybe
 // Track" gets candidates; the rest are unmatched.
 
-export function importStub(file, { located = [], unavailable = [], paused = [], slowJob = 0 } = {}) {
+export function importStub(file, { located = [], unavailable = [], paused = [], slowJob = 0, interrupted = false } = {}) {
   const calls = [];
   let unknown = { ...file.unknown_tags };
   // slowJob: the lookups job reports "running" for that many polls first.
-  let status = slowJob ? "resolving" : "ready";
+  // interrupted: the server restarted during the lookups (resumable).
+  let status = interrupted ? "interrupted" : slowJob ? "resolving" : "ready";
   let jobPolls = 0;
+  // A's reopen fields.
+  const step = () => (status === "ready" ? (Object.keys(unknown).length ? "mapping" : "ready") : status);
+  const live = () => ({
+    step: step(),
+    progress: status === "resolving" ? { current: jobPolls, total: rows.length, message: `resolving ${jobPolls}/${rows.length}` } : null,
+    job: status === "resolving" ? { id: "e2e-import-1", kind: "import", status: "running" } : null,
+    resumable: status === "interrupted" || lookups.state === "paused",
+  });
   const UNAVAILABLE = "Unavailable: Bandcamp search unavailable (the HTML search returns a bot-check page)";
   const itemFor = (c, it) => ({ id: c.id, raw_id: Number(c.id.slice(1)), tralbum_type: c.id[0], title: c.title, artist: c.artist, item_url: c.url });
   // A's row shape: row.bandcamp = {item, via} when the row has a Bandcamp item.
@@ -83,13 +92,14 @@ export function importStub(file, { located = [], unavailable = [], paused = [], 
   });
   let lookups = paused.length ? { state: "paused", reason: "rate_limited", error: "Bandcamp is rate-limiting; try again later" } : { state: "on" };
   const batch = () => ({
+    ...live(),
     bandcamp_lookups: lookups,
     batch_id: "e2e-b1",
     name: file.source,
     created_at: "2026-10-26T08:00:00Z",
     status,
     job_id: "e2e-import-1",
-    error: null,
+    error: status === "interrupted" ? "The server restarted during the lookups. Resume to continue (answers already fetched come from the cache)." : null,
     default_tags: ["must"],
     stats: stats(),
     unknown_tags: unknown,
@@ -106,9 +116,17 @@ export function importStub(file, { located = [], unavailable = [], paused = [], 
       const body = req.postData() ? JSON.parse(req.postData()) : null;
       calls.push({ method: req.method(), path: p, body });
       if (p === "/api/import" && req.method() === "POST") return json(route, { batch_id: "e2e-b1", job_id: "e2e-import-1" });
-      if (p === "/api/import") return json(route, [{ batch_id: "e2e-b1", name: file.source, created_at: "2026-10-26T08:00:00Z", status, stats: stats() }]);
+      if (p === "/api/import") {
+        return json(route, [{ batch_id: "e2e-b1", name: file.source, created_at: "2026-10-26T08:00:00Z", status, stats: stats(), ...live(), unknown_tags: Object.keys(unknown).length }]);
+      }
       if (p === "/api/import/e2e-b1" && req.method() === "DELETE") return json(route, { deleted: true });
       if (p === "/api/import/e2e-b1") return json(route, batch());
+      if (p === "/api/import/e2e-b1/resume" && status === "interrupted") {
+        status = "resolving";
+        jobPolls = 0;
+        slowJob = 3;
+        return json(route, { job_id: "e2e-import-1", estimate: { lookups: 2, text: "~2 lookups ≈ 2 s" } });
+      }
       if (p === "/api/import/e2e-b1/resume") {
         if (lookups.state !== "paused") return json(route, { detail: "not paused" }, 400);
         lookups = { state: "on" };

@@ -98,7 +98,18 @@ export function normBatch(b) {
     created_at: b.created_at || null,
     job_id: b.job_id || (b.job && b.job.id) || null,
     stats: b.stats || {},
-    unknownTags: b.unknown_tags || {},
+    // Where it is (the server's reopen fields): step, the running job and its progress.
+    step: b.step || null, // resolving | locating | interrupted | mapping | ready | committing | committed | error
+    progress: b.progress || null,
+    job: b.job || (b.job_id ? { id: b.job_id } : null),
+    resumable: !!b.resumable,
+    unknownTags: b.unknown_tags && typeof b.unknown_tags === "object" ? b.unknown_tags : {},
+    unknownCount:
+      typeof b.unknown_tags === "number"
+        ? b.unknown_tags
+        : b.unknown_tags && typeof b.unknown_tags === "object"
+        ? Object.keys(b.unknown_tags).length
+        : null, // older servers' lists: from stats
     newTags: b.new_tags || [],
     defaultTags: b.default_tags || [],
     pendingReleases: Array.isArray(b.pending_releases) ? b.pending_releases : [],

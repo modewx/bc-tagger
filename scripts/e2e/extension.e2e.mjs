@@ -1230,6 +1230,23 @@ test("import: a reload during lookups follows the same job on to the mapping ste
   await page.close();
 });
 
+test("import: a batch interrupted by a server restart resumes its lookups from the Import tab (stubbed API)", async () => {
+  const stub = importStub(JSON.parse(fs.readFileSync(IMPORT_SAMPLE, "utf8")), { interrupted: true });
+  const page = await context.newPage();
+  await stub.install(page);
+  await page.goto(SERVER + "/");
+  await page.waitForSelector("#navImport:not([hidden])");
+  assert.match(await page.textContent("#navImport"), /^Import interrupted/);
+  await page.click("#navImport");
+  await page.waitForSelector("#importOpen:not([hidden])");
+  assert.match(await page.textContent("#importProgress"), /server restarted during the lookups/);
+  await page.click("#importResume");
+  await page.waitForSelector("#importMapping:not([hidden])", { timeout: 30000 });
+  assert.equal(stub.calls.filter((c) => c.path.endsWith("/resume")).length, 1);
+  assert.equal(stub.calls.filter((c) => c.method === "POST" && c.path === "/api/import").length, 0, "nothing restarted from scratch");
+  await page.close();
+});
+
 test("import: leaving for Collection and Settings returns to the same batch and step, and preview edits stay (real server)", async () => {
   const items = JSON.parse(fs.readFileSync(path.join(ROOT, "server/tests/fixtures/import_rows.json"), "utf8")).slice(0, 6);
   items[0].tags = [...(items[0].tags || []), "mourn"];

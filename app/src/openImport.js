@@ -29,32 +29,51 @@ export async function openImports() {
   return (await listBatches()).filter((b) => !b.committed);
 }
 
-// "progress" (looking up / locating), "mapping" (unknown tags to map),
-// "review" (the preview) or "error".
+// "progress" (looking up / locating), "interrupted" (the server restarted
+// during the lookups: resumable), "mapping" (unknown tags to map), "review"
+// (the preview), "committing", "committed" or "error". From the server's
+// `step`, or (older servers) from the status and stats.
+const STEPS = {
+  resolving: "progress",
+  locating: "progress",
+  interrupted: "interrupted",
+  mapping: "mapping",
+  ready: "review",
+  committing: "committing",
+  committed: "committed",
+  error: "error",
+};
 export function stepOf(batch) {
+  if (batch.step && STEPS[batch.step]) return STEPS[batch.step];
   if (batch.status === "resolving") return "progress";
   if (batch.status === "error") return "error";
-  if (batch.stats && batch.stats.unknown_tags > 0) return "mapping";
+  if ((batch.unknownCount ?? (batch.stats && batch.stats.unknown_tags)) > 0) return "mapping";
   return "review";
 }
 
 export function stepUrl(batch) {
   const id = encodeURIComponent(batch.id);
-  return stepOf(batch) === "review" ? `/import/?batch=${id}` : `/settings/#import/${id}`;
+  return ["review", "committing", "committed"].includes(stepOf(batch)) ? `/import/?batch=${id}` : `/settings/#import/${id}`;
 }
 
 // One line for the open import, e.g. "Import: looking up 48/150" or
 // "Import ready to review". `live` is the latest progress {current, total, message}.
 export function stepLabel(batch, live) {
   const total = (batch.stats && batch.stats.total) || "";
+  const unknown = batch.unknownCount ?? (batch.stats && batch.stats.unknown_tags) ?? 0;
   switch (stepOf(batch)) {
     case "progress": {
-      const p = live || {};
+      const p = live || batch.progress || {};
       const count = p.total ? ` ${p.current || 0}/${p.total}` : total ? ` (${total} rows)` : "";
-      return `Import: ${p.message || `looking up${count}`}…`;
+      const what = batch.step === "locating" ? "locating files" : "looking up";
+      return `Import: ${p.message || `${what}${count}`}…`;
     }
+    case "interrupted":
+      return "Import interrupted: resume the lookups";
+    case "committing":
+      return "Import: importing…";
     case "mapping":
-      return `Import: ${batch.stats.unknown_tags} tag${batch.stats.unknown_tags > 1 ? "s" : ""} to map`;
+      return `Import: ${unknown} tag${unknown > 1 ? "s" : ""} to map`;
     case "error":
       return "Import failed";
     default:

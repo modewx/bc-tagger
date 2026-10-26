@@ -7,7 +7,7 @@
 import { apiJson } from "../../shared/datasource/HttpDataSource";
 import { ServerEvents } from "../../shared/datasource/serverEvents";
 import { Jobs, progressText, resultText } from "./jobs";
-import { listBatches, getBatch, startImport, applyTagMap, discardBatch } from "./importApi";
+import { listBatches, getBatch, startImport, applyTagMap, discardBatch, resumeLookups } from "./importApi";
 import { rememberImport, rememberedImport, stepLabel, stepOf, stepUrl } from "./openImport";
 
 const STAT_LABELS = [
@@ -216,16 +216,22 @@ export function createImportTab(container) {
     rememberImport(id);
     showOpen(batch);
     const step = stepOf(batch);
+    const jobId = (batch.job && batch.job.id) || batch.job_id;
     if (step === "progress") {
       setHash(id);
-      if (following !== id && batch.job_id && (await follow(id, batch.job_id))) await afterResolve(id);
+      if (following !== id && jobId && (await follow(id, jobId))) await afterResolve(id);
+    } else if (step === "interrupted") {
+      setHash(id);
+      progress.hidden = false;
+      progress.className = "import-progress err";
+      progress.textContent = batch.error || "The lookups were interrupted (the server restarted).";
     } else if (step === "mapping") {
       setHash(id);
       progress.hidden = false;
       progress.className = "import-progress";
       progress.textContent = statsLine(batch.stats);
       if (mapping.hidden || mapping.dataset.batch !== id) showMapping(batch);
-    } else if (step === "review" && explicit) {
+    } else if (["review", "committing"].includes(step) && explicit) {
       location.href = previewUrl(id);
     }
   }
@@ -234,9 +240,30 @@ export function createImportTab(container) {
   function showOpen(batch) {
     openCard.hidden = false;
     openCard.innerHTML = "";
-    const go = el("a", { class: "button-link", id: "importContinue", href: stepUrl(batch) }, stepOf(batch) === "review" ? "Continue review →" : "Continue →");
+    const step = stepOf(batch);
     const del = el("button", { type: "button", class: "secondary", id: "importDiscardOpen" }, "Discard");
     del.addEventListener("click", () => discard(batch.id));
+    let go;
+    if (step === "interrupted" && batch.resumable) {
+      // Finishes from the server's cache: only rows never fetched go to Bandcamp.
+      go = el("button", { type: "button", id: "importResume" }, "Resume lookups");
+      go.addEventListener("click", async () => {
+        go.disabled = true;
+        try {
+          const res = await resumeLookups(batch.id);
+          const est = res.estimate && res.estimate.text ? ` (${res.estimate.text})` : "";
+          openCard.hidden = true;
+          if (await follow(batch.id, res.job_id, est)) await afterResolve(batch.id);
+        } catch (e) {
+          go.disabled = false;
+          progress.className = "import-progress err";
+          progress.textContent = `Couldn't resume: ${e.message}`;
+        }
+        loadBatches();
+      });
+    } else {
+      go = el("a", { class: "button-link", id: "importContinue", href: stepUrl(batch) }, step === "review" ? "Continue review →" : "Continue →");
+    }
     openCard.append(
       el("strong", {}, "Open import: "),
       `${batch.source || batch.id} · ${stepLabel(batch).replace(/^Import:? ?/, "")} `,

@@ -94,8 +94,8 @@ export function buildNav(active) {
   // A reload or a new page during lookups: follow the batch's job.
   async function pollJob(b) {
     tracking = b.id;
-    const full = await getBatch(b.id).catch(() => null);
-    const jobId = full && full.job_id;
+    const full = b.job && b.job.id ? null : await getBatch(b.id).catch(() => null);
+    const jobId = (b.job && b.job.id) || (full && full.job_id);
     while (jobId && tracking === b.id) {
       const job = await fetch(`/api/jobs/${encodeURIComponent(jobId)}`).then((r) => (r.ok ? r.json() : null), () => null);
       if (!job || job.status === "done" || job.status === "error") break;
