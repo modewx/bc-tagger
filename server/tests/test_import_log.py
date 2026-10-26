@@ -81,6 +81,7 @@ def test_a_partial_import_is_logged_and_so_is_the_retry(svc, monkeypatch):  # no
     batch = run(svc, recorded_rows())
     bid = batch["batch_id"]
     importer.apply_tag_mapping(svc, bid, {}, "create")
+    assert importer.get_batch(svc, bid)["logs"] == [] and importer.list_batches(svc)[0]["logs"] == []
     real, calls = importer.queue_add, []
 
     def flaky(store, **kw):
@@ -110,6 +111,9 @@ def test_a_partial_import_is_logged_and_so_is_the_retry(svc, monkeypatch):  # no
 
 
 def test_logs_api(svc, monkeypatch):  # noqa: F811
+    with TestClient(create_app(svc)) as c:  # no logs yet: listing doesn't create the folder
+        assert c.get("/api/import/logs").json()["logs"] == [] and not logs_dir(svc).exists()
+        assert c.get("/api/import/logs/x.json").status_code == 404 and not logs_dir(svc).exists()
     first_batch = run(svc, recorded_rows())
     importer.apply_tag_mapping(svc, first_batch["batch_id"], {}, "create")
     first = importer.commit(svc, first_batch["batch_id"])["log"]

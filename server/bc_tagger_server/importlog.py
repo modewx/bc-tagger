@@ -36,8 +36,9 @@ class LogNotFound(KeyError):
     pass
 
 
-def log_dir(svc) -> tuple[Path, str | None]:
-    """The folder for logs and, when the setting can't be used right now, why the default is used."""
+def log_dir(svc, create: bool = True) -> tuple[Path, str | None]:
+    """The folder for logs and, when the setting can't be used right now, why the default is used.
+    Only writing a log (or opening the folder) creates it; listing and reading don't."""
     configured = svc.settings.import_log_dir()
     default = svc.settings.path.parent / "import-logs"
     warning = None
@@ -50,7 +51,8 @@ def log_dir(svc) -> tuple[Path, str | None]:
                 warning = str(e)
         if warning:
             warning, configured = f"{warning}; logs go to {default}", default
-    configured.mkdir(parents=True, exist_ok=True)
+    if create:
+        configured.mkdir(parents=True, exist_ok=True)
     return configured, warning
 
 
@@ -218,7 +220,7 @@ def attach(svc, batch: dict, rows: list[dict], result: dict | None, earlier: set
 
 
 def list_logs(svc) -> dict[str, Any]:
-    folder, warning = log_dir(svc)
+    folder, warning = log_dir(svc, create=False)
     out = []
     for path in folder.glob("*.json"):
         md = path.with_suffix(".md")
@@ -235,7 +237,7 @@ def list_logs(svc) -> dict[str, Any]:
 
 
 def log_path(svc, name: str) -> Path:
-    folder, _ = log_dir(svc)
+    folder, _ = log_dir(svc, create=False)
     if not _FILE.match(name or "") or not (folder / name).is_file():
         raise LogNotFound(name)
     return folder / name

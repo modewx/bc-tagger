@@ -805,17 +805,18 @@ def get_batch(svc, batch_id: str) -> dict:
     for row in rows:  # what Download can fetch for Bandcamp rows (not stored: ownership changes)
         item = (row.get("bandcamp") or {}).get("item")
         row["owned"] = ownership_status(svc.store, item) if item else None
-    return {**batch, **live, "rows": rows}
+    return {**batch, **live, "logs": batch.get("logs") or [], "rows": rows}
 
 
 def list_batches(svc) -> list[dict]:
     """``[{batch_id, name, created_at, status, step, progress, job, resumable, error, stats, estimate,
-    bandcamp_lookups, default_tags, default_tags_all, committed_at, unknown_tags}]``, newest first."""
+    bandcamp_lookups, default_tags, default_tags_all, committed_at, logs, unknown_tags}]``, newest first."""
     out = []
     for r in svc.store.query("SELECT data FROM import_batches ORDER BY created_at DESC"):
         b = json.loads(r["data"])
         live = _live(svc, b)
-        out.append({**{k: b.get(k) for k in LIST_FIELDS}, **live, "unknown_tags": len(b.get("unknown_tags") or {})})
+        out.append({**{k: b.get(k) for k in LIST_FIELDS}, **live, "logs": b.get("logs") or [],
+                    "unknown_tags": len(b.get("unknown_tags") or {})})
     return out
 
 
