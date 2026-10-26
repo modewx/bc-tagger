@@ -17,8 +17,11 @@ from typing import Any
 HOME = Path.home()
 PROJECT_ROOT = Path("/Users/alvaroh/Projects/auto-rekordbox")
 
-# The user's MAIN rekordbox library. Never written, never read.
+# The user's MAIN rekordbox library. Only written in "main" target mode (Phase 2), which the
+# user switches on in settings; never written or read by test-mode code.
 MAIN_LIBRARY_DIR = HOME / "Library" / "Pioneer" / "rekordbox"
+# Where rb-switch-library.sh parks the main library while the test library is switched in.
+PARKED_MAIN_LIBRARY_DIR = HOME / "Library" / "Pioneer" / "rekordbox_main"
 TEST_LIBRARY_DIR = HOME / "Library" / "Pioneer" / "rekordbox_test"
 REKORDBOX_OPTIONS_JSON = (
     HOME / "Library" / "Application Support" / "Pioneer" / "rekordboxAgent" / "storage" / "options.json"
@@ -59,8 +62,19 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     # More roots of either kind, e.g. the test folders next to the production preset:
     # [{"path": ..., "globs": [...], "kind": "owned" | "not_owned"}]
     "extra_roots": [],
+    # The test library (needs the marker file). Exports go here while rekordbox_target is "test".
     "rekordbox_db_path": str(TEST_LIBRARY_DIR / "master.db"),
+    # "test" | "main". "main" requires allow_main_writes; turning that off resets this to "test".
+    "rekordbox_target": "test",
+    "allow_main_writes": False,
+    "rekordbox_main_db_path": str(MAIN_LIBRARY_DIR / "master.db"),
+    # Folder for plain playlist names (and for every tag in "auto" mode).
     "playlist_folder": "bc-tagger",
+    # "auto": tag -> playlist named like the tag inside playlist_folder.
+    # "custom": tag_playlist_map {tag: [playlist, ...]}; a tag with no playlists isn't exported.
+    #   "Name" = inside playlist_folder, "a/b" = path below playlist_folder, "/a/b" = from the root.
+    "tag_playlist_mode": "auto",
+    "tag_playlist_map": {},
     "server_port": DEFAULT_PORT,
     "cookies_file": str(DEFAULT_COOKIES_FILE),
     "bandcamp_username": "herrasti",
@@ -99,6 +113,13 @@ def default_app_dist_dir() -> Path:
 
 class SettingsError(ValueError):
     pass
+
+
+def check_playlist_name(name: str) -> None:
+    """'Name', 'Folder/Name' or '/Root/Folder/Name'; no empty segments."""
+    body = name[1:] if name.startswith("/") else name
+    if not body or any(not part.strip() for part in body.split("/")):
+        raise SettingsError(f"invalid playlist name {name!r} (empty path segment)")
 
 
 def _validate(merged: dict[str, Any]) -> dict[str, Any]:
@@ -148,6 +169,35 @@ def _validate(merged: dict[str, Any]) -> dict[str, Any]:
     if not name:
         raise SettingsError("playlist_folder must not be empty")
     out["playlist_folder"] = name
+    if out.get("rekordbox_target") not in ("test", "main"):
+        raise SettingsError("rekordbox_target must be 'test' or 'main'")
+    if not isinstance(out.get("allow_main_writes"), bool):
+        raise SettingsError("allow_main_writes must be true or false")
+    if out["rekordbox_target"] == "main" and not out["allow_main_writes"]:
+        raise SettingsError("rekordbox_target 'main' requires allow_main_writes")
+    if not isinstance(out.get("rekordbox_main_db_path"), str) or not out["rekordbox_main_db_path"].strip():
+        raise SettingsError("rekordbox_main_db_path must be a path")
+    if out.get("tag_playlist_mode") not in ("auto", "custom"):
+        raise SettingsError("tag_playlist_mode must be 'auto' or 'custom'")
+    mapping = out.get("tag_playlist_map")
+    if not isinstance(mapping, dict):
+        raise SettingsError("tag_playlist_map must be an object {tag: [playlist, ...]}")
+    clean_map: dict[str, list[str]] = {}
+    for tag, names in mapping.items():
+        if isinstance(names, str):
+            names = [names]
+        if not isinstance(names, list) or not all(isinstance(n, str) for n in names):
+            raise SettingsError(f"tag_playlist_map[{tag!r}] must be a list of playlist names")
+        cleaned = []
+        for n in names:
+            n = n.strip()
+            if not n:
+                continue
+            check_playlist_name(n)
+            if n not in cleaned:
+                cleaned.append(n)
+        clean_map[str(tag)] = cleaned
+    out["tag_playlist_map"] = clean_map
     pref = out.get("format_preference")
     if not isinstance(pref, list) or not all(isinstance(p, str) for p in pref):
         raise SettingsError("format_preference must be a list of strings")
@@ -202,6 +252,9 @@ class Settings:
         if blocked:
             raise SettingsError(f"read-only settings: {sorted(blocked)}")
         with self._lock:
+            changes = dict(changes)
+            if changes.get("allow_main_writes") is False and "rekordbox_target" not in changes:
+                changes["rekordbox_target"] = "test"  # unticking the checkbox returns to test
             merged = _validate({**self._fresh(), **changes})
             self._data = merged
             self.path.parent.mkdir(parents=True, exist_ok=True)
