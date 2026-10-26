@@ -50,6 +50,8 @@ input[type="number"] { width: 110px; }
 .preset { display: flex; flex-wrap: wrap; gap: 6px 18px; }
 .radio { cursor: pointer; }
 .roots .root-row { display: grid; grid-template-columns: 1fr 220px auto; gap: 6px; margin-bottom: 6px; }
+.roots .root-row.with-kind { grid-template-columns: 1fr 180px 110px auto; }
+.roots select.kind { font: inherit; font-size: 13px; padding: 5px 6px; border: 1px solid #bbb; border-radius: 5px; background: #fff; }
 .roots input.globs { font-size: 12px; }
 button {
   font: inherit;
@@ -85,8 +87,8 @@ button.icon { background: #fff; color: #b42318; border-color: #e5a5a0; padding: 
 #saveState.ok { color: #1a7f37; }
 #saveState.err { color: #b42318; }
 @media (max-width: 640px) {
-  .roots .root-row { grid-template-columns: 1fr auto; }
-  .roots input.globs { grid-column: 1 / 2; }
+  .roots .root-row, .roots .root-row.with-kind { grid-template-columns: 1fr auto; }
+  .roots input.globs, .roots select.kind { grid-column: 1 / 2; }
   #saveBar { flex-wrap: wrap; }
   #saveState { flex: 1 0 100%; }
 }

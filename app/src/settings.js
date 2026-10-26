@@ -30,6 +30,12 @@ const FIELDS = {
     label: "Not-owned folders",
     help: "E.g. Soulseek downloads. Optional globs limit what is indexed (e.g. **/*.aiff).",
   },
+  extra_roots: {
+    section: "folders",
+    type: "roots-kind",
+    label: "More folders",
+    help: "Indexed in addition to the folders above, each marked owned or not owned (e.g. the test folders).",
+  },
   format_preference: {
     section: "matching",
     type: "order",
@@ -171,11 +177,18 @@ function orderEditor() {
   };
 }
 
-function rootsEditor() {
+// A list of folders with optional globs; `withKind` adds an owned / not owned
+// choice per folder (extra_roots). Only the preset's own lists switch the
+// preset to "custom" when edited.
+function rootsEditor({ withKind = false } = {}) {
   const wrap = el("div", { class: "roots" });
   const rows = el("div", {});
   let roots = [];
   const add = el("button", { type: "button", class: "secondary" }, "Add folder");
+  const edited = () => {
+    if (!withKind) markCustomPreset();
+    changed();
+  };
   const render = () => {
     rows.innerHTML = "";
     roots.forEach((r, i) => {
@@ -190,8 +203,7 @@ function rootsEditor() {
       const del = el("button", { type: "button", class: "icon", title: "Remove this folder" }, "×");
       path.addEventListener("input", () => {
         r.path = path.value;
-        markCustomPreset();
-        changed();
+        edited();
       });
       globs.addEventListener("input", () => {
         r.globs = globs.value.split(",").map((g) => g.trim()).filter(Boolean);
@@ -200,23 +212,41 @@ function rootsEditor() {
       del.addEventListener("click", () => {
         roots.splice(i, 1);
         render();
-        markCustomPreset();
-        changed();
+        edited();
       });
-      rows.appendChild(el("div", { class: "root-row" }, path, globs, del));
+      const cells = [path, globs];
+      if (withKind) {
+        const kind = el("select", { class: "kind", "aria-label": "Kind" });
+        kind.append(new Option("owned", "owned", false, r.kind === "owned"), new Option("not owned", "not_owned", false, r.kind !== "owned"));
+        kind.addEventListener("change", () => {
+          r.kind = kind.value;
+          changed();
+        });
+        cells.push(kind);
+      }
+      rows.appendChild(el("div", { class: withKind ? "root-row with-kind" : "root-row" }, ...cells, del));
     });
   };
   add.addEventListener("click", () => {
-    roots.push({ path: "", globs: [] });
+    roots.push(withKind ? { path: "", globs: [], kind: "not_owned" } : { path: "", globs: [] });
     render();
     changed();
   });
   wrap.append(rows, add);
   return {
     node: wrap,
-    get: () => roots.map((r) => ({ path: r.path, globs: (r.globs || []).slice() })),
+    get: () =>
+      roots.map((r) => {
+        const out = { path: r.path, globs: (r.globs || []).slice() };
+        if (withKind) out.kind = r.kind === "owned" ? "owned" : "not_owned";
+        return out;
+      }),
     set: (v) => {
-      roots = (Array.isArray(v) ? v : []).map((r) => (typeof r === "string" ? { path: r, globs: [] } : { path: r.path || "", globs: (r.globs || []).slice() }));
+      roots = (Array.isArray(v) ? v : []).map((r) =>
+        typeof r === "string"
+          ? { path: r, globs: [], kind: "not_owned" }
+          : { path: r.path || "", globs: (r.globs || []).slice(), kind: r.kind }
+      );
       render();
     },
   };
@@ -286,6 +316,7 @@ function makeEditor(key, def, value) {
   switch (def.type) {
     case "preset": return presetEditor();
     case "roots": return rootsEditor();
+    case "roots-kind": return rootsEditor({ withKind: true });
     case "order": return orderEditor();
     case "ratio": return ratioEditor(key);
     case "int": return textEditor(key, def, true);

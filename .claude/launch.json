@@ -34,18 +34,13 @@
       "port": 8790
     },
     {
-      "name": "ext-harness-baseline",
-      "runtimeExecutable": "node",
+      "name": "server-scratch",
+      "runtimeExecutable": "bash",
       "runtimeArgs": [
-        "scripts/ext-page-harness.js",
-        "--build",
-        "/private/tmp/claude-502/-Users-alvaroh-Projects-auto-rekordbox-bc-tagger--claude-worktrees-local-collection-ui-e8f6f6/5ab11b77-a18c-4e4c-8002-b205a8b61e5e/scratchpad/baseline-build",
-        "--data",
-        "/Users/alvaroh/Projects/auto-rekordbox/tagger-test-db/bc-tagger-export-2026-10-26.json",
-        "--port",
-        "8791"
+        "-c",
+        "rm -rf .e2e/ui-data && BC_TAGGER_DATA_DIR=.e2e/ui-data exec server/bct serve --port 8768"
       ],
-      "port": 8791
+      "port": 8768
     }
   ]
 }
