@@ -93,7 +93,7 @@ def _row_entry(svc, batch: dict, row: dict, earlier: set[int], new_tags: list[st
         # {unknown tag: what it became}; null: the mapping ran before logs recorded it per row
         "mapped_tags": (row.get("mapped_tags") or {}) if mapping.get("per_row") or not mapping else None,
         "new_tags": [t for t in row.get("tags") or [] if t in new_tags],
-        "outcome": outcome, "item_id": item_id, "imported_earlier": row["n"] in earlier,
+        "outcome": outcome, "item_id": item_id, "order": info.get("order"), "imported_earlier": row["n"] in earlier,
         "match": {"source": row.get("match_source"), "status": match.get("status"),
                   "via": (row.get("bandcamp") or {}).get("via"), "confidence": match.get("confidence")},
         "bandcamp_url": bc_item.get("item_url") or bc_item.get("url") or (row.get("hints") or {}).get("bandcamp_url"),

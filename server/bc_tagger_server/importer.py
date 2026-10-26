@@ -23,8 +23,8 @@ from typing import Any
 
 from . import bandcamp, importlog, musicbrainz
 from .collection import (
-    DuplicateIndex, by_number, merge_pending_item_tags, now_ms_iso, other_get, other_id, other_put, queue_add,
-    search_links,
+    DuplicateIndex, by_number, max_order, merge_pending_item_tags, now_ms_iso, other_get, other_id, other_put,
+    queue_add, search_links,
 )
 from .fetcher import Challenged, Fetcher, NotCached, RateLimited, Unavailable, is_challenge
 from .rowmatch import score_row
@@ -1184,6 +1184,7 @@ def _commit(svc, batch: dict, earlier: set[int] = frozenset()) -> dict:
     result = {"pending_adds": 0, "tag_merges": 0, "other_added": 0, "other_merged": 0, "new_tags": [], "skipped": 0}
     ids: dict[str, list[str]] = {"added": [], "merged": [], "other_added": [], "other_merged": []}
     stamp = now_ms_iso()  # date_added of new items, modified_at of everything this commit touches
+    order = max_order(store)  # "#": new items are numbered after everything, in row order; merges keep theirs
     used_tags: list[str] = []
     for row in rows:
         if row.get("checked"):
@@ -1215,21 +1216,23 @@ def _commit(svc, batch: dict, earlier: set[int] = frozenset()) -> dict:
             result["other_merged"] += 1
             ids["other_merged"].append(dup["of"])
         elif row["source"] == "bandcamp":
-            item = {**row["bandcamp"]["item"], "tags": tags, "date_added": stamp, "modified_at": stamp}
+            order += 1
+            item = {**row["bandcamp"]["item"], "tags": tags, "date_added": stamp, "modified_at": stamp, "order": order}
             queue_add(store, item=item)
             dups.add({**item, "source": "bandcamp", "pending": "tagger"})
             row["committed"] = "pending_add"
-            row["commit_info"] = {"item_id": item["id"]}
+            row["commit_info"] = {"item_id": item["id"], "order": order}
             result["pending_adds"] += 1
             ids["added"].append(item["id"])
         else:
+            order += 1
             item = other_put(store, {
-                **row_item(row), "date_added": stamp, "modified_at": stamp, "import_batch": batch_id,
+                **row_item(row), "date_added": stamp, "modified_at": stamp, "import_batch": batch_id, "order": order,
                 **{k: row.get(k) for k in OTHER_FIELDS if row.get(k) is not None},
             })
             dups.add(item)
             row["committed"] = "other"
-            row["commit_info"] = {"item_id": item["id"]}
+            row["commit_info"] = {"item_id": item["id"], "order": order}
             result["other_added"] += 1
             ids["other_added"].append(item["id"])
         located = row.get("located") or {}
