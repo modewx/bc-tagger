@@ -708,14 +708,19 @@ test("Main target, real server: dry run, confirm, and write to a sandbox copy", 
   assert.match(dialog, /MAIN rekordbox library/);
   assert.match(dialog, /\/E2E\/Must/, "the mapped playlist is in the dry run");
   assert.equal(stat(), before, "the dry run doesn't touch the sandbox");
-  await app.click("#exportConfirm .dialog-confirm");
-  await app.waitForFunction(() => !document.getElementById("exportLatest").disabled, null, { timeout: 120000 }); // the flow ended
-  const status = await app.textContent("#refreshStatus");
   if (rekordboxRunning) {
-    assert.match(status, /failed/, "refused while rekordbox runs");
+    // The dry run reports the blocker; Confirm stays disabled.
+    assert.match(dialog, /Quit rekordbox/);
+    assert.equal(await app.isDisabled("#exportConfirm .dialog-confirm"), true);
+    await app.click("#exportConfirm .dialog-cancel");
+    await app.waitForFunction(() => !document.getElementById("exportLatest").disabled, null, { timeout: 120000 });
+    assert.match(await app.textContent("#refreshStatus"), /failed.*Quit rekordbox/);
     assert.equal(stat(), before, "nothing written");
-    console.log("# main write refused as expected: rekordbox is running");
+    console.log("# main write blocked before confirming: rekordbox is running");
   } else {
+    await app.click("#exportConfirm .dialog-confirm");
+    await app.waitForFunction(() => !document.getElementById("exportLatest").disabled, null, { timeout: 120000 }); // the flow ended
+    const status = await app.textContent("#refreshStatus");
     assert.match(status, /done/);
     const tree = await api("/api/rekordbox/playlists");
     const must = tree.find((p) => p.path === "/E2E/Must");

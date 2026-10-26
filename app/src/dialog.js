@@ -12,6 +12,7 @@
  * @param {string} [o.requireAck]    label of a checkbox that must be ticked first
  * @param {string} [o.id]            element id (tests)
  * @param {boolean} [o.infoOnly]     no confirm button (just Close); resolves false
+ * @param {boolean} [o.confirmDisabled] show the confirm button but keep it disabled
  * @returns {Promise<boolean>}
  */
 export function confirmDialog(o) {
@@ -48,6 +49,7 @@ export function confirmDialog(o) {
       box.addEventListener("change", () => (ok.disabled = !box.checked));
       dlg.append(label);
     }
+    if (o.confirmDisabled) ok.disabled = true;
     if (o.infoOnly) {
       cancel.textContent = o.cancelLabel || "Close";
       actions.append(cancel);

@@ -27,6 +27,14 @@ function listBlock(title, entries, render, max = 40) {
   return d;
 }
 
+// Messages of everything that would make the write fail. `blockers` comes
+// from the server; `errors` (playlist mapping problems) predates it.
+function blockersOf(d) {
+  const list = (Array.isArray(d.blockers) ? d.blockers : []).map((b) => (typeof b === "string" ? b : b.message || b.code));
+  if (!list.length && Array.isArray(d.errors)) list.push(...d.errors);
+  return list;
+}
+
 // The dry-run diff as dialog content.
 export function diffView(d, target) {
   const wrap = el("div");
@@ -34,15 +42,20 @@ export function diffView(d, target) {
     wrap.appendChild(el("div", "This writes to your MAIN rekordbox library. Quit rekordbox first.", "warn-box"));
   }
   wrap.appendChild(el("p", d.db_path || "", "muted"));
-  if (Array.isArray(d.errors) && d.errors.length) {
-    const box = el("div", null, "warn-box");
-    box.appendChild(el("strong", "Nothing will be written until these are fixed:"));
+  // Blockers make the write fail (rekordbox running, test library switched in,
+  // playlist errors, ...): shown first, and the confirm button stays disabled.
+  const blockers = blockersOf(d);
+  if (blockers.length) {
+    const box = el("div", null, "warn-box blockers");
+    box.appendChild(el("strong", "Can't write yet:"));
     const ul = el("ul");
-    d.errors.forEach((e) => ul.appendChild(el("li", e)));
+    blockers.forEach((b) => ul.appendChild(el("li", b)));
     box.appendChild(ul);
     wrap.appendChild(box);
   }
-  (Array.isArray(d.warnings) ? d.warnings : []).forEach((w) => wrap.appendChild(el("p", "⚠ " + w, "muted")));
+  (Array.isArray(d.warnings) ? d.warnings : []).forEach((w) =>
+    wrap.appendChild(el("p", "⚠ " + (typeof w === "string" ? w : w.message || w.code), "muted"))
+  );
   // Entry totals: from per_playlist when the server sends it.
   const per = Array.isArray(d.per_playlist) && d.per_playlist.length ? d.per_playlist : null;
   const added = per ? per.reduce((n, p) => n + count(p.add), 0) : count(d.entries_added);
@@ -140,28 +153,16 @@ export async function runExport(jobs, selection, onProgress, { ask = false } = {
     return { status: "done", result: { message: none ? "none of these items are located" : "rekordbox is already up to date" } };
   }
   const n = count(d.selected_items) || (selection.ids ? selection.ids.length : selection.latest);
-  if (Array.isArray(d.errors) && d.errors.length) {
-    await confirmDialog({ id: "exportConfirm", infoOnly: true, title: "This export can't run yet", body: diffView(d, target) });
-    return { status: "error", error: d.errors.join("; ") };
-  }
-  // The server refuses main writes while rekordbox runs: say so before asking.
-  if (target === "main" && d.rekordbox_running) {
-    await confirmDialog({
-      id: "exportConfirm",
-      infoOnly: true,
-      danger: true,
-      title: "Quit rekordbox first",
-      body: diffView(d, target),
-    });
-    return { status: "error", error: "rekordbox is running: quit it, then export again" };
-  }
+  const blockers = blockersOf(d);
   const ok = await confirmDialog({
     id: "exportConfirm",
     danger: target === "main",
     title: target === "main" ? `Export ${n} items to your MAIN rekordbox library?` : `Export ${n} items to rekordbox?`,
     body: diffView(d, target),
     confirmLabel: target === "main" ? "Write to my main library" : "Export",
+    confirmDisabled: blockers.length > 0 || d.can_confirm === false,
   });
+  if (blockers.length) return { status: "error", error: blockers.join("; ") };
   if (!ok) return { status: "done", result: { message: "cancelled" } };
   const body = { ...selection };
   if (d.confirm_token) body.confirm_token = d.confirm_token;
