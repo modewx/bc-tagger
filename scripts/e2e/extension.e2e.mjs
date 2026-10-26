@@ -1914,7 +1914,7 @@ test("import, Look up in my browser: Bandcamp's bot check in the browser stops t
     } catch (e) {
       throw new Error(`no stop message: at ${page.url()}, progress "${await page.textContent("#importProgress").catch(() => "-")}", ${answers.seen.length} requests`);
     }
-    batchId = decodeURIComponent(page.url().split("#import/")[1]);
+    batchId = decodeURIComponent(page.url().match(/#import\/([^/?#]+)|[?&]batch=([^&#]+)/).slice(1).find(Boolean));
     const asked = answers.seen.length;
     assert.ok(asked >= 1 && asked <= 4, `requests: ${asked}`);
     await page.waitForTimeout(1500);
@@ -1922,6 +1922,8 @@ test("import, Look up in my browser: Bandcamp's bot check in the browser stops t
     const state = await api(`/api/import/${batchId}/lookups`);
     assert.equal(state.state, "stopped");
     assert.equal(state.reason, "challenge");
+    // The batch is still reviewable (rows marked unavailable), so links can be set by hand.
+    await waitFor(() => api(`/api/import/${batchId}`).then((b) => b.status === "ready"), { what: "the batch ready", timeout: 30000 });
   } finally {
     await context.unroute(BANDCAMP_HOSTS, answers.handler);
     if (batchId) await api(`/api/import/${batchId}`, { method: "DELETE" });
