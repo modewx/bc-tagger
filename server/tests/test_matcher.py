@@ -260,3 +260,42 @@ def test_owned_root_wins_a_tie():
     item = {"id": "t1", "artist": "Band", "title": "Song", "album_title": "Rec", "track_num": 1}
     for rows in ([owned, soulseek], [soulseek, owned]):
         assert locate_item(item, FileIndex(rows), CFG)["best"]["path"] == owned["path"]
+
+
+def test_label_artist_counts_as_unknown():
+    f = row("/c/Lefty/2026 - Phase One/Lefty - Phase One.aiff", "Phase One", "Lefty", "Phase One", 1, root_kind="owned")
+    item = {"id": "t1", "artist": "7even Recordings", "title": "Phase One", "album_title": "F - Phase One / Icon", "track_num": 1}
+    assert locate_item(item, FileIndex([f]), CFG)["status"] == "located"
+
+
+def test_artist_spelled_out_in_title():
+    f = row("/s/(2023) Tutu Ta - Lonely Eyes (MMLPXX707)/10 - Tutu Ta - Terkos.aiff", "Terkos", "Tutu Ta", "Lonely Eyes", 10)
+    item = {"id": "t1", "artist": "MMLPXX707 B4", "title": 'Tutu Ta "Terkos"', "album_title": 'MMLPXX707 - TUTU TA "Lonely Eyes"', "track_num": 10}
+    assert locate_item(item, FileIndex([f]), CFG)["status"] == "located"
+
+
+def test_key_bpm_suffix_and_vinyl_side_prefix():
+    assert title_similarity("Drifting Through The Mist", "Drifting Through The Mist - 11A - 82") == 1.0
+    f = row("/s/Hari Sima, Mínim - Fluvius/05 - Hari Sima, Mínim - Tiberis.aiff", "Tiberis", "Hari Sima, Mínim", "Fluvius", 5)
+    item = {"id": "t1", "artist": "Hari Sima & Mínim", "title": "B1- Tiberis", "album_title": "Fluvius", "track_num": 5}
+    assert locate_item(item, FileIndex([f]), CFG)["status"] == "located"
+    assert title_similarity("Part 2", "Part 2 - 4A - 120") == 1.0  # the guard still sees the same numbers
+
+
+def test_title_split_pseudo_artist_is_not_an_artist():
+    """'You And Me - [320 kbps]_pn' splits into a pseudo-artist 'You And Me'; it must not
+    vouch for an item by another artist titled 'You And Me'."""
+    f = row("/s/SUPER UK Garage Collection   30 of 37/Sovereign vs Fantastic 3 - You And Me -  [320 kbps]_pn.mp3",
+            "You And Me", "Sovereign vs Fantastic 3", "FT3 003 Fantastic 3 Records", None, fmt="mp3-320")
+    item = {"id": "t1", "artist": "Le Matin", "title": "You And Me", "album_title": "Le Matin EP", "track_num": 2}
+    assert locate_item(item, FileIndex([f]), CFG)["status"] != "located"
+
+
+def test_glued_digits_and_repeated_artist_prefix():
+    f = row("/c/Sfire/2019 - Sfire/Sfire - Sfire - 02 Sfire 2.aiff", "Sfire 2", "Sfire", "Sfire", 2, root_kind="owned")
+    item = {"id": "t1", "artist": "Sfire", "title": "Sfire2", "album_title": "Sfire", "track_num": 2}
+    assert locate_item(item, FileIndex([f]), CFG)["status"] == "located"
+    assert title_similarity("Sfire2", "Sfire 3") <= 0.5  # the number guard still applies
+    g = row("/s/Dub Squad - Blown Fruit/01 Blown Fruit.aiff", "Blown Fruit", "Dub Squad", "Blown Fruit", 1)
+    item = {"id": "t2", "artist": "Dub Squad", "title": "Dub Squad - Dub Squad - Blown Fruit", "album_title": "Blown Fruit", "track_num": 1}
+    assert locate_item(item, FileIndex([g]), CFG)["status"] == "located"

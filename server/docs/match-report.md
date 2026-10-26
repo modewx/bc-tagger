@@ -1,23 +1,26 @@
 # Match report: tagged items vs. the real collection
 
-2026-10-25, Session A. Read-only on `/Volumes/Stationary Backup`. Regenerate the numbers with
-`./bct scan && ./bct locate --all && ./bct match-report`.
+2026-10-26, Session A, on the **full** index of `/Volumes/Stationary Backup` (read-only).
+Regenerate the numbers with `./bct scan && ./bct locate --all && ./bct match-report`.
 
 ## Headline
 
-- **The drive went away mid-scan.** `/Volumes/Stationary Backup` (and the other external volumes)
-  unmounted about 2 minutes into the first full scan, so only **2,562 of ~12,970** files in
-  `Music/Collection` (folders roughly `+1`…`D`) and **0 of ~27,950** in `soulseek/complete` are
-  indexed. The numbers below cover that slice plus the test folders; expect located counts to grow
-  several-fold after a full scan. The indexer now keeps rows when a drive vanishes mid-walk.
-- On that slice: **117 located, 2 candidates, 827 missing** of 946 items (14 albums, 932 tracks).
-  Of the 117 located, 96 sit in an owned root (Collection or test-downloads) and 115 are AIFF.
-- **Precision:** I reviewed every located match. After tuning there are **no wrong auto-matches**.
-  Before tuning there was one ("Ego (Naked)" → "Naked Eye", now only a candidate).
-- **Recall on what is indexed:** of the 30 missing items whose artist *is* in the index, all 30 are
-  real misses (that particular track isn't on disk). No miss was a matcher failure.
-- **Speed:** scanning over USB ran about 24 files/s (so ~30 min for the full ~41k files; rescans only
-  read changed files). Locating all 946 items takes 5–8 s.
+- **Index:** 41,037 audio files: `Music/Collection` 12,994 (owned) and `soulseek/complete` 27,954
+  (not owned), plus the test folders. 24 files couldn't be read (kept, flagged with `error`).
+  The first full scan read 38,386 files in about 30 minutes over USB (~21 files/s). A full
+  `./bct locate --all`, including the incremental rescan of the unchanged 41k files, takes about a minute.
+- **Items (947: 12 albums, 935 tracks):** **679 located (72%)**, 9 candidates to confirm, 259 missing.
+  - Owned on Bandcamp (531): 417 located, 2 candidates, 112 missing.
+  - Not owned (416): 262 located, 7 candidates, 147 missing.
+  - 648 of the 679 are AIFF (27 MP3-320, 2 MP3, 2 WAV); 403 sit in an owned root, 276 in soulseek.
+- **Precision:** no wrong auto-match found. I reviewed every located match with a lower score (34),
+  all album matches (8) and a random sample of 22 high-confidence ones. Three false positives that a
+  tuning step introduced were caught on the full index and fixed before committing (see Tuning).
+- **Recall:** 106 missing items have their artist somewhere in the index. All but 2 are real misses
+  (that track isn't on disk); the 2 were matcher gaps and are fixed (glued digits, repeated prefixes).
+- **Hints:** 114 owned items aren't on the drive at all (candidates for the downloader); **17 owned
+  items are only in the soulseek folder** (could be re-downloaded from Bandcamp in AIFF); 3 are in the
+  Collection folder but show as not owned (was 14 before B fixed the extension's album IDs).
 
 ## Numbers (generated)
 
@@ -25,83 +28,96 @@
 
 | root | kind | mounted | files indexed |
 |---|---|---|---|
-| `/Volumes/Stationary Backup/Music/Collection` | owned | **no** | 2562 |
-| `/Volumes/Stationary Backup/soulseek/complete` | not_owned | **no** | 0 |
+| `/Volumes/Stationary Backup/Music/Collection` | owned | yes | 12994 |
+| `/Volumes/Stationary Backup/soulseek/complete` | not_owned | yes | 27954 |
 | `/Users/alvaroh/Projects/auto-rekordbox/test-downloads` | owned | yes | 3 |
 | `/Users/alvaroh/Projects/auto-rekordbox/test-tracks` | not_owned | yes | 86 |
 
-### Items (946: 14 albums, 932 tracks)
+### Items (947: 12 albums, 935 tracks)
 
 | status | count |
 |---|---|
-| located | 117 |
-| candidates | 2 |
-| missing | 827 |
-| unknown | 0 |
+| located | 679 |
+| candidates | 9 |
+| missing | 259 |
 
 | ownership | located | candidates | missing |
 |---|---|---|---|
-| owned | 83 | 2 | 414 |
-| not_owned | 34 | 0 | 413 |
-| unknown | 0 | 0 | 0 |
+| owned | 417 | 2 | 112 |
+| not_owned | 262 | 7 | 147 |
 
-Located by root kind: owned: 96, not_owned: 21
+Located by root kind: owned 403, not_owned 276. Located by format: aiff 648, mp3-320 27, mp3 2, wav 2.
 
-Located by format: aiff: 115, mp3: 2
-
-Hints: `owned_not_located`: 416, `in_owned_root_but_not_owned`: 14, `owned_but_only_in_not_owned_root`: 1
+Hints: `owned_not_located` 114, `owned_but_only_in_not_owned_root` 17, `in_owned_root_but_not_owned` 3.
 
 ## Tuning (all covered by tests in `tests/test_matcher.py`)
 
-| pattern found on the drive | before | after |
-|---|---|---|
-| Label compilations filed under the label by the downloader, tag title `Artist - Title` (Banlieue Records "BR16 – LABOR OF LOVE", "Compilation – TORBAG III", Apron Records, Bigote edits) | candidates / missing | located (9 items) |
-| Featured artist moved from title to artist ("Oração (Pense & Dance) Ft. Linn da Quebrada" vs artist "Lechuga Zafiro ft. Linn Da Quebrada") | candidate | located |
-| Reordered words carried a match ("Ego (Naked)" vs "Naked Eye", same artist) | **located (wrong)** | candidate |
-| Same short title, different artist *and* album ("Us", "Blur", "Pressure", "Untitled") | 5 noise candidates | not offered |
-| Loose-track folders (`!!!LOOSE TRACKS!!!`, files in the Collection root) | an album match would pull in the whole folder | releases are split by album tag |
-| Untagged downloader files `<artist> - <album> - NN <title>` | filename not parsed | parsed |
-| Same release in an owned and a not-owned root, same format | arbitrary pick | owned root wins |
+| pattern found on the drive | effect |
+|---|---|
+| Label compilations filed under the label by the downloader, tag title `Artist - Title` | candidates → located |
+| Featured artist moved between title and artist ("… Ft. Linn da Quebrada") | candidate → located |
+| Reordered words carried a match ("Ego (Naked)" vs "Naked Eye") | **wrong match** → candidate (titles < 0.88 never auto-accept) |
+| Same short title, different artist *and* album ("Us", "Blur", "Pressure") | noise candidates → not offered |
+| Loose-track folders | an album no longer pulls in the whole folder (releases split by album tag) |
+| Untagged downloader files `<artist> - <album> - NN <title>` | parsed |
+| Same release in owned and not-owned roots, same format | owned root wins |
+| Item "artist" is a label ("7even Recordings", "afterdark recordings") | treated as unknown → 2 located |
+| Item "artist" is a catalog code, real artist in the title (`MMLPXX707 B4` / `Tutu Ta "Terkos"`) | 2 located |
+| Mixed In Key suffixes in titles (`… - 11A - 82`) | 1 located |
+| Vinyl side prefixes (`B1- Tiberis`) | 1 located |
+| Digits glued to words (`Sfire2` vs `Sfire 2`) | 1 located (number guard still applies) |
+| Repeated artist prefix (`Dub Squad - Dub Squad - Blown Fruit`) | 1 located |
+| ⚠ Caught while tuning: a title split of `You And Me - [320 kbps]_pn` produced a pseudo-artist "You And Me" that vouched for "Le Matin – You And Me" and 2 more | fixed before commit: only real artist fields count |
 
-Net on the slice: located 106 → 115 (before the owned-flow download), candidates 13 → 2.
+Net on the full index: 671 → **679 located**, 14 → **9 candidates**, 0 wrong.
+
+## The 9 candidates (left for the user to confirm or reject)
+
+| item | best candidate | verdict |
+|---|---|---|
+| Neil Landstrumm – Index Revisiting | `Neil_Landstrumm--Brown_By_August-CD-1995/03-…Index_revisited.aiff` | probably the same track (revisiting/revisited) → confirm |
+| dj zinc – Food of Life | `Swift & Zinc - Food Of Life.aiff` (Ionosphere EP 1993) | probably the same track, credit differs → confirm |
+| Buckley – Bass, Mids, Tops | `SPE:C - Buckley - Bass, Mids, Tops …` (filed under the label) | same track → confirm |
+| Sleepwalker – Age of Aquarius (L.D remix) | "Age Of Aquarius (No Surrender, No Retreat…)" | different mix → reject |
+| Renegade Soundwave – Cocaine Sex (Sub Aqua Overdrive Dub) | "Cocaine Sex (Turbo Lust mix)" | different mix → reject |
+| White House White – God Bless America | "White House White – Oddball Harry" | different track → reject |
+| DJ Plead – SW | "DJ Plead – RT1" | different track → reject |
+| Petit Gateau / Su-27 – Simulation | "Nature – Simulation World" | different track → reject |
+| Impey – Dry Toke | "Toke – Ori" | different track → reject |
 
 ## Spot checks (20)
 
 | # | item | local file | verdict |
 |---|---|---|---|
-| 1 | Synergy Trilogy – *Synergy Trilogy* (album) | `test-tracks/Synergy Trilogy/` (9 tracks) | ✓ album expands to its tracks |
-| 2 | Morgan Buckley & Ben Donohoe – The System Works | `test-tracks/…Sworx…/03. The System Works.aiff` | ✓ |
+| 1 | Synergy Trilogy – *Synergy Trilogy* (album) | `test-tracks/Synergy Trilogy/` (9 tracks) | ✓ in earlier runs; the album item is missing from the mirror right now (B is restoring it), so it isn't counted above |
+| 2 | Stanze Fredde Records – *Stanze Fredde Vol. 2* (album) | `Collection/Stanze Fredde Records/2025 - Stanze Fredde Vol. 2/` (17 tracks) | ✓ album expands to its tracks |
 | 3 | (no artist) – Celebrate Death, *Visitor - Expat* | `test-tracks/Expat/07 Celebrate Death.aiff` | ✓ AIFF chosen over the identical MP3 |
-| 4 | Tony Boninsegna – Lab **Techninicans** - We Gave You Life | `…/01 - Lab Technicians - We Gave You Life.aiff` | ✓ typo tolerated |
-| 5 | Tony Boninsegna – Zeco - The **With** Trials | `…/08 - Zeco - The Witch Trials.aiff` | ✓ typo tolerated |
-| 6 | Mike Ink – Paroles (Original) | `…/01 - Paroles.aiff` (not the T-Power/Autechre/remix versions) | ✓ |
-| 7 | Francesco Farfa – File #2 | untagged `07.Francesco Farfa - File #2.mp3` | ✓ by filename; File #1/#3 rejected by the number guard |
-| 8 | Alien D – Liquid Nails (*BR16 - VA – LABOR OF LOVE*) | `Collection/Banlieue Records/2024 - BR16…/… - 02 Alien D - Liquid Nails.aiff` | ✓ after tuning |
-| 9 | Zift – Megadrill (*TORBAG III*) | `Collection/Compilation/2023 - TORBAG III/… - 09 Zift - Megadrill.aiff` | ✓ after tuning |
-| 10 | V/A – Lechuga Zafiro - Oração (Pense & Dance) Ft. Linn da Quebrada | `Collection/Lechuga Zafiro ft. Linn Da Quebrada - Oração (Pense & Dance)(3).aiff` (loose) | ✓ after tuning; lowest located confidence (0.87, album differs) |
-| 11 | Carmelo Torres y su Conjunto – Mi Machete (Bigote y Copia Doble Systema remix) | `Collection/Bigote/2020 - Kumbia edits & rmxs (2010-2020)/… - 20 …` | ✓ after tuning |
-| 12 | Aloka – Aloka - Cicada (*Hypa*) | `Collection/Aloka & Dave N.A./2024 - Hypa/Aloka - Hypa - 03 Cicada.aiff` | ✓ |
-| 13 | Jlin, Third Coast Percussion – Perspective: V. Dissonance | `Collection/Jlin, Third Coast Percussion - Perspective- V. Dissonance.aiff` (loose) | ✓ |
-| 14 | Anatolian Weapons – All the Bones (*Beyond*) | `Collection/Anatolian Weapons/2024 - All the Bones/…` (single, album tag *Beyond*) | ✓ |
-| 15 | Bunzinelli – Atacama, Ladakh | `test-downloads/Bunzinelli/2022 - Atacama EP/…` | ✓ downloaded in this run (owned flow) |
-| 16 | Anatolian Weapons – **Ego (Naked)** (*Beyond*) | `…/Cause And Effect - 03 Naked Eye.aiff` | ✗ was auto-accepted, now a candidate to reject |
-| 17 | Trois-Quarts Taxi System & Damna – Globe | candidates "…Taxi System - Coma" / "- Sonar" | ✗ noise candidates (shared artist prefix); the real track isn't indexed |
-| 18 | Tony Boninsegna – Nine-L - Islands, **Part 3** | local has only "Islands, Part 2" | ✓ correctly not matched |
-| 19 | Space Drum Meditation – Jiǎozi (*SDM001*) | local has SDM005 only | ✓ correctly missing |
-| 20 | 96 Back – DUI2 | `Collection/96 Back/2024 - tender, exit/…` | ✓ match, but shown **not owned**: see below |
+| 4 | Tony Boninsegna – Sykosis 451 - Monsoon (Bundle Vol. 1 & 2) | `soulseek/(2023) Notes From Underground 1986-1994 Vol. 2/03 - Sykosis 451 - Monsoon.aif` | ✓ the bundle's Vol. 2 half, now found |
+| 5 | Batenko – Caliente (*Gamma-Ray Bursts*) | `soulseek/…/Melodic House & Techno - 1307-24/Batenko - Caliente (Original).mp3` | ✓ same track on a compilation; only an MP3 exists (lowest confidence, 0.86) |
+| 6 | Belgian New Beat – Secrets Of China - Chinese Ways | `soulseek/Rekordbox Tracks/11 - Chinese Ways - Secrets Of China.aiff` | ✓ compilation item, artist from the title |
+| 7 | Paul Johnson – Life In The Jungle (*cpjtx002*) | `soulseek/…/The Music In Me (Remastered 2015)/04 Life In The Jungle.aiff` | ✓ same track, other release |
+| 8 | Masarima – Freak Like U (Egyptian Lover Remix) | `…/Masarima - Freak with U (Egyptian Lover Remix) - 6A - 130.aif` | ✓ typo in the file name (title 0.91) |
+| 9 | Soft Blade – Pensya Volchonka | `soulseek/Zerkalo/03 - Pesnya Volchonka.aiff` | ✓ typo on Bandcamp |
+| 10 | Om Unit & James Bangura – Saporro Drums | `…/Rushing 1621/03 - Sapporo Drums.aiff` | ✓ typo on Bandcamp |
+| 11 | Tagliabue – B4 Forza Gravitazionale | `soulseek/tagliabue - un' altra forma di vibrazioni …/08. Forza Gravitazionale.aiff` | ✓ vinyl side prefix |
+| 12 | Sayf & Abu Ama – Brutal Wave (Abu Ama Rework) | `Collection/Sayf/2024 - لِمن شرّدو/… - 06 Brutal Wave (Abu Ama Rework).aiff` | ✓ Arabic album name, matched by title/artist |
+| 13 | MMLPXX707 B4 – Tutu Ta "Terkos" | `soulseek/(2023) Tutu Ta - Lonely Eyes (…)/10 - Tutu Ta - Terkos.aiff` | ✓ after tuning |
+| 14 | Fez The Kid & BRUK – Drifting Through The Mist | `…RUM RUNNA…/FEZ THE KID AND BRUK-DRIFTING THROUGH THE MIST - 11A - 82.mp3` | ✓ after tuning (only an MP3 exists) |
+| 15 | Sfire – Sfire2 | `soulseek/Sfire - Sfire (2013)/01 Sfire 2.aiff` | ✓ after tuning |
+| 16 | Trois-Quarts Taxi System – Gravel | `Collection/Various Artists/2024 - La Grande Côte [VATUST04]/… - 02 Trois-Quarts Taxi System - Gravel` | ✓ compilation filed under "Various Artists" |
+| 17 | Deepak Khazanchi ft. Asha Puthli – Bass Fire (On And On) (Turbotito & Ragz Remix) | `soulseek/Naya Beat Volume 2/… Bass Fire (On & on) (Turbotito & Ragz Remix)` | ✓ "&" vs "And" |
+| 18 | Le Matin – You And Me | — | ✓ correctly missing (only "Sovereign vs Fantastic 3 – You And Me" exists; was a false positive mid-tuning) |
+| 19 | Tony Boninsegna – Nine-L - Islands, **Part 3** | local has only "Islands, Part 2" | ✓ correctly not matched (number guard) |
+| 20 | Space Drum Meditation – Jiǎozi (*SDM001*) | local has SDM005 only | ✓ correctly missing |
 
 ## Ownership findings
 
-- Ownership (extension push, 4,747 collection IDs): of the 946 items, **499 owned**, 447 not
-  owned. 416 owned items aren't located yet, mostly because of the unscanned part of the drive.
-- `in_owned_root_but_not_owned` = 14 and `owned_but_only_in_not_owned_root` = 1. Most of the 14
-  are a **data issue in the items**: 50 of 933 track items have `album_id` = `"a" + <their own track
-  id>` (with a relative `album_url` like `/album/naafi-x`), and 63 have no `album_id`. A track bought
-  as part of an album is owned via the album's ID, so for those ~113 tracks ownership can't be
-  resolved. Files in the downloader's Collection folder are owned in practice.
-
-## After the drive is back
-
-```bash
-cd server && ./bct scan && ./bct locate --all && ./bct match-report
-```
+- Ownership comes from the extension's live-session push: 531 of 947 items owned, after B's album-ID repair (was 499).
+- **17 owned items exist only in the soulseek folder.** They could be re-downloaded from Bandcamp in
+  AIFF; the UI shows them with the `owned_but_only_in_not_owned_root` hint.
+- 114 owned items aren't on the drive at all; `./bct download --filter … -n 1` (or the app) can fetch them
+  into `test-downloads/` one release at a time.
+- 3 items are in the downloader's Collection folder but show as not owned: V/A – Lechuga Zafiro - Oração
+  (a loose file in the Collection root), Dark Entries Records – Donzii - On the inside (no `album_id` in
+  the item), and Beltracci – B1 - Like Jazz (album `a1699226035` isn't in the collection list). Likely a
+  free/gift download or a purchase the collection list doesn't show; worth a look in the UI.
