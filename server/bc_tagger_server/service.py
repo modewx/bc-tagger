@@ -108,10 +108,14 @@ class Service:
         offset: int = 0,
         ids: Iterable[str] | None = None,
         sources: Iterable[str] | None = None,
+        sort: str | None = None,
+        order: str = "desc",
     ) -> tuple[int, list[dict]]:
-        from .collection import SOURCES, all_items
+        from .collection import SOURCES, all_items, by_date
 
         items = all_items(self.store, sources or SOURCES)
+        if sort in ("modified_at", "date_added"):  # undated items count as earlier than any date
+            items = by_date(items, sort, newest_first=order != "asc")
         if ids is not None:
             wanted = set(ids)
             items = [it for it in items if it["id"] in wanted]
@@ -138,11 +142,40 @@ class Service:
         return all_items(self.store)
 
     def sync_items(self, items: dict[str, dict], deleted: list[str], full: bool) -> dict[str, Any]:
+        items = self._keep_modified_at(items)
         result = self.store.upsert_items(items, deleted, full=full)
         self.store.set_meta("items_source", {"kind": "extension", "synced_at": now_iso(), "full": full})
         for item_id in list(items) + list(deleted):
             self.jobs.bus.publish("item", {"id": item_id})
         return result
+
+    def _keep_modified_at(self, items: dict[str, dict]) -> dict[str, dict]:
+        """``modified_at`` on sync: tags changed and the extension's date isn't newer than ours → now
+        (the server saw the change first); tags unchanged → keep the later of the two dates."""
+        from .collection import now_ms_iso, parse_ts
+
+        out = {}
+        stamp = now_ms_iso()
+        for item_id, item in items.items():
+            mine = self.store.get_item(item_id) if isinstance(item, dict) else None
+            if mine is None:
+                out[item_id] = item
+                continue
+            theirs_at, mine_at = parse_ts(item.get("modified_at")), parse_ts(mine.get("modified_at"))
+            newer = theirs_at is not None and (mine_at is None or theirs_at > mine_at)
+            if set(item_tags(item)) != set(item_tags(mine)):
+                out[item_id] = item if newer else {**item, "modified_at": stamp}
+            elif not newer and mine.get("modified_at"):
+                out[item_id] = {**item, "modified_at": mine["modified_at"]}
+            else:
+                out[item_id] = item
+        return out
+
+    def touch_item(self, item_id: str, stamp: str) -> None:
+        """Set a mirror item's ``modified_at`` (an import merged into it)."""
+        item = self.store.get_item(item_id)
+        if item is not None:
+            self.store.upsert_items({item_id: {**item, "modified_at": stamp}})
 
     def sync_tags(self, tags: list[str]) -> dict[str, Any]:
         self.store.set_tags(tags)
@@ -170,19 +203,22 @@ class Service:
             if merge_pending_item_tags(self.store, item_id, clean, replace=True):
                 self.jobs.bus.publish("item", {"id": item_id})
                 return {"edit_id": None, "item_id": item_id, "tags": clean, "applied": True, "pending": "tagger"}
+        from .collection import now_ms_iso
+
+        stamp = now_ms_iso()
         with self.store.tx() as c:
             cur = c.execute(
                 "INSERT INTO tag_edits(item_id, tags, created_at) VALUES(?, ?, ?)",
-                (item_id, json.dumps(clean), now_iso()),
+                (item_id, json.dumps(clean), stamp),
             )
             edit_id = cur.lastrowid
         # Reflect the edit in the mirror right away; the extension confirms it later.
         item = self.store.get_item(item_id)
         if item is not None:
-            item["tags"] = clean
+            item.update(tags=clean, modified_at=stamp)
             self.store.upsert_items({item_id: item})
             self.jobs.bus.publish("item", {"id": item_id})
-        return {"edit_id": edit_id, "item_id": item_id, "tags": clean}
+        return {"edit_id": edit_id, "item_id": item_id, "tags": clean, "modified_at": stamp}
 
     def pending_tag_edits(self) -> list[dict[str, Any]]:
         import json
@@ -191,7 +227,8 @@ class Service:
             "SELECT seq, item_id, tags, created_at FROM tag_edits WHERE acked_at IS NULL ORDER BY seq"
         )
         return [
-            {"edit_id": r["seq"], "item_id": r["item_id"], "tags": json.loads(r["tags"]), "created_at": r["created_at"]}
+            {"edit_id": r["seq"], "item_id": r["item_id"], "tags": json.loads(r["tags"]), "created_at": r["created_at"],
+             "modified_at": r["created_at"]}
             for r in rows
         ]
 

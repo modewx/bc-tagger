@@ -1163,7 +1163,8 @@ def _commit(svc, batch: dict) -> dict:
     dups = DuplicateIndex(store)
     vocab = store.get_tags()
     result = {"pending_adds": 0, "tag_merges": 0, "other_added": 0, "other_merged": 0, "new_tags": [], "skipped": 0}
-    stamp = now_ms_iso()
+    ids: dict[str, list[str]] = {"added": [], "merged": [], "other_added": [], "other_merged": []}
+    stamp = now_ms_iso()  # date_added of new items, modified_at of everything this commit touches
     used_tags: list[str] = []
     for row in rows:
         if row.get("checked"):
@@ -1181,27 +1182,33 @@ def _commit(svc, batch: dict) -> dict:
                 union = list(dict.fromkeys(dup["tags"] + tags))
                 if union != dup["tags"]:
                     svc.queue_tag_edit(dup["of"], union)
+                svc.touch_item(dup["of"], stamp)  # merged by this import, even with no new tags
             row["committed"] = "tag_merge"
             result["tag_merges"] += 1
+            ids["merged"].append(dup["of"])
         elif dup:  # an existing "other" item
             existing = other_get(store, dup["of"]) or {}
-            other_put(store, {**existing, "tags": list(dict.fromkeys((existing.get("tags") or []) + tags))})
+            other_put(store, {**existing, "tags": list(dict.fromkeys((existing.get("tags") or []) + tags)),
+                              "modified_at": stamp})
             row["committed"] = "other_merge"
             result["other_merged"] += 1
+            ids["other_merged"].append(dup["of"])
         elif row["source"] == "bandcamp":
-            item = {**row["bandcamp"]["item"], "tags": tags, "date_added": stamp}
+            item = {**row["bandcamp"]["item"], "tags": tags, "date_added": stamp, "modified_at": stamp}
             queue_add(store, item=item)
             dups.add({**item, "source": "bandcamp", "pending": "tagger"})
             row["committed"] = "pending_add"
             result["pending_adds"] += 1
+            ids["added"].append(item["id"])
         else:
             item = other_put(store, {
-                **row_item(row), "date_added": stamp, "import_batch": batch_id,
+                **row_item(row), "date_added": stamp, "modified_at": stamp, "import_batch": batch_id,
                 **{k: row.get(k) for k in OTHER_FIELDS if row.get(k) is not None},
             })
             dups.add(item)
             row["committed"] = "other"
             result["other_added"] += 1
+            ids["other_added"].append(item["id"])
         located = row.get("located") or {}
         if located.get("manual") and located.get("best"):  # the hand-picked file: confirmed for the new item
             item_id = (row["duplicate"] or {}).get("of") or row_item(row)["id"]
@@ -1215,6 +1222,10 @@ def _commit(svc, batch: dict) -> dict:
         svc.sync_tags(vocab + new_tags)
         queue_add(store, tags=new_tags)
     result["new_tags"] = new_tags
+    # what the collection page selects afterwards (sorted by modified_at, newest first)
+    result["item_ids"] = ids
+    result["selected"] = list(dict.fromkeys(ids["added"] + ids["merged"] + ids["other_added"] + ids["other_merged"]))
+    result["modified_at"] = stamp
     batch.update(status="committed", committed_at=now_iso(), commit_result=result)
     _save_rows(store, batch_id, rows)
     _refresh_stats(store, batch, rows)
