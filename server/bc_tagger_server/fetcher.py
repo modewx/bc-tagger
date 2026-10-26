@@ -16,6 +16,7 @@ import re
 import threading
 import time
 from datetime import datetime
+from email.utils import parsedate_to_datetime
 from typing import Any
 from urllib.parse import urlencode, urljoin, urlsplit
 
@@ -29,6 +30,8 @@ log = logging.getLogger(__name__)
 
 CACHE_TTL_S = 30 * 86400
 MAX_REDIRECTS = 3
+BACKOFF_S = (30, 60, 120)  # waits after HTTP 429/503 without Retry-After; then give up for now
+MAX_WAIT_S = 600
 REDIRECT_LOOP = 598  # pseudo status, cached for a day: some hosts redirect to themselves forever
 
 
@@ -38,6 +41,23 @@ class Unavailable(RuntimeError):
 
 class Challenged(Unavailable):
     """The site answered with its bot check. Stop; don't retry, don't work around it."""
+
+
+class RateLimited(Unavailable):
+    """Still HTTP 429 after waiting (Retry-After, else 30/60/120 s): pause, let the user resume later."""
+
+
+def _retry_after(r: httpx.Response) -> float | None:
+    value = (r.headers.get("retry-after") or "").strip()
+    if not value:
+        return None
+    if value.isdigit():
+        return float(value)
+    try:
+        when = parsedate_to_datetime(value)
+    except (TypeError, ValueError):
+        return None
+    return max(0.0, (when - datetime.now(when.tzinfo)).total_seconds())
 
 
 _CHALLENGE = re.compile(r"<title>\s*Client Challenge\s*</title>", re.I)
@@ -67,6 +87,8 @@ class Fetcher:
         self.min_interval = min_interval
         self.offline = offline or fixtures is not None
         self.fixtures = fixtures
+        self.sleep = time.sleep  # tests replace it
+        self.on_wait = None  # called with (seconds, message) before a rate-limit wait
         self.client = httpx.Client(
             timeout=30, headers={"User-Agent": user_agent, "Accept": "application/json"},
             follow_redirects=False, transport=transport,
@@ -111,6 +133,9 @@ class Fetcher:
                 )
         return status, body
 
+    def is_cached(self, method: str, url: str, json_body: Any = None) -> bool:
+        return self._cached(self.cache_key(method, url, json_body)) is not None
+
     def get_json(self, url: str, params: dict | None = None) -> Any:
         status, body = self.request("GET", url, params=params)
         if status != 200:
@@ -127,7 +152,7 @@ class Fetcher:
         with lock:  # at most one request per min_interval and host, across all fetchers
             wait = Fetcher._last.get(host, 0.0) + self.min_interval - time.monotonic()
             if wait > 0:
-                time.sleep(wait)
+                self.sleep(wait)
             try:
                 return self.client.request(method, url, json=json_body)
             finally:
@@ -136,7 +161,7 @@ class Fetcher:
 
     def _fetch(self, method: str, url: str, json_body: Any) -> tuple[int, str]:
         """Follow redirects by hand, so every hop goes through the rate limit."""
-        backed_off = False
+        waits = backoffs = 0
         hops = 0
         while True:
             try:
@@ -144,9 +169,19 @@ class Fetcher:
             except httpx.HTTPError as e:  # timeouts, connection errors: not cached
                 log.info("request failed: %s %s: %s", method, url, e)
                 return 599, f"{type(e).__name__}: {e}"
-            if r.status_code in (429, 503) and not backed_off and not is_challenge(r.text):
-                backed_off = True
-                time.sleep(10)  # rate limited: back off once
+            if r.status_code in (429, 503) and not is_challenge(r.text):
+                if waits == len(BACKOFF_S):
+                    raise RateLimited(f"HTTP {r.status_code} after waiting {sum(BACKOFF_S[:waits])} s: {url}")
+                wait = _retry_after(r)
+                if wait is None:
+                    wait, backoffs = BACKOFF_S[backoffs], backoffs + 1
+                wait = min(MAX_WAIT_S, wait)
+                waits += 1
+                log.info("HTTP %s from %s: waiting %.0f s", r.status_code, url, wait)
+                if self.on_wait:
+                    self.on_wait(wait, f"Bandcamp is rate-limiting; waiting {wait:.0f} s")
+                # Being polite: the next request to this host (this one again, or anyone's) waits it out.
+                Fetcher._last[urlsplit(url).netloc] = time.monotonic() + wait - self.min_interval
                 continue
             if not r.is_redirect:
                 return r.status_code, r.text

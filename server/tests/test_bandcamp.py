@@ -254,3 +254,29 @@ def test_ownership_refresh_stops_on_the_bot_check(tmp_path):
     with pytest.raises(ownership.OwnershipError, match="bot check"):
         ownership.fetch_collection(cookies, client=client)
     assert calls == [bandcamp.USER_AGENT] and "Mozilla" not in ownership.USER_AGENT  # one honest request
+
+
+def test_fetcher_backs_off_politely_on_429(tmp_path):
+    from bc_tagger_server.fetcher import RateLimited
+
+    calls, sleeps, waits = [], [], []
+
+    def handler(request):
+        calls.append(time.monotonic())
+        if len(calls) <= 2:
+            return httpx.Response(429, headers={"Retry-After": "5"} if len(calls) == 1 else {})
+        return httpx.Response(200, text="ok")
+
+    f = Fetcher(Store(path=tmp_path / "s.db"), "test", min_interval=2.5, transport=httpx.MockTransport(handler))
+    f.sleep = sleeps.append
+    f.on_wait = lambda s, msg: waits.append((s, msg))
+    assert f.request("GET", "https://bandcamp.com/a") == (200, "ok")
+    assert [round(w) for w, _ in waits] == [5, 30] and "rate-limiting" in waits[0][1]
+    assert [round(s) for s in sleeps if s > 3] == [5, 30]  # the pacing carries the wait: no double sleep
+    # still limited after 30/60/120 s: give up for now (not cached)
+    always = Fetcher(Store(path=tmp_path / "t.db"), "test", min_interval=1,
+                     transport=httpx.MockTransport(lambda r: httpx.Response(429)))
+    always.sleep = lambda s: None
+    with pytest.raises(RateLimited):
+        always.request("GET", "https://bandcamp.com/b")
+    assert always.network_requests == 4

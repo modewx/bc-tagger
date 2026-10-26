@@ -12,7 +12,9 @@ to the ``other`` collection.
 
 from __future__ import annotations
 
+import copy
 import json
+import math
 import re
 import secrets
 from datetime import datetime, timedelta
@@ -23,12 +25,14 @@ from .collection import (
     DuplicateIndex, by_number, merge_pending_item_tags, now_ms_iso, other_get, other_id, other_put, queue_add,
     search_links,
 )
-from .fetcher import Challenged, Unavailable
+from .fetcher import Challenged, RateLimited, Unavailable
 from .rowmatch import score_row
 from .store import now_iso
 
 FORMAT = "bc-tagger-import/1"
 CHALLENGE_COOLDOWN_S = 3600  # after a bot check, no Bandcamp lookups from any batch for an hour
+REQUESTS_PER_LOOKUP = 1.3  # some rows need a second search (the title alone)
+RATE_LIMITED = "Bandcamp is rate-limiting; try again later"
 _PAGE_URL = re.compile(r"^https://[^/\s?#]+/(track|album)/[^/\s?#]+$")
 ROW_FIELDS = ("line", "raw", "kind", "artist", "title", "album", "album_artist", "flags", "note", "label", "catalog",
               "year", "track_num", "position", "duration", "expanded_from", "bandcamp_url", "discogs_url",
@@ -60,7 +64,7 @@ def _stop_reason(svc, batch: dict) -> tuple[str, str] | None:
     if bandcamp.lookups_off():
         return "off", "Bandcamp lookups are off (BC_TAGGER_BANDCAMP=off)"
     stopped = batch.get("bandcamp_lookups") or {}
-    if stopped.get("state") == "stopped":
+    if stopped.get("state") in ("stopped", "paused"):
         return stopped["reason"], stopped["error"]
     last = svc.store.get_meta("bandcamp_challenge")
     if last and (datetime.now().astimezone() - datetime.fromisoformat(last["at"])).total_seconds() < CHALLENGE_COOLDOWN_S:
@@ -76,6 +80,104 @@ def _challenged(svc, batch: dict, e: Exception) -> tuple[str, str]:
     svc.store.set_meta("bandcamp_challenge", {"at": at, "error": str(e)})
     _save_batch(svc.store, batch)
     return "challenge", error
+
+
+def _rate_limited(svc, batch: dict, e: Exception) -> tuple[str, str]:
+    """Still rate-limited after waiting: pause this batch's lookups until the user resumes."""
+    batch["bandcamp_lookups"] = {"state": "paused", "reason": "rate_limited", "error": RATE_LIMITED,
+                                 "detail": str(e), "at": now_iso()}
+    _save_batch(svc.store, batch)
+    return "rate_limited", RATE_LIMITED
+
+
+def _fmt_duration(seconds: float) -> str:
+    return "under a minute" if seconds < 60 else f"{round(seconds / 60)} min"
+
+
+def _plan(svc, fetcher, rows: list[dict], todo) -> tuple[dict[str, Any], list[bool]]:
+    """Which of ``rows`` (those ``todo`` says need a lookup) will hit the network, and how long that
+    takes at the configured pace: ``{lookups, cached, requests, seconds, interval_s, text}``."""
+    dups = DuplicateIndex(svc.store)
+    network = []
+    cached = 0
+    for row in rows:
+        probe = copy.deepcopy(row)
+        _check_duplicate(dups, probe)
+        needs = todo(probe)
+        uncached = needs and not fetcher.is_cached(*bandcamp.first_request(probe))
+        cached += needs and not uncached
+        network.append(bool(uncached))
+    lookups = sum(network)
+    requests = math.ceil(lookups * REQUESTS_PER_LOOKUP)
+    seconds = requests * fetcher.min_interval
+    text = f"~{lookups} lookups ≈ {_fmt_duration(seconds)}" if lookups else "no Bandcamp requests needed"
+    return {"lookups": lookups, "cached": cached, "requests": requests, "seconds": round(seconds),
+            "interval_s": fetcher.min_interval, "text": text}, network
+
+
+def _needs_lookup(row: dict) -> bool:
+    return row["source"] != "bandcamp" and (row.get("match") or {}).get("status") in ("pending", None)
+
+
+def _try_lookup(svc, batch: dict, fetcher, row: dict) -> tuple[str, str] | None:
+    """One row's lookup; returns why the batch's lookups must stop now (bot check, rate limit)."""
+    try:
+        _lookup(fetcher, row)
+        return None
+    except Challenged as e:  # the bot check: stop asking Bandcamp, never retry
+        stop = _challenged(svc, batch, e)
+    except RateLimited as e:  # still 429 after waiting: pause until the user resumes
+        stop = _rate_limited(svc, batch, e)
+    except Unavailable as e:  # not recorded, network error: this row only
+        row["match"], row["bandcamp"] = _unavailable("error", f"Bandcamp lookup unavailable: {e}"), None
+        return None
+    except Exception as e:  # one bad row must not stop the batch
+        row["match"], row["bandcamp"] = {**_empty_match(), "status": "error", "error": f"{type(e).__name__}: {e}"}, None
+        return None
+    row["match"], row["bandcamp"] = _unavailable(*stop), None
+    return stop
+
+
+def _lookup_rows(svc, batch: dict, rows: list[dict], todo, phase: str, ctx=None) -> Any:
+    """Look up ``rows`` that ``todo`` selects, one request at a time, with progress and a time estimate."""
+    store, batch_id = svc.store, batch["batch_id"]
+    fetcher = svc.bandcamp_fetcher()
+    dups = DuplicateIndex(store)
+    estimate, network = _plan(svc, fetcher, rows, todo)
+    batch["estimate"] = estimate
+    stop = _stop_reason(svc, batch)
+    if stop is None:
+        batch["bandcamp_lookups"] = {"state": "on"}
+    elif (batch.get("bandcamp_lookups") or {}).get("state") not in ("stopped", "paused"):
+        batch["bandcamp_lookups"] = {"state": "off" if stop[0] == "off" else "stopped", "reason": stop[0],
+                                     "error": stop[1], "at": now_iso()}
+    _save_batch(store, batch)
+    state = {"i": 0}
+
+    def progress(message: str) -> None:
+        svc.jobs.bus.publish("import", {"batch_id": batch_id, "phase": phase, "current": state["i"], "total": len(rows),
+                                        "message": message})
+        if ctx:
+            ctx.progress(state["i"], len(rows), message)
+
+    fetcher.on_wait = lambda seconds, message: progress(message)
+    for i, row in enumerate(rows, 1):
+        state["i"] = i
+        _check_duplicate(dups, row)
+        if row["source"] == "bandcamp" and (row.get("match") or {}).get("status") in ("pending", None):
+            row["match"] = {**_empty_match(), "status": "in_collection", "source": "collection"}
+        elif todo(row):
+            if stop:
+                row["match"] = _unavailable(*stop)
+            else:
+                stop = _try_lookup(svc, batch, fetcher, row)
+            _check_duplicate(dups, row)
+        _refresh(row)
+        if i % 10 == 0 or i == len(rows):
+            _save_rows(store, batch_id, rows)
+        left = math.ceil(sum(network[i:]) * REQUESTS_PER_LOOKUP) * fetcher.min_interval if not stop else 0
+        progress(f"{phase} {i}/{len(rows)}" + (f" · ~{_fmt_duration(left)} left" if left else ""))
+    return fetcher
 
 
 # -- persistence -------------------------------------------------------------------------------
@@ -233,17 +335,8 @@ def _locate(svc, rows: list[dict], index=None) -> None:
         row["located"] = {"status": result["status"], "best": result["best"], "candidates": result["candidates"][:3]}
 
 
-def _item_for(fetcher, candidate: dict) -> dict:
-    try:
-        return bandcamp.fetch_item(fetcher, candidate) or bandcamp.minimal_item(candidate)
-    except Challenged:
-        raise
-    except Unavailable:
-        return bandcamp.minimal_item(candidate)
-
-
 def _lookup(fetcher, row: dict) -> None:
-    """The file's Bandcamp URL when it has one, else a Bandcamp search."""
+    """The file's Bandcamp URL when it has one (one page), else a Bandcamp search (no page)."""
     hint = row.get("bandcamp_url")
     found = bandcamp.item_from_page(fetcher, hint, row) if hint and bandcamp.is_bandcamp_url(hint) else None
     if found:
@@ -257,7 +350,8 @@ def _lookup(fetcher, row: dict) -> None:
         return
     match = bandcamp.resolve(fetcher, row)
     row["match"] = match
-    row["bandcamp"] = {"item": _item_for(fetcher, match["chosen"]), "via": "resolved"} if match["chosen"] else None
+    # The search answer is enough to import; the page (data-tralbum) is fetched later, only if asked for.
+    row["bandcamp"] = {"item": bandcamp.minimal_item(match["chosen"]), "via": "resolved"} if match["chosen"] else None
 
 
 # -- create ---------------------------------------------------------------------------------------
@@ -299,6 +393,7 @@ def create_batch(svc, file_obj: dict, default_tags: list[str], name: str | None 
         "revision": file_obj.get("revision"), "pending_releases": list(file_obj.get("pending_releases") or []),
         "job_id": None, "stats": {}, "committed_at": None, "commit_result": None,
     }
+    batch["estimate"] = _plan(svc, svc.bandcamp_fetcher(), rows, _needs_lookup)[0]
     _save_rows(svc.store, batch["batch_id"], rows)
     _refresh_stats(svc.store, batch, rows)
     return batch
@@ -311,42 +406,15 @@ def run_batch(svc, batch_id: str, ctx=None) -> dict:
     store = svc.store
     batch = load_batch(store, batch_id)
     rows = load_rows(store, batch_id)
-    fetcher = svc.bandcamp_fetcher()
-    dups = DuplicateIndex(store)
 
     def event(phase, current, total):
         svc.jobs.bus.publish("import", {"batch_id": batch_id, "phase": phase, "current": current, "total": total})
         if ctx:
             ctx.progress(current, total, f"{phase} {current}/{total}")
 
-    stop = _stop_reason(svc, batch)
-    batch["bandcamp_lookups"] = {"state": "on"} if stop is None else \
-        {"state": "off" if stop[0] == "off" else "stopped", "reason": stop[0], "error": stop[1], "at": now_iso()}
+    fetcher = None
     try:
-        for i, row in enumerate(rows, 1):
-            _check_duplicate(dups, row)
-            if row["source"] == "bandcamp":
-                row["match"] = {**_empty_match(), "status": "in_collection", "source": "collection"}
-            elif stop:
-                row["match"] = _unavailable(*stop)
-            else:
-                try:
-                    _lookup(fetcher, row)
-                except Challenged as e:  # the bot check: stop asking Bandcamp, never retry
-                    stop = _challenged(svc, batch, e)
-                    row["match"] = _unavailable(*stop)
-                    row["bandcamp"] = None
-                except Unavailable as e:  # not recorded, network error: this row only
-                    row["match"] = _unavailable("error", f"Bandcamp lookup unavailable: {e}")
-                    row["bandcamp"] = None
-                except Exception as e:  # one bad row must not stop the batch
-                    row["match"] = {**_empty_match(), "status": "error", "error": f"{type(e).__name__}: {e}"}
-                    row["bandcamp"] = None
-                _check_duplicate(dups, row)
-            _refresh(row)
-            if i % 10 == 0 or i == len(rows):
-                _save_rows(store, batch_id, rows)
-            event("resolving", i, len(rows))
+        fetcher = _lookup_rows(svc, batch, rows, _needs_lookup, "resolving", ctx)
         event("locating", 0, len(rows))
         batch["scan"] = _refresh_index(svc, ctx)
         _locate(svc, rows)
@@ -360,7 +428,93 @@ def run_batch(svc, batch_id: str, ctx=None) -> dict:
         svc.jobs.bus.publish("import", {"batch_id": batch_id, "phase": "error", "current": 0, "total": len(rows)})
         raise
     _refresh_stats(store, batch, rows)
-    return {"batch_id": batch_id, "stats": batch["stats"], "network_requests": fetcher.network_requests}
+    return {"batch_id": batch_id, "stats": batch["stats"], "network_requests": fetcher.network_requests if fetcher else 0}
+
+
+def _paused(row: dict) -> bool:
+    match = row.get("match") or {}
+    return row["source"] != "bandcamp" and match.get("status") == "unavailable" and match.get("reason") == "rate_limited"
+
+
+def _needs_details(row: dict) -> bool:
+    bc = _own(row) or {}
+    return bool(bc) and bc["via"] in ("resolved", "chosen") and bool(bc["item"].get("partial")) \
+        and bool(bc["item"].get("item_url")) and row.get("checked") and not row.get("committed") \
+        and not row.get("duplicate")
+
+
+def prepare_job(svc, batch_id: str, what: str) -> dict[str, Any]:
+    """Check a resume/details job may run now; returns its time estimate."""
+    batch = load_batch(svc.store, batch_id)
+    if batch["status"] != "ready":
+        raise ImportError_(f"the batch isn't ready ({batch['status']})")
+    lookups = batch.get("bandcamp_lookups") or {}
+    if what == "resume":
+        if lookups.get("state") != "paused":
+            raise ImportError_("nothing to resume: the batch's Bandcamp lookups aren't paused")
+        batch["bandcamp_lookups"] = {"state": "on"}
+        _save_batch(svc.store, batch)
+    stop = _stop_reason(svc, batch)
+    if stop:
+        raise ImportError_(stop[1])
+    rows = load_rows(svc.store, batch_id)
+    fetcher = svc.bandcamp_fetcher()
+    if what == "resume":
+        return _plan(svc, fetcher, rows, _paused)[0]
+    pages = [r for r in rows if _needs_details(r)]
+    uncached = sum(not fetcher.is_cached("GET", r["bandcamp"]["item"]["item_url"]) for r in pages)
+    seconds = uncached * fetcher.min_interval
+    return {"lookups": uncached, "cached": len(pages) - uncached, "requests": uncached, "seconds": round(seconds),
+            "interval_s": fetcher.min_interval,
+            "text": f"~{uncached} pages ≈ {_fmt_duration(seconds)}" if uncached else "no Bandcamp requests needed"}
+
+
+def resume_batch(svc, batch_id: str, ctx=None) -> dict:
+    """Look up the rows a rate limit paused, then locate them again."""
+    store = svc.store
+    batch = load_batch(store, batch_id)
+    rows = load_rows(store, batch_id)
+    targets = [r for r in rows if _paused(r)]
+    for r in targets:
+        r["match"] = _empty_match()
+    _lookup_rows(svc, batch, rows, lambda r: any(r is t for t in targets), "resolving", ctx)
+    _locate(svc, targets)
+    _save_rows(store, batch_id, rows)
+    _refresh_stats(store, batch, rows)
+    svc.jobs.bus.publish("import", {"batch_id": batch_id, "phase": "done", "current": len(rows), "total": len(rows)})
+    return {"batch_id": batch_id, "stats": batch["stats"]}
+
+
+def fetch_details(svc, batch_id: str, ctx=None) -> dict:
+    """Optional: fetch the Bandcamp page (data-tralbum) of the rows that will become tagger items,
+    for the full item (track number, album URL, stream). Paced; stops on a bot check or rate limit."""
+    store = svc.store
+    batch = load_batch(store, batch_id)
+    rows = load_rows(store, batch_id)
+    fetcher = svc.bandcamp_fetcher()
+    targets = [r for r in rows if _needs_details(r)]
+    done = 0
+    stop = None
+    for i, row in enumerate(targets, 1):
+        try:
+            item = row["bandcamp"]["item"]
+            row["bandcamp"]["item"] = bandcamp.fetch_item(fetcher, {"url": item["item_url"]}) or item
+            done += 1
+        except Challenged as e:
+            stop = _challenged(svc, batch, e)
+        except RateLimited as e:
+            stop = _rate_limited(svc, batch, e)
+        except Unavailable:
+            pass
+        _refresh(row)
+        if ctx:
+            ctx.progress(i, len(targets), f"details {i}/{len(targets)}")
+        if stop:
+            break
+    _save_rows(store, batch_id, rows)
+    _refresh_stats(store, batch, rows)
+    svc.jobs.bus.publish("import", {"batch_id": batch_id, "phase": "details", "current": done, "total": len(targets)})
+    return {"batch_id": batch_id, "fetched": done, "of": len(targets), "stopped": stop[1] if stop else None}
 
 
 # -- review ----------------------------------------------------------------------------------------
@@ -405,12 +559,7 @@ def update_row(svc, batch_id: str, n: int, changes: dict) -> dict:
         if stop:  # stopped or off: the same state, no request
             row["match"] = _unavailable(*stop)
         else:
-            try:
-                _lookup(svc.bandcamp_fetcher(), row)
-            except Challenged as e:
-                row["match"], row["bandcamp"] = _unavailable(*_challenged(svc, batch, e)), None
-            except Unavailable as e:
-                row["match"], row["bandcamp"] = _unavailable("error", f"Bandcamp lookup unavailable: {e}"), None
+            _try_lookup(svc, batch, svc.bandcamp_fetcher(), row)
         identity = True
     if "choose" in changes:  # a Bandcamp candidate, or None: not on Bandcamp (→ other)
         match = dict(row.get("match") or _empty_match())
@@ -423,17 +572,7 @@ def update_row(svc, batch_id: str, n: int, changes: dict) -> dict:
             if cand is None:
                 raise ImportError_(f"{cid} is not one of the row's candidates")
             match.update(chosen=cand, status="manual", source="picked")
-            if _stop_reason(svc, batch):
-                item = bandcamp.minimal_item(cand)
-            else:
-                try:
-                    item = bandcamp.fetch_item(svc.bandcamp_fetcher(), cand) or bandcamp.minimal_item(cand)
-                except Challenged as e:
-                    _challenged(svc, batch, e)
-                    item = bandcamp.minimal_item(cand)
-                except Unavailable:
-                    item = bandcamp.minimal_item(cand)
-            row["bandcamp"] = {"item": item, "via": "chosen"}
+            row["bandcamp"] = {"item": bandcamp.minimal_item(cand), "via": "chosen"}
         row["match"] = match
         identity = True
     if "match_url" in changes:  # a Bandcamp page the user found; nothing is fetched

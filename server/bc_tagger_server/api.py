@@ -207,7 +207,17 @@ def create_app(service: Service | None = None) -> FastAPI:
             batch, job = svc.start_import(body.file, body.default_tags, body.name)
         except imp.ImportError_ as e:
             raise HTTPException(400, str(e)) from e
-        return {"batch_id": batch["batch_id"], "job_id": job.id}
+        return {"batch_id": batch["batch_id"], "job_id": job.id, "estimate": batch["estimate"]}
+
+    @app.post("/api/import/{batch_id}/resume")
+    def import_resume(batch_id: str) -> dict:
+        job, estimate = _import_call(svc.start_import_job, batch_id, "resume")
+        return {"job_id": job.id, "estimate": estimate}
+
+    @app.post("/api/import/{batch_id}/details")
+    def import_details(batch_id: str) -> dict:
+        job, estimate = _import_call(svc.start_import_job, batch_id, "details")
+        return {"job_id": job.id, "estimate": estimate}
 
     @app.get("/api/import")
     def import_list() -> list[dict]:

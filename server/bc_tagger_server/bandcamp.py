@@ -24,7 +24,7 @@ from dataclasses import dataclass
 from typing import Any
 from urllib.parse import urlencode, urljoin, urlsplit
 
-from .fetcher import Challenged, Fetcher, Unavailable, load_fixtures
+from .fetcher import Challenged, Fetcher, RateLimited, Unavailable, load_fixtures
 from .rowmatch import ACCEPT_AT, score_row
 from .store import Store
 
@@ -35,7 +35,7 @@ ITEM_FIELDS = ("id", "raw_id", "tralbum_type", "item_type", "title", "artist", "
                "album_url", "item_url", "url", "art_url", "band_id", "track_num", "publish_date", "file")
 _ID = re.compile(r"^[at]\d+$")
 BandcampUnavailable = Unavailable
-__all__ = ["Challenged", "Unavailable"]
+__all__ = ["Challenged", "RateLimited", "Unavailable"]
 
 
 def lookups_off() -> bool:
@@ -70,11 +70,31 @@ class Hit:
                 "album_id": f"a{album_id}" if album_id else None, "band_id": self.raw.get("band_id")}
 
 
+def _search_body(text: str, kind: str) -> dict[str, Any]:
+    return {"search_text": text, "search_filter": kind, "full_page": False, "fan_id": None}
+
+
+def first_request(row: dict) -> tuple[str, str, Any]:
+    """The request a row's lookup starts with (the file's Bandcamp URL, else the first search), so
+    the import can tell which rows are cached and estimate the time."""
+    hint = row.get("bandcamp_url")
+    if hint and is_bandcamp_url(hint):
+        return "GET", hint, None
+    kind, query = _first_query(row)
+    return "POST", SEARCH_URL, _search_body(query, kind)
+
+
+def _first_query(row: dict) -> tuple[str, str]:
+    kind = "a" if row.get("kind") == "album" else "t"
+    artist = row.get("artist") or None
+    title = (row.get("album") if kind == "a" else row.get("title")) or row.get("title") or row.get("album") or ""
+    missing = "artist_missing" in (row.get("flags") or [])
+    return kind, title if missing or not artist else f"{artist} {title}"
+
+
 def search(fetcher: Fetcher, text: str, kind: str = "t") -> tuple[list[Hit], str]:
     """Search tracks (``kind="t"``) or albums (``"a"``). Returns (hits, method)."""
-    status, body = fetcher.request(
-        "POST", SEARCH_URL, json_body={"search_text": text, "search_filter": kind, "full_page": False, "fan_id": None}
-    )
+    status, body = fetcher.request("POST", SEARCH_URL, json_body=_search_body(text, kind))
     if status == 200:
         try:
             results = json.loads(body).get("auto", {}).get("results", [])
@@ -161,7 +181,7 @@ def resolve(fetcher: Fetcher, row: dict) -> dict[str, Any]:
     def score_all() -> list[tuple[float, Hit]]:
         return sorted(((score_row(h, scored_row), h) for h in found.values()), key=lambda x: -x[0])
 
-    run(title if missing or not artist else f"{artist} {title}")
+    run(_first_query(row)[1])
     if "order_ambiguous" in flags and artist and not missing:
         run(f"{title} {artist}")
     ranked = score_all()

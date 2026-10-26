@@ -29,7 +29,7 @@ class Service:
         self.last_prepare: dict[str, Any] | None = None
         self._file_index = None
         # Bandcamp lookups for imports; tests swap in an offline fetcher with recorded responses.
-        self.bandcamp_fetcher = lambda: __import__("bc_tagger_server.bandcamp", fromlist=["x"]).make_fetcher(self.store)
+        self.bandcamp_fetcher = self.default_bandcamp_fetcher
         if seed:
             self.seed_items()
         self._migrate_playlist_keys()
@@ -633,6 +633,12 @@ class Service:
 
     # -- imports (Phase 3) --------------------------------------------------------------
 
+    def default_bandcamp_fetcher(self):
+        """Paced by the ``bandcamp_request_interval_s`` setting (and the BC_TAGGER_BANDCAMP_* switches)."""
+        from .bandcamp import make_fetcher
+
+        return make_fetcher(self.store, min_interval=float(self.settings.get("bandcamp_request_interval_s")))
+
     def start_import(self, file_obj: dict, default_tags: list[str], name: str | None = None):
         from . import importer
 
@@ -641,6 +647,15 @@ class Service:
         batch["job_id"] = job.id
         importer._save_batch(self.store, batch)
         return batch, job
+
+    def start_import_job(self, batch_id: str, what: str):
+        """Resume a batch's paused lookups, or fetch Bandcamp details for its rows: a job."""
+        from . import importer
+
+        fn = {"resume": importer.resume_batch, "details": importer.fetch_details}[what]
+        estimate = importer.prepare_job(self, batch_id, what)
+        job = self.jobs.submit(f"import-{what}", lambda ctx: fn(self, batch_id, ctx))
+        return job, estimate
 
     # -- health -----------------------------------------------------------------------
 
