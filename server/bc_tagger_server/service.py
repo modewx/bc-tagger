@@ -26,6 +26,7 @@ class Service:
         # Jobs live in memory: a batch whose job ran under another boot_id was interrupted by a restart.
         self.boot_id = __import__("secrets").token_hex(4)
         self.committing: set[str] = set()  # import batches being committed by this process
+        self.watcher = None  # the opt-in file watcher (start_watcher), only in the serving process
         self._scanning: dict[str, Any] | None = None
         self._scan_job_id: str | None = None
         self._scan_lock = threading.Lock()
@@ -382,6 +383,8 @@ class Service:
             "scanning": scanning,
             # Full scans never run automatically; this names why one is suggested (first hint).
             "next_auto_reason": hints[0]["code"] if hints else None,
+            "watcher": {"enabled": bool(s.get("watch_roots")), **(self.watcher.status() if self.watcher else
+                                                                   {"running": False})},
             "hints": hints,
             "last_quick_scan": quick,
             "quick_scan_margin_days": s["quick_scan_margin_days"],
@@ -644,6 +647,22 @@ class Service:
         return stream_response(self.store, path)
 
     # -- imports (Phase 3) --------------------------------------------------------------
+
+    def start_watcher(self, source=None) -> dict[str, Any]:
+        """Start the opt-in file watcher when ``watch_roots`` is on (``bct serve`` calls this)."""
+        from .watcher import Watcher, default_source
+
+        if not self.settings.get("watch_roots"):
+            return {"enabled": False}
+        if self.watcher is None:
+            self.watcher = Watcher(
+                self.store, self.settings.roots, float(self.settings.get("watch_debounce_seconds")),
+                source if source is not None else default_source(),
+                publish=lambda event: self.jobs.bus.publish("index", event),
+                paused=lambda: bool(self._scanning and self._scanning.get("kind") == "full"),
+            )
+        self.watcher.start()
+        return {"enabled": True, **self.watcher.status()}
 
     def default_bandcamp_fetcher(self):
         """Paced by the ``bandcamp_request_interval_s`` setting (and the BC_TAGGER_BANDCAMP_* switches)."""
