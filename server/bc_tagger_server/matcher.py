@@ -26,6 +26,9 @@ from .store import Store, now_iso
 SAME_TRACK_MARGIN = 0.1
 TITLE_GATE = 0.75
 ALBUM_GATE = 0.8
+# Title tokens shared by more files than this ("the", "mix", "dub") are not used to find
+# candidates, unless the title has no rarer token.
+MAX_POSTING = 1500
 VARIOUS = {"v a", "va", "various", "various artists", "v a various artists"}
 
 
@@ -116,7 +119,6 @@ class FileIndex:
         self.by_path = {f.path: f for f in self.files}
         self.by_token: dict[str, set[int]] = defaultdict(set)
         self.by_url: dict[str, set[int]] = defaultdict(set)
-        self.releases: dict[str, list[int]] = defaultdict(list)
         for i, f in enumerate(self.files):
             for u in f.urls:
                 self.by_url[u].add(i)
@@ -124,16 +126,38 @@ class FileIndex:
                 for tok in norm_title(t).split():
                     if len(tok) >= 2 or tok.isdigit():
                         self.by_token[tok].add(i)
-            self.releases[f.release_dir].append(i)
+        self.releases = release_groups(self.files)
 
     def candidates_for_titles(self, titles: list[str]) -> set[int]:
-        out: set[int] = set()
         toks = {tok for t in titles for tok in norm_title(t).split() if len(tok) >= 2 or tok.isdigit()}
         if not toks:
             return set(range(len(self.files)))
-        for tok in toks:
-            out |= self.by_token.get(tok, set())
+        postings = sorted((self.by_token.get(tok, set()) for tok in toks), key=len)
+        usable = [p for p in postings if len(p) <= MAX_POSTING] or postings[:1]
+        out: set[int] = set()
+        for p in usable:
+            out |= p
         return out
+
+
+def release_groups(files: list[FileView]) -> dict[str, list[int]]:
+    """Group files into releases: one per folder, split by album tag when a folder mixes
+    albums (loose-track folders), so an album match never pulls in unrelated files.
+
+    Keys are the folder path, or ``<folder>::<album>`` for folders holding several albums.
+    """
+    by_dir: dict[str, dict[str, list[int]]] = defaultdict(lambda: defaultdict(list))
+    for i, f in enumerate(files):
+        album = norm(f.display.get("album") or "")
+        by_dir[f.release_dir][album].append(i)
+    groups: dict[str, list[int]] = {}
+    for rdir, albums in by_dir.items():
+        if len(albums) == 1:
+            groups[rdir] = next(iter(albums.values()))
+        else:
+            for album, idxs in albums.items():
+                groups[f"{rdir}::{album or '?'}"] = idxs
+    return groups
 
 
 # -- item side -----------------------------------------------------------------------------
@@ -269,13 +293,13 @@ def _file_entry(f: FileView, scores: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def _release_entry(rdir: str, files: list[FileView], scores: dict[str, Any], pref: list[str]) -> dict[str, Any]:
+def _release_entry(key: str, files: list[FileView], scores: dict[str, Any], pref: list[str]) -> dict[str, Any]:
     ordered = sorted(files, key=lambda f: (f.disc or 1, f.track or 9999, f.path))
     fmt = Counter(f.format for f in files).most_common(1)[0][0]
     first = ordered[0]
     return {
-        "path": rdir,
-        "release_dir": rdir,
+        "path": key,
+        "release_dir": first.release_dir,
         "format": fmt,
         "confidence": scores["confidence"],
         "method": scores["method"],
@@ -305,7 +329,15 @@ def _decide(entries: list[dict], overrides: dict[str, str], cfg: MatchConfig) ->
         e for e in entries if e["confidence"] >= cfg.threshold and e["confidence"] >= top - SAME_TRACK_MARGIN
     ]
     if eligible:
-        best = min(eligible, key=lambda e: (format_rank(e["format"], cfg.format_preference), -e["confidence"]))
+        best = min(
+            eligible,
+            key=lambda e: (
+                format_rank(e["format"], cfg.format_preference),
+                e.get("root_kind") != "owned",  # same format: prefer the Bandcamp download
+                -e["confidence"],
+                e["path"],
+            ),
+        )
         others = [e for e in entries if e["path"] != best["path"]]
         return {"status": "located", "best": best, "candidates": others[:5]}
     cands = [e for e in entries if e["confidence"] >= cfg.candidate_threshold]

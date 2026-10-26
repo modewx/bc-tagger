@@ -103,7 +103,7 @@ def scan(
     progress: Callable[[int, int, str], None] | None = None,
 ) -> dict[str, Any]:
     """Scan ``roots`` (``[{path, globs, kind}]``) and return counts."""
-    stats = {"roots": [], "files": 0, "read": 0, "unchanged": 0, "removed": 0, "errors": 0}
+    stats = {"roots": [], "files": 0, "read": 0, "unchanged": 0, "removed": 0, "errors": 0, "incomplete_roots": []}
     for root in roots:
         root_path = Path(root["path"]).expanduser()
         root_key = str(root_path)
@@ -118,7 +118,8 @@ def scan(
         }
         seen: set[str] = set()
         batch: list[dict] = []
-        for dirpath, dirnames, filenames in os.walk(root_path):
+        walk_errors: list[str] = []
+        for dirpath, dirnames, filenames in os.walk(root_path, onerror=lambda e: walk_errors.append(str(e))):
             dirnames[:] = sorted(d for d in dirnames if not d.startswith("."))
             for fn in sorted(filenames):
                 if fn.startswith("."):
@@ -150,12 +151,21 @@ def scan(
                 if progress and stats["files"] % 25 == 0:
                     progress(stats["files"], 0, f"scanning {root_key}")
         _flush(store, batch)
+        if walk_errors or not root_path.is_dir():
+            # A drive that went away mid-walk (or unreadable folders) must not look like
+            # deleted files: keep every row we didn't see.
+            log.warning("Scan of %s incomplete (%d errors); keeping unseen files", root_path, len(walk_errors))
+            rstats["incomplete"] = True
+            rstats["walk_errors"] = walk_errors[:5]
+            stats["incomplete_roots"].append(root_key)
+            continue
         gone = [p for p in known if p not in seen]
         if gone:
             with store.tx() as c:
                 c.executemany("DELETE FROM files WHERE path = ?", [(p,) for p in gone])
             stats["removed"] += len(gone)
-    # Drop rows of roots that are no longer configured.
+    # Drop rows of roots that are no longer configured (a configured root that is merely
+    # missing, e.g. an unmounted drive, keeps its rows).
     keep = [str(Path(r["path"]).expanduser()) for r in roots]
     marks = ",".join("?" * len(keep)) or "''"
     with store.tx() as c:
