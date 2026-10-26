@@ -18,7 +18,7 @@ from urllib.parse import urlparse
 from rapidfuzz import fuzz
 
 from .items import album_name, album_url, bandcamp_host, is_album, item_url
-from .normalize import norm, norm_title, numbers, strip_feat, unslug
+from .normalize import looks_like_label, norm, norm_title, numbers, strip_feat, strip_side, unslug
 from .store import Store, now_iso
 
 # A located match within this distance of the best score counts as "the same track"
@@ -80,7 +80,8 @@ class FileView:
     track: int | None
     disc: int | None
     titles: list[str]  # raw title variants
-    artists: list[str]
+    artists: list[str]  # includes 'Artist - Title' splits of titles
+    real_artists: list[str]  # only artist fields (tags, file name, folder)
     albums: list[str]
     hosts: set[str]
     urls: set[str]
@@ -99,9 +100,31 @@ def _with_variants(titles: Iterable[str | None], artists: Iterable[str | None]) 
         if split:
             artists.append(split[0])
             titles.append(split[1])
-    titles = _clean(titles + [strip_feat(t) for t in titles])
+            last = t.rsplit(" - ", 1)[-1].strip()  # "Dub Squad - Dub Squad - Blown Fruit"
+            if last and last != split[1]:
+                titles.append(last)
+    titles = _clean(titles + [strip_feat(t) for t in titles] + [strip_side(t) for t in titles])
     artists = _clean(artists + [strip_feat(a) for a in artists])
     return titles, artists
+
+
+def _item_artists(artist: str) -> list[str]:
+    """The item's artist, unless it's "V/A" or a label/compilation name (then unknown)."""
+    return [] if norm(artist) in VARIOUS or looks_like_label(artist) else [artist]
+
+
+def _artist_in_title(item_titles: list[str], file_artists: list[str]) -> bool:
+    """True when one of the file's artists is spelled out in the item title, e.g. a release
+    whose Bandcamp "artist" is a catalog number and whose title is 'Tutu Ta "Terkos"'."""
+    title_tokens = [set(norm(t).split()) for t in item_titles]
+    for a in file_artists:
+        na = norm(a)
+        if len(na) < 4 or na in VARIOUS:
+            continue
+        # strictly inside: the title must say more than the artist name
+        if any(set(na.split()) < toks for toks in title_tokens):
+            return True
+    return False
 
 
 def file_view(row: dict) -> FileView:
@@ -109,10 +132,8 @@ def file_view(row: dict) -> FileView:
     pd = row["parsed"].get("dir", {})
     urls = {u.rstrip("/").lower() for u in row.get("bc_urls") or []}
     hosts = {urlparse(u).netloc for u in urls if urlparse(u).netloc}
-    titles, artists = _with_variants(
-        [row.get("title"), pf.get("title"), pf.get("rest")],
-        [row.get("artist"), row.get("albumartist"), pf.get("artist"), pd.get("artist")],
-    )
+    real_artists = _clean([row.get("artist"), row.get("albumartist"), pf.get("artist"), pd.get("artist")])
+    titles, artists = _with_variants([row.get("title"), pf.get("title"), pf.get("rest")], real_artists)
     return FileView(
         path=row["path"],
         format=row["format"],
@@ -122,6 +143,7 @@ def file_view(row: dict) -> FileView:
         disc=row.get("discnumber") or pf.get("disc"),
         titles=titles,
         artists=artists,
+        real_artists=real_artists,
         albums=_clean([row.get("album"), pf.get("album"), pd.get("album")]),
         hosts=hosts,
         urls=urls,
@@ -193,7 +215,7 @@ def _split_artist_title(title: str) -> tuple[str, str] | None:
 def track_item_variants(item: dict) -> dict[str, Any]:
     title = str(item.get("title") or "")
     artist = item.get("artist") or item.get("band_name") or ""
-    titles, artists = _with_variants([title], [] if norm(artist) in VARIOUS else [artist])
+    titles, artists = _with_variants([title], _item_artists(artist))
     albums = _clean([item.get("album_title"), unslug(_url_slug(album_url(item)))])
     track = item.get("track_num")
     return {
@@ -226,6 +248,8 @@ def score_track(v: dict[str, Any], f: FileView) -> dict[str, Any] | None:
         if v["artists"]
         else None
     )
+    if artist is not None and artist < 1.0 and _artist_in_title(v["titles"], f.real_artists):
+        artist = 1.0
     album = max((_sim_loose(norm(a), norm(b)) for a in v["albums"] for b in f.albums), default=0.0)
     if artist is None:
         score = 0.75 * title + 0.25 * album
@@ -255,7 +279,7 @@ def album_item_variants(item: dict) -> dict[str, Any]:
     names = _clean([album_name(item), unslug(item.get("album_title")), unslug(_url_slug(item_url(item)))])
     return {
         "albums": names,
-        "artists": [] if norm(artist) in VARIOUS else _clean([artist]),
+        "artists": _clean(_item_artists(artist)),
         "host": bandcamp_host(item),
         "url": (item_url(item) or "").rstrip("/").lower(),
     }

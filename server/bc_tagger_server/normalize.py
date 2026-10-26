@@ -8,6 +8,10 @@ import unicodedata
 _SPECIAL = str.maketrans({"æ": "ae", "Æ": "ae", "ø": "o", "Ø": "o", "ß": "ss", "œ": "oe", "Œ": "oe", "đ": "d", "ł": "l", "Ł": "l"})
 _NON_ALNUM = re.compile(r"[^0-9a-z]+")
 _NOISE = re.compile(r"\b(original mix|original version|original)\b")
+# Mixed In Key-style "Title - 11A - 82" (key + BPM) suffixes, after norm()
+_KEY_BPM = re.compile(r"\s\d{1,2}[ab]\s\d{2,3}$")
+# Vinyl side prefixes: "B1 Title", "A2- Title", "C3. Title"
+_SIDE_PREFIX = re.compile(r"^\s*[a-dA-D][1-9]\s*[-.:)]?\s+(?=\S)")
 _SLUG_SEP = re.compile(r"[-_]+")
 
 
@@ -27,9 +31,27 @@ def norm(s: str | None) -> str:
     return " ".join(_NON_ALNUM.sub(" ", s).split())
 
 
+_GLUED_DIGITS = re.compile(r"(?<=[a-z])(?=\d)")
+
+
 def norm_title(s: str | None) -> str:
-    """Like ``norm`` but drops '(Original Mix)'-style noise that Bandcamp and files disagree on."""
-    return " ".join(_NOISE.sub(" ", norm(s)).split())
+    """Like ``norm`` but drops '(Original Mix)' noise and Mixed In Key '- 11A - 82' suffixes,
+    and splits digits glued to words ('Sfire2' -> 'sfire 2')."""
+    t = _KEY_BPM.sub("", _NOISE.sub(" ", norm(s)))
+    return " ".join(_GLUED_DIGITS.sub(" ", t).split())
+
+
+def strip_side(s: str | None) -> str:
+    """'B1- Tiberis' -> 'Tiberis' (vinyl side prefixes on Bandcamp track titles)."""
+    return _SIDE_PREFIX.sub("", s or "", count=1).strip()
+
+
+_LABEL_WORDS = re.compile(r"\b(records|recordings|label|compilation)\b", re.I)
+
+
+def looks_like_label(artist: str | None) -> bool:
+    """Bandcamp items from label/compilation pages often carry the label as the artist."""
+    return bool(_LABEL_WORDS.search(artist or ""))
 
 
 _FEAT = re.compile(r"\s*[\(\[]?\s*\b(?:feat\.?|ft\.?|featuring)\s+[^\)\]]*[\)\]]?", re.I)
@@ -51,7 +73,7 @@ _ROMAN = {"i": "1", "ii": "2", "iii": "3", "iv": "4", "v": "5", "vi": "6", "vii"
 def numbers(s: str | None) -> set[str]:
     """Number tokens in a title ('Part 3', 'File #2', 'Vol. II') for the number-mismatch guard."""
     out = set()
-    for tok in norm(s).split():
+    for tok in norm_title(s).split():
         if tok.isdigit():
             out.add(str(int(tok)))
         elif tok in _ROMAN and tok not in ("i", "v", "x"):
