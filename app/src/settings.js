@@ -22,7 +22,7 @@ const SECTIONS = [
   ["folders", "general", "Music folders", "Where the indexer looks for your files. Files are referenced in place, never moved."],
   ["matching", "general", "Matching", "How tagged Bandcamp items are matched to local files."],
   ["bandcamp", "general", "Bandcamp", "Ownership normally comes from the extension's live session; these are the fallback."],
-  ["bandcamp_requests", "general", "Bandcamp requests", "Lower values are faster, but can trigger Bandcamp's rate limiting (HTTP 429)."],
+  ["bandcamp_requests", "general", "Bandcamp requests", "Lower values are faster, but can trigger Bandcamp's rate limiting (HTTP 429); then the server backs off and waits."],
   ["server", "general", "Server", ""],
   ["advanced", "general", "Advanced", ""],
   ["rb_target", "rekordbox", "Target library", "Where exports write. Your main collection needs an explicit opt-in, and every export to it shows a dry run first."],
@@ -107,10 +107,10 @@ const FIELDS = {
   bandcamp_request_interval_s: {
     section: "bandcamp_requests",
     type: "number",
-    min: 0.5,
-    step: 0.5,
+    min: 0.1,
+    step: 0.1,
     label: "Server lookups: seconds between requests",
-    help: "The import's Bandcamp lookups. Default 1.",
+    help: "The import's Bandcamp lookups. Default 1, at least 0.1. Lower is faster; a 429 from Bandcamp makes the server back off.",
   },
   bandcamp_browser_concurrency: {
     section: "bandcamp_requests",
