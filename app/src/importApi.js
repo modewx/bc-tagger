@@ -7,7 +7,8 @@
 // Row:   {n, line, raw, kind, artist, title, album, album_artist, track_num, position, duration, year,
 //         label, catalog, expanded_from, tags, flags, note, checked, needsConfirmation,
 //         source: "bandcamp" | "other", duplicate: null | {of, source, title, artist, tags},
-//         match: {status, source, confidence, query, url, chosen, candidates}, item (tagger item or null),
+//         match: {status, source, confidence, query, url, error, chosen, candidates, item}, item (tagger item or null),
+//         lookupUnavailable (the server's Bandcamp lookup hit the bot check and stopped),
 //         hints: {bandcamp, discogs} (links from the file or a metadata lookup), local,
 //         links: {discogs, youtube}, committed}
 // Batch.pendingReleases: [{line, artist, release, tags, reason}] (not importable yet)
@@ -21,6 +22,14 @@ function normDuplicate(d, r) {
   if (!d) return null;
   if (typeof d === "string") return { of: d, source: null, title: null, artist: null, tags: [] };
   return { of: d.of || d.id || null, source: d.source || null, title: d.title || null, artist: d.artist || null, tags: d.tags || [] };
+}
+
+// The server's resolver stops on Bandcamp's bot check; rows it didn't look up
+// say so ("unavailable", or an error naming the challenge).
+function lookupUnavailable(r, match) {
+  if (r.lookup === "unavailable" || r.lookup_status === "unavailable") return true;
+  if (match.status === "unavailable" || match.status === "challenge") return true;
+  return match.status === "error" && /challenge|bot check/i.test(String(match.error || match.message || ""));
 }
 
 function normRow(r, i) {
@@ -49,9 +58,11 @@ function normRow(r, i) {
     source: r.source || (chosen || r.item || match.item ? "bandcamp" : "other"),
     duplicate: normDuplicate(r.duplicate || r.duplicate_of, r),
     needsConfirmation: (Array.isArray(r.flags) ? r.flags : []).includes("needs_user_confirmation"),
+    lookupUnavailable: lookupUnavailable(r, match),
     match: {
       status: match.status || null,
-      source: match.source || null,
+      source: match.source || match.match_source || r.match_source || null,
+      error: match.error || match.message || null,
       confidence: match.confidence ?? (chosen && chosen.confidence) ?? null,
       query: match.query || null,
       url: match.url || match.match_url || null,
@@ -107,6 +118,7 @@ export const discardBatch = (id) => apiJson(`/api/import/${enc(id)}`, { method: 
 // The server's match.source when it sends one, else from the status.
 export function matchSource(row) {
   const m = row.match;
+  if (row.lookupUnavailable && row.source !== "bandcamp") return "unavailable";
   if (m.source) return m.source;
   if (row.duplicate && row.duplicate.source !== "other" && row.source === "bandcamp") return "collection";
   if (m.status === "manual") return m.url ? "url" : m.item && !m.candidates.length ? "linked" : "picked";

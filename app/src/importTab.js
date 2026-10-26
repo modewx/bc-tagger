@@ -158,7 +158,9 @@ export function createImportTab(container) {
 
   async function afterResolve(batchId) {
     const batch = await getBatch(batchId);
-    progress.textContent = statsLine(batch.stats);
+    const blocked = batch.rows.filter((r) => r.lookupUnavailable && r.source !== "bandcamp").length;
+    progress.textContent =
+      statsLine(batch.stats) + (blocked ? ` · Bandcamp lookup unavailable for ${blocked} rows (bot check): link them by hand in the preview` : "");
     const unknown = Object.keys(batch.unknownTags || {});
     if (unknown.length) showMapping(batch);
     else location.href = previewUrl(batchId);

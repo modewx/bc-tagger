@@ -2,17 +2,116 @@
   "format": "bc-tagger-import/1",
   "source": "e2e-sample.txt",
   "created": "2026-10-26",
-  "notes": "Synthetic sample for the e2e import test (shapes as in annotations.json revision 3).",
-  "unknown_tags": { "chill": [], "4/4": ["four-four"] },
+  "notes": "Synthetic sample for the e2e import test (shapes as in annotations.json revision 3). The stub resolves line 2 from its hint and reports line 7 as 'lookup unavailable' (bot check).",
+  "unknown_tags": {
+    "chill": [],
+    "4/4": [
+      "four-four"
+    ]
+  },
   "pending_releases": [
-    { "line": 20, "artist": "Sample Artist", "release": "Sample EP", "tags": [], "reason": "no tracklist found" }
+    {
+      "line": 20,
+      "artist": "Sample Artist",
+      "release": "Sample EP",
+      "tags": [],
+      "reason": "no tracklist found"
+    }
   ],
   "items": [
-    { "line": 1, "raw": "Buma II - Joaquín Cornejo", "artist": "Joaquín Cornejo", "title": "Buma II", "tags": ["drums"], "existing_id": "t1004723757", "existing_tags": ["must", "drums", "build"], "flags": ["duplicate_existing"] },
-    { "line": 2, "raw": "Take It As A Game (Super Drama Mix)", "artist": "Super Drama", "title": "Take It As A Game (Super Drama Mix)", "album": "Select Edits (2017-2020)", "track_num": 4, "tags": ["house"], "bandcamp_url": "https://superdrama.bandcamp.com/album/select-edits-2017-2020" },
-    { "line": 3, "raw": "slow one by Nobody Known (chill)", "artist": "Nobody Known", "title": "Slow One", "tags": ["chill"], "flags": ["needs_user_confirmation"], "note": "The file says Nobody Known, the drive says Nobody Knows." },
-    { "line": 4, "raw": "The Carbon Boys - B1", "artist": "The Carbon Boys", "title": "Untitled", "album": "Cosmic Function", "position": "B1", "track_num": 2, "tags": ["4/4"], "flags": ["title_unknown", "match_by_track_num"] },
-    { "line": 4, "raw": "The Carbon Boys - B2", "artist": "The Carbon Boys", "title": "Untitled", "album": "Cosmic Function", "position": "B2", "track_num": 3, "tags": ["4/4"], "flags": ["title_unknown", "match_by_track_num"] },
-    { "line": 6, "raw": "Maybe Track by Two Options", "artist": "Two Options", "title": "Maybe Track", "tags": ["dub"] }
+    {
+      "line": 1,
+      "raw": "Buma II - Joaquín Cornejo",
+      "artist": "Joaquín Cornejo",
+      "title": "Buma II",
+      "tags": [
+        "drums"
+      ],
+      "existing_id": "t1004723757",
+      "existing_tags": [
+        "must",
+        "drums",
+        "build"
+      ],
+      "flags": [
+        "duplicate_existing"
+      ]
+    },
+    {
+      "line": 2,
+      "raw": "Take It As A Game (Super Drama Mix)",
+      "artist": "Super Drama",
+      "title": "Take It As A Game (Super Drama Mix)",
+      "album": "Select Edits (2017-2020)",
+      "track_num": 4,
+      "tags": [
+        "house"
+      ],
+      "bandcamp_url": "https://superdrama.bandcamp.com/album/select-edits-2017-2020"
+    },
+    {
+      "line": 3,
+      "raw": "slow one by Nobody Known (chill)",
+      "artist": "Nobody Known",
+      "title": "Slow One",
+      "tags": [
+        "chill"
+      ],
+      "flags": [
+        "needs_user_confirmation"
+      ],
+      "note": "The file says Nobody Known, the drive says Nobody Knows."
+    },
+    {
+      "line": 4,
+      "raw": "The Carbon Boys - B1",
+      "artist": "The Carbon Boys",
+      "title": "Untitled",
+      "album": "Cosmic Function",
+      "position": "B1",
+      "track_num": 2,
+      "tags": [
+        "4/4"
+      ],
+      "flags": [
+        "title_unknown",
+        "match_by_track_num"
+      ]
+    },
+    {
+      "line": 4,
+      "raw": "The Carbon Boys - B2",
+      "artist": "The Carbon Boys",
+      "title": "Untitled",
+      "album": "Cosmic Function",
+      "position": "B2",
+      "track_num": 3,
+      "tags": [
+        "4/4"
+      ],
+      "flags": [
+        "title_unknown",
+        "match_by_track_num"
+      ]
+    },
+    {
+      "line": 6,
+      "raw": "Maybe Track by Two Options",
+      "artist": "Two Options",
+      "title": "Maybe Track",
+      "tags": [
+        "dub"
+      ]
+    },
+    {
+      "line": 7,
+      "raw": "Hinted But Blocked - Some Band",
+      "artist": "Some Band",
+      "title": "Hinted But Blocked",
+      "tags": [
+        "dub"
+      ],
+      "bandcamp_url": "https://someband.bandcamp.com/track/hinted-but-blocked"
+    }
   ]
 }

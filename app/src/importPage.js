@@ -92,6 +92,8 @@ const info = el("div", "import-info");
 const title = el("h1", "import-title", "Import preview");
 const stats = el("div", "import-stats");
 const pending = el("div", "import-pending");
+const unavailable = el("div", "import-unavailable");
+unavailable.id = "lookupUnavailable";
 const proc = el("div", "import-process");
 
 // Show: narrow the rows to what needs a look.
@@ -99,6 +101,7 @@ const SHOW = [
   ["all", "All rows", () => true],
   ["confirm", "To confirm", (r) => r.needsConfirmation],
   ["unmatched", "No Bandcamp match", (r) => r.source !== "bandcamp"],
+  ["unavailable", "Bandcamp lookup unavailable", (r) => r.lookupUnavailable && r.source !== "bandcamp"],
   ["duplicates", "Already in the collection", (r) => !!r.duplicate],
   ["missing", "Not located", (r) => !(r.local && r.local.status === "located")],
   ["flagged", "Flagged", (r) => r.flags.length > 0 || !!r.note],
@@ -108,7 +111,7 @@ showSel.id = "importShow";
 SHOW.forEach(([v, label]) => showSel.appendChild(new Option(label, v)));
 const showLabel = el("label", "import-show-label", "Show ");
 showLabel.appendChild(showSel);
-info.append(title, stats, showLabel, pending, proc);
+info.append(title, stats, showLabel, unavailable, pending, proc);
 const showFilter = (item) => (SHOW.find(([v]) => v === showSel.value) || SHOW[0])[2](rowNow(item));
 
 function renderInfo() {
@@ -116,6 +119,12 @@ function renderInfo() {
   title.textContent = `Import preview · ${batch.source || batch.id}`;
   const confirmN = batch.rows.filter((r) => r.needsConfirmation).length;
   stats.textContent = [statsLine(batch.stats), confirmN ? `${confirmN} to confirm` : ""].filter(Boolean).join(" · ");
+  const blocked = batch.rows.filter((r) => r.lookupUnavailable && r.source !== "bandcamp").length;
+  unavailable.hidden = !blocked;
+  unavailable.textContent = blocked
+    ? `Bandcamp lookup unavailable for ${blocked} row${blocked > 1 ? "s" : ""}: Bandcamp showed its bot check (“Client Challenge”) ` +
+      "to the server, so it stopped looking rows up. For those rows: Open on Bandcamp, then Link to import on the page (or paste its URL)."
+    : "";
   const pr = batch.pendingReleases;
   pending.hidden = !pr.length;
   pending.textContent = pr.length ? `${pr.length} release${pr.length > 1 ? "s" : ""} not importable yet (no tracklist): ` : "";
@@ -134,7 +143,7 @@ function renderInfo() {
     : batch.status && !/done|ready|resolved|complete/.test(batch.status)
     ? `Processing: ${batch.status}`
     : "Review the rows, fix matches and tags, then Import selected. Rows matched on Bandcamp are added to the tagger; " +
-      "the rest to Other. To match a row: Open on Bandcamp, then link the page (the tagger's button on it) or paste its URL in Match.";
+      "the rest to Other. For a row without a match: Open on Bandcamp, then link the page (the tagger's button on it) or paste its URL in Match.";
 }
 
 // --- columns ---------------------------------------------------------------------
@@ -225,6 +234,11 @@ const SOURCES = {
   linked: ["linked", "match-bc", "Linked by you on its Bandcamp page (the tagger's “Link to import” button)."],
   candidates: ["options", "match-cand", "The search found possible matches: pick one."],
   error: ["lookup failed", "match-none", "The Bandcamp lookup failed for this row."],
+  unavailable: [
+    "lookup unavailable",
+    "match-unavail",
+    "Bandcamp lookup unavailable: Bandcamp showed its bot check (“Client Challenge”) to the server, which stopped looking rows up. Open on Bandcamp, then link the page with the tagger's button on it, or paste its URL here.",
+  ],
   none: ["unmatched", "match-none", "No Bandcamp match yet: Open on Bandcamp, then link the page with the tagger's button on it, or paste its URL here."],
 };
 const sourceInfo = (row) => SOURCES[matchSource(row)] || [matchSource(row), "match-bc", `Match source: ${matchSource(row)}.`];
@@ -324,11 +338,18 @@ function matchPopover(anchor, row) {
       t.placeholder = "Title";
       t.value = row.title || "";
       [a, t].forEach((i) => (i.className = "pop-input"));
-      const save = el("button", "primary", "Save");
-      save.addEventListener("click", () => patchRow(row, { artist: a.value.trim() || null, title: t.value.trim() }));
+      const fields = () => ({ artist: a.value.trim() || null, title: t.value.trim() });
+      const save = el("button", "", "Save");
+      save.addEventListener("click", () => patchRow(row, fields()));
       const actions = el("div", "pop-actions");
+      // After the bot check the server doesn't look up again.
+      if (!row.lookupUnavailable) {
+        const again = el("button", "primary", "Save and look up again");
+        again.addEventListener("click", () => patchRow(row, { ...fields(), re_resolve: true }, "Looking up on Bandcamp…"));
+        actions.appendChild(again);
+      }
       actions.appendChild(save);
-      pop.append(a, t, el("div", "pop-meta", "Used for the row and for Open on Bandcamp."), actions);
+      pop.append(a, t, el("div", "pop-meta", "Used for the row, the Bandcamp lookup and Open on Bandcamp."), actions);
       t.focus();
     });
     foot.appendChild(edit);

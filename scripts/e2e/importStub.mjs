@@ -1,12 +1,13 @@
 // A stand-in for the server's import API (Phase 3, shapes as documented by
 // Session A in LOCAL_COLLECTION_PLAN.md), served with page.route() so the
-// import UI can be tested before the server implements it. There's no
-// Bandcamp lookup: rows match only when already in the collection
-// (existing_id) or when the user links a page or pastes a URL; the file's
-// bandcamp_url is a hint (hints.bandcamp_url). One row has candidates (as a
-// metadata lookup might give) to exercise picking.
+// import UI can be tested before the server implements it. The "resolver":
+// rows already in the collection (existing_id) match it; a row with a link
+// hint (the file's bandcamp_url) is resolved from it (match_source "file"),
+// except rows listed in `unavailable`, which get the bot-check state the
+// server's resolver stops with; "Maybe Track" gets candidates; the rest are
+// unmatched (the user links or pastes them).
 
-export function importStub(file, { located = [] } = {}) {
+export function importStub(file, { located = [], unavailable = [] } = {}) {
   const calls = [];
   let unknown = { ...file.unknown_tags };
   let status = "ready";
@@ -19,7 +20,13 @@ export function importStub(file, { located = [] } = {}) {
             { id: "t7000000002", type: "track", title: "Maybe Track (Dub)", artist: "Two Options", album: null, url: "https://twooptions.bandcamp.com/track/maybe-track-dub", confidence: 0.41 },
           ]
         : [];
-    const chosen = it.existing_id ? { id: it.existing_id, type: "track", title: it.title, artist: it.artist, url: null, confidence: 1 } : null;
+    const blocked = unavailable.includes(it.line);
+    const fromHint = !it.existing_id && it.bandcamp_url && !blocked;
+    const chosen = it.existing_id
+      ? { id: it.existing_id, type: "track", title: it.title, artist: it.artist, url: null, confidence: 1 }
+      : fromHint
+      ? { id: `t80000000${String(it.line).padStart(2, "0")}`, type: "track", title: it.title, artist: it.artist, url: it.bandcamp_url, confidence: 0.97 }
+      : null;
     return {
       n,
       line: it.line,
@@ -40,14 +47,15 @@ export function importStub(file, { located = [] } = {}) {
       checked: true,
       source: chosen ? "bandcamp" : "other",
       match: {
-        status: it.existing_id ? "accepted" : cands.length ? "candidates" : "none",
-        source: it.existing_id ? "collection" : cands.length ? "candidates" : "none",
+        status: chosen ? "accepted" : blocked ? "unavailable" : cands.length ? "candidates" : "none",
+        source: it.existing_id ? "collection" : fromHint ? "file" : null,
+        error: blocked ? "Bandcamp answered with its bot check (Client Challenge); lookup stopped" : null,
         confidence: chosen ? chosen.confidence : null,
         query: [it.artist, it.title].filter(Boolean).join(" "),
         url: null,
         chosen,
         candidates: cands,
-        item: it.existing_id ? { id: it.existing_id, title: it.title, artist: it.artist, tralbum_type: "t" } : null,
+        item: chosen ? { id: chosen.id, title: it.title, artist: it.artist, tralbum_type: "t", url: chosen.url } : null,
       },
       duplicate: it.existing_id ? { of: it.existing_id, source: "bandcamp", title: it.title, artist: it.artist, tags: it.existing_tags || [] } : null,
       hints: { bandcamp_url: it.bandcamp_url || null, discogs_url: it.discogs_url || null },
@@ -104,6 +112,7 @@ export function importStub(file, { located = [] } = {}) {
       if (m) {
         const r = rows[Number(m[1])];
         ["tags", "checked", "artist", "title", "album"].forEach((k) => k in body && (r[k] = body[k]));
+        if (body.re_resolve) Object.assign(r.match, { status: "none", source: null, chosen: null, candidates: [], item: null });
         if ("choose" in body) {
           const c = r.match.candidates.find((x) => x.id === body.choose) || null;
           Object.assign(r.match, { status: c ? "manual" : "none", source: c ? "picked" : "none", chosen: c, url: null, item: null });

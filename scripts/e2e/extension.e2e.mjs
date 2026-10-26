@@ -1039,14 +1039,14 @@ test("extension page: old position-based widths move to the right columns", asyn
 
 const IMPORT_SAMPLE = path.join(ROOT, "scripts/e2e/fixtures/import-sample.json");
 
-test("import: file → tag mapping → preview (tints, release, to confirm, match sources, Open on Bandcamp, pasted URL) → Import selected", async () => {
-  const stub = importStub(JSON.parse(fs.readFileSync(IMPORT_SAMPLE, "utf8")), { located: [1, 2] });
+test("import: file → tag mapping → preview (tints, release, to confirm, match sources, lookup unavailable, Open on Bandcamp, pasted URL) → Import selected", async () => {
+  const stub = importStub(JSON.parse(fs.readFileSync(IMPORT_SAMPLE, "utf8")), { located: [1, 2], unavailable: [7] });
   const page = await context.newPage();
   await stub.install(page);
   page.on("dialog", (d) => d.accept());
   await page.goto(SERVER + "/settings/#import");
   await page.setInputFiles("#importFile", IMPORT_SAMPLE);
-  await page.waitForFunction(() => /6 rows from/.test(document.getElementById("importFileInfo").textContent));
+  await page.waitForFunction(() => /7 rows from/.test(document.getElementById("importFileInfo").textContent));
   const fileInfo = await page.textContent("#importFileInfo");
   assert.match(fileInfo, /1 already in your collection/);
   assert.match(fileInfo, /1 to confirm/);
@@ -1066,7 +1066,7 @@ test("import: file → tag mapping → preview (tints, release, to confirm, matc
   assert.equal(startCall.body.file.format, "bc-tagger-import/1");
 
   // Preview: tints, rows to confirm, release info, where each match came from.
-  await page.waitForFunction(() => document.querySelectorAll("#collectionTable tbody tr").length === 6);
+  await page.waitForFunction(() => document.querySelectorAll("#collectionTable tbody tr").length === 7);
   const rows = Object.fromEntries(
     (
       await page.$$eval("#collectionTable tbody tr", (trs) =>
@@ -1088,9 +1088,12 @@ test("import: file → tag mapping → preview (tints, release, to confirm, matc
   assert.equal(rows.r0.source, "collection");
   assert.equal(rows.r0.open, null, "matched rows have no Open link in the cell");
   assert.equal(rows.r1.cls, "", "located, not a duplicate");
-  assert.equal(rows.r1.source, "none", "a link from the file is a hint, not a match");
-  assert.deepEqual(rows.r1.open, { text: "Open link ↗", href: "https://superdrama.bandcamp.com/album/select-edits-2017-2020" });
+  assert.equal(rows.r1.source, "file", "resolved from the file's link");
+  assert.equal(rows.r1.open, null);
   assert.equal(rows.r1.release, "Select Edits (2017-2020) track 4");
+  assert.equal(rows.r6.source, "unavailable");
+  assert.deepEqual(rows.r6.open, { text: "Open link ↗", href: "https://someband.bandcamp.com/track/hinted-but-blocked" });
+  assert.match(await page.textContent("#lookupUnavailable"), /Bandcamp lookup unavailable for 1 row: .*Client Challenge/);
   assert.equal(rows.r2.cls, "row-missing row-confirm");
   assert.equal(rows.r2.confirm, true);
   assert.deepEqual(rows.r2.open, { text: "Search ↗", href: "https://bandcamp.com/search?q=Nobody%20Known%20Slow%20One&item_type=t" });
@@ -1098,7 +1101,7 @@ test("import: file → tag mapping → preview (tints, release, to confirm, matc
   assert.equal(rows.r4.release, "Cosmic Function B2 · track 3", "same title, distinct rows");
   assert.equal(rows.r5.source, "candidates");
   assert.equal(await page.getAttribute("tr[data-key='r2'] a.open-bc", "target"), "_blank");
-  assert.match(await page.textContent(".import-stats"), /6 rows .*1 to confirm/);
+  assert.match(await page.textContent(".import-stats"), /7 rows .*1 to confirm/);
   assert.match(await page.textContent(".import-pending"), /1 release not importable yet .*Sample Artist – Sample EP/);
 
   // Show filter.
@@ -1107,8 +1110,21 @@ test("import: file → tag mapping → preview (tints, release, to confirm, matc
   assert.deepEqual(await shown(), ["r2"]);
   await page.selectOption("#importShow", "duplicates");
   assert.deepEqual(await shown(), ["r0"]);
+  await page.selectOption("#importShow", "unavailable");
+  assert.deepEqual(await shown(), ["r6"]);
   await page.selectOption("#importShow", "all");
-  assert.equal((await shown()).length, 6);
+  assert.equal((await shown()).length, 7);
+
+  // Look up again (re_resolve) is offered, except where the lookup hit the bot check.
+  await page.click("tr[data-key='r6'] .match-cell .chip");
+  await page.click(".popover button:has-text('Edit artist/title')");
+  assert.equal(await page.$(".popover button:has-text('look up again')"), null);
+  await page.keyboard.press("Escape");
+  await page.click("tr[data-key='r3'] .match-cell .chip");
+  await page.click(".popover button:has-text('Edit artist/title')");
+  await page.click(".popover button:has-text('Save and look up again')");
+  await waitFor(() => stub.calls.some((c) => c.method === "PUT" && c.body.re_resolve === true), { what: "the re_resolve PUT" });
+  assert.deepEqual(stub.calls.filter((c) => c.method === "PUT").pop().body, { artist: "The Carbon Boys", title: "Untitled", re_resolve: true });
 
   // Paste a URL: junk is refused, a real page URL (query dropped) becomes the match.
   await page.click("tr[data-key='r2'] .match-cell .chip");
@@ -1133,11 +1149,11 @@ test("import: file → tag mapping → preview (tints, release, to confirm, matc
 
   // Select: one row off, then Import selected.
   await page.click("tr[data-key='r3'] .row-check");
-  await page.waitForFunction(() => /\(5\)/.test(document.getElementById("importSelected").textContent));
+  await page.waitForFunction(() => /\(6\)/.test(document.getElementById("importSelected").textContent));
   assert.equal(await page.$eval("#selectAll", (b) => b.indeterminate), true);
   await page.click("#importSelected");
   await page.waitForFunction(() => /^Imported:/.test(document.getElementById("refreshStatus").textContent));
-  assert.match(await page.textContent("#refreshStatus"), /pending adds 1, tag merges 1, other added 3/);
+  assert.match(await page.textContent("#refreshStatus"), /pending adds 2, tag merges 1, other added 3/);
   assert.ok(stub.calls.some((c) => c.path.endsWith("/commit")));
   assert.deepEqual(standInPages, [], "the preview fetches no Bandcamp pages");
   await page.close();
