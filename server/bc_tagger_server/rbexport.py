@@ -439,6 +439,7 @@ def _export(
     created_content: list[tuple[str, str]] = []
     try:
         tree = Tree(db)
+        touched: dict[str, Any] = {}  # playlist ID -> row created or changed by this export
         rows: dict[str, Any] = {}  # playlist key -> DjmdPlaylist (None: planned or unresolvable)
         bad: set[str] = set()
         planned: set[str] = set()
@@ -472,10 +473,12 @@ def _export(
                     if existing is None:
                         existing = db.create_playlist_folder(parts[j], parent=parent)
                         tree.add(existing)
+                        touched[str(existing.ID)] = existing
                     parent = existing
                 else:
                     pl = db.create_playlist(parts[j], parent=parent)
                     tree.add(pl)
+                    touched[str(pl.ID)] = pl
                     rows[key] = pl
                     return pl
             rows[key] = None  # dry run: will be created
@@ -602,6 +605,7 @@ def _export(
                     song = db.add_to_playlist(pl, cid)
                     songs_for(pl).setdefault(cid, []).append(song)
                     new_entries.append((key, cid, str(song.ID), str(pl.ID)))
+                    touched[str(pl.ID)] = pl
             elif ours_song is not None:
                 entry = {"playlist": key, "tag": key, "content_id": cid, "path": _path_of(content_ids, cid)}
                 diff["entries_removed"].append(entry)
@@ -610,6 +614,7 @@ def _export(
                 if not dry_run:
                     remove_song(db, ours_song)
                     songs_for(pl)[cid].remove(ours_song)
+                    touched[str(pl.ID)] = pl
         for key in diff["playlists_created"]:
             per.setdefault(key, {"playlist": key, "exists": False, "add": 0, "remove": 0})
         diff["per_playlist"] = [v for v in per.values() if v["add"] or v["remove"] or not v["exists"]]
@@ -632,6 +637,7 @@ def _export(
         elif changed:
             if expect_plan is not None and plan_fingerprint(diff) != expect_plan:
                 raise ExportError("the library changed while exporting; nothing was written, run the dry run again")
+            _touch_playlists(db, touched)
             diff["guard"] = target.commit(db).to_dict()
         else:
             db.rollback()
@@ -668,6 +674,30 @@ def _export(
                 (db_key, key, cid, song_id, pl_id, ts),
             )
     return diff
+
+
+def _touch_playlists(db: Any, touched: dict[str, Any]) -> None:
+    """Bump ``updated_at`` of the playlists this export changed, and let pyrekordbox's commit
+    update only their nodes in masterPlaylists6.xml.
+
+    (pyrekordbox's commit otherwise rewrites the Timestamp of every playlist whose XML value
+    differs from the DB, i.e. potentially the user's whole file.)
+    """
+    now = dt.datetime.now()
+    for row in touched.values():
+        row.updated_at = now
+    xml_file = getattr(db, "playlist_xml", None)
+    if xml_file is None:
+        return
+    allowed = set(touched)
+    original = xml_file.update
+
+    def update_only_touched(playlist_id, *args, **kwargs):
+        if str(playlist_id) in allowed:
+            return original(playlist_id, *args, **kwargs)
+        return None
+
+    xml_file.update = update_only_touched
 
 
 def _folder_row(tree: Tree, parts: tuple[str, ...]):
