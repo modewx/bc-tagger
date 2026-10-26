@@ -135,3 +135,6 @@ export function createSourceFilter() {
     },
   };
 }
+
+// `other` items can only play a located local file.
+export const playableItem = (item) => sourceOf(item) !== "other" || (!!item.local && item.local.status === "located");

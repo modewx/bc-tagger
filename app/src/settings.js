@@ -8,11 +8,14 @@ import { buildNav } from "./nav";
 import { startDevReload } from "./devReload";
 import { confirmDialog } from "./dialog";
 import { createMappingEditor } from "./mappingEditor";
+import { createImportTab } from "./importTab";
 
 const TABS = [
   ["general", "General"],
   ["rekordbox", "Rekordbox"],
+  ["import", "Import"],
 ];
+let importTab = null;
 
 // [id, tab, title, help]
 const SECTIONS = [
@@ -504,7 +507,9 @@ function render(main, data) {
     mapping.setTargetFolder(folderInput.value);
     folderInput.addEventListener("input", () => mapping.setTargetFolder(folderInput.value));
   }
-  showTab(location.hash === "#rekordbox" ? "rekordbox" : "general");
+  importTab = createImportTab(main);
+  const fromHash = TABS.map(([id]) => id).find((id) => location.hash === `#${id}`);
+  showTab(fromHash || "general");
 }
 
 function showTab(id) {
@@ -513,7 +518,11 @@ function showTab(id) {
     b.setAttribute("aria-selected", b.dataset.tab === id ? "true" : "false");
   });
   document.querySelectorAll("main section[data-tab]").forEach((sec) => (sec.hidden = sec.dataset.tab !== id));
-  if (location.hash !== `#${id}`) history.replaceState(null, "", `#${id}`);
+  if (location.hash !== `#${id}`) history.replaceState(null, "", `${location.search}#${id}`);
+  // The Import tab isn't settings: no save bar there.
+  const bar = document.getElementById("saveBar");
+  if (bar) bar.hidden = id === "import";
+  if (id === "import" && importTab) importTab.show();
 }
 
 function fill(data) {
@@ -597,6 +606,10 @@ async function refreshHealth() {
   }
   refreshHealth();
   startDevReload();
+  window.addEventListener("hashchange", () => {
+    const id = TABS.map(([t]) => t).find((t) => location.hash === `#${t}`);
+    if (id) showTab(id);
+  });
 
   window.addEventListener("beforeunload", (e) => {
     if (changed().length) {

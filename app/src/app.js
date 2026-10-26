@@ -9,7 +9,7 @@ import { Jobs, progressText, resultText } from "./jobs";
 import { buildNav } from "./nav";
 import { appColumns, localPlayUrl } from "./columns";
 import { startDevReload } from "./devReload";
-import { createStatusFilter, createSourceFilter, sourceOf } from "./statusFilter";
+import { createStatusFilter, createSourceFilter, sourceOf, playableItem } from "./statusFilter";
 import { runExport } from "./exportFlow";
 import { createIndexStatus } from "./indexStatus";
 
@@ -158,6 +158,7 @@ async function refreshHealth() {
       ),
     ],
     localPlayUrl,
+    playable: playableItem,
     filterItem: (item) => sourceFilter.filterItem(item) && statusFilter.filterItem(item),
     clearExtraFilters: () => {
       statusFilter.reset();

@@ -37,6 +37,7 @@ module.exports = (env, argv) =>
     entry: {
       app: APP + '/src/app.js',
       settings: APP + '/src/settings.js',
+      importPage: APP + '/src/importPage.js',
       appCss: APP + '/src/app.css',
       settingsCss: APP + '/src/settings.css',
     },

@@ -33,6 +33,7 @@ export function buildNav(active) {
   [
     ["collection", "/", "Collection"],
     ["settings", "/settings/", "Settings"],
+    ["import", "/settings/#import", "Import"],
   ].forEach(([id, href, label]) => {
     const a = document.createElement("a");
     a.href = href;

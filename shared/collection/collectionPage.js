@@ -74,8 +74,10 @@ const SHELL_HTML = `
  * @param {boolean}  [opts.baseToolbar]     false hides the Bandcamp tools (refresh players, ...)
  * @param {function} [opts.rowClass]        (item, key) -> extra class names for the row
  * @param {function} [opts.titleUrl]        (item) -> link for the title, instead of its Bandcamp page
+ * @param {function} [opts.playable]        (item) -> false: nothing to play (no Bandcamp page, no local file)
  *
- * Columns may also have headerRender(th) to fill their header themselves.
+ * Columns may also have headerRender(th) to fill their header themselves, and
+ * first: true to go before every other column.
  */
 export function createCollectionPage(opts) {
   const ds = opts.dataSource;
@@ -626,6 +628,11 @@ export function createCollectionPage(opts) {
   function renderPlayerCell(cell, key, item) {
     cell.classList.add("player-cell");
     cell.innerHTML = "";
+    if (opts.playable && !opts.playable(item)) {
+      cell.appendChild(document.createTextNode("—"));
+      cell.title = "Nothing to play: not on Bandcamp and not found locally";
+      return;
+    }
     const isTrack = item.tralbum_type !== "a";
 
     // Albums are multi-track -> inline embedded player (either mode).
@@ -718,6 +725,10 @@ export function createCollectionPage(opts) {
 
   const columns = BASE_COLUMNS.slice();
   (opts.extraColumns || []).forEach((col) => {
+    if (col.first) {
+      columns.unshift(col);
+      return;
+    }
     const at = columns.findIndex((c) => c.id === col.after);
     columns.splice(at === -1 ? columns.length : at + 1, 0, col);
   });

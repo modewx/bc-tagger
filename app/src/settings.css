@@ -163,3 +163,16 @@ section[hidden] { display: none; }
   .map-entry { grid-template-columns: 1fr auto; }
   .map-status { grid-column: 1 / 2; }
 }
+
+/* Import tab */
+#saveBar[hidden] { display: none; }
+.import-progress { margin-top: 10px; font-size: 13px; color: #1f7a4d; }
+.import-progress.err { color: #b42318; }
+.import-progress[hidden], .import-mapping[hidden] { display: none; }
+.import-mapping { margin-top: 18px; border-top: 1px solid #eee; padding-top: 6px; }
+.import-mapping h3 { font-size: 15px; margin: 10px 0 4px; }
+.import-mapping-rows { max-height: none; }
+.import-mapping .map-row { grid-template-columns: 200px 1fr; }
+.import-actions { display: flex; gap: 10px; align-items: center; margin-top: 12px; flex-wrap: wrap; }
+.batch-row { display: grid; grid-template-columns: auto 1fr auto; gap: 10px; align-items: center; padding: 6px 0; border-bottom: 1px solid #f2f2f2; }
+.batch-row .muted, .muted { color: #888; font-size: 12px; }
