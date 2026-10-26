@@ -11,6 +11,7 @@ import { appColumns, localPlayUrl } from "./columns";
 import { startDevReload } from "./devReload";
 import { createStatusFilter } from "./statusFilter";
 import { runExport } from "./exportFlow";
+import { createIndexStatus } from "./indexStatus";
 
 const bridge = new ExtensionBridge();
 const events = new ServerEvents();
@@ -21,6 +22,20 @@ const statusFilter = createStatusFilter();
 
 let page = null;
 
+// Toolbar buttons that use the file index wait while the drive is scanned.
+const SCAN_BLOCKED = ["locateLatest", "exportLatest", "locateShown", "exportShown"];
+let indexStatus = null;
+
+function updateScanBlocked() {
+  const scanning = !!(indexStatus && indexStatus.isScanning());
+  SCAN_BLOCKED.forEach((id) => {
+    const b = document.getElementById(id);
+    if (!b) return;
+    b.disabled = scanning || b.dataset.running === "1";
+    b.title = scanning ? "Waiting for the drive scan to finish" : b.dataset.title || "";
+  });
+}
+
 // A toolbar button that runs a server job and reports progress in the status line.
 function jobButton(id, label, title, start) {
   return {
@@ -29,6 +44,8 @@ function jobButton(id, label, title, start) {
     title,
     className: "job-btn",
     run: async (statusEl, button) => {
+      if (SCAN_BLOCKED.includes(id) && indexStatus && indexStatus.isScanning()) return;
+      button.dataset.running = "1";
       button.disabled = true;
       statusEl.textContent = `${label}: starting…`;
       let job;
@@ -38,7 +55,9 @@ function jobButton(id, label, title, start) {
         job = { status: "error", error: e.message };
       }
       statusEl.textContent = `${label}: ${resultText(job)}`;
+      delete button.dataset.running;
       button.disabled = false;
+      updateScanBlocked();
       await page.reload();
       if (statusFilter.active()) page.refilter(); // e.g. newly located items join "Located"
     },
@@ -117,6 +136,18 @@ async function refreshHealth() {
         (p) => runExport(jobs, { latest: 10 }, p) // asks first when the target is the main library
       ),
       jobButton("refreshOwnership", "Refresh ownership", "Check which items you own on Bandcamp", refreshOwnership),
+      {
+        id: "rescanDrive",
+        label: "Rescan drive",
+        title: "Re-read the music folders now (Locate/Export otherwise reuse the index and rescan only when it's stale)",
+        className: "job-btn",
+        run: async (statusEl, button) => {
+          button.disabled = true;
+          await indexStatus.rescan(statusEl);
+          button.disabled = false;
+          await page.reload();
+        },
+      },
       jobButton("locateShown", "Locate shown", "Match the items shown below to local files", locateShown),
       jobButton(
         "exportShown",
@@ -133,6 +164,14 @@ async function refreshHealth() {
       updateShownButtons(shown);
     },
   });
+
+  // File index status next to "Rescan drive".
+  indexStatus = createIndexStatus({ events, jobs, onScanning: updateScanBlocked });
+  SCAN_BLOCKED.forEach((id) => {
+    const b = document.getElementById(id);
+    if (b) b.dataset.title = b.title;
+  });
+  document.getElementById("rescanDrive").after(indexStatus.el, indexStatus.hint);
 
   // Let the wide table scroll sideways on narrow screens.
   const table = document.getElementById("collectionTable");

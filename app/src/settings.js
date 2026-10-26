@@ -53,6 +53,12 @@ const FIELDS = {
     help: "When several files match, the first format in this list wins.",
   },
   match_threshold: { section: "matching", type: "ratio", label: "Auto-accept matches at or above" },
+  rescan_max_age_minutes: {
+    section: "matching",
+    type: "int",
+    label: "Rescan the drive when the index is older than (minutes)",
+    help: "Locate and Export reuse the file index. They rescan first only when it's older than this, when a drive was missing at the last scan, or when you click Rescan drive.",
+  },
   candidate_threshold: {
     section: "matching",
     type: "ratio",

@@ -54,6 +54,18 @@ button.chip:hover { filter: brightness(0.95); border-color: #bbb; }
 .busy-note { font-size: 11px; color: #8a5a00; white-space: normal; }
 
 .toolbar-btn.job-btn { background: #1f7a4d; border-color: #1f7a4d; }
+/* File index status next to "Rescan drive" */
+.index-status { font-size: 12px; color: #555; white-space: nowrap; }
+.index-status.scanning { color: #1f7a4d; font-weight: 600; }
+.index-status[hidden], .index-hint[hidden] { display: none; }
+.index-hint {
+  font-size: 12px;
+  color: #7a5200;
+  background: #fff4d6;
+  border: 1px solid #f0d48a;
+  border-radius: 10px;
+  padding: 1px 8px;
+}
 /* Let the controls shrink so the toolbar wraps instead of widening the page. */
 #topControls { flex: 1 1 520px; max-width: 100%; }
 #toolbar { flex-wrap: wrap; }
