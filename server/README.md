@@ -79,7 +79,11 @@ for `export` and `xml`.
   `GET /api/index/status`) says when a full rescan is worth it: never scanned, a root missing or interrupted
   at the last full scan, or the last full scan older than `full_rescan_hint_days` (default 30).
 - When several copies match equally well, the one created closest after the item was tagged wins.
-- An FSEvents watcher that keeps the index current live is designed in `docs/fsevents-watcher.md` (not built). `--all` selects every item. Add `--json` for machine-readable output.
+- **Opt-in file watcher** (`watch_roots`, default off): while `bct serve` runs, file events from the roots
+  update the index within seconds (debounced until the size is stable; a file leaves the index only when its
+  volume is mounted and it's gone). It needs the `watchdog` package; without it the watcher reports itself
+  unavailable in `GET /api/index/status` → `watcher`. History replay across restarts is designed in
+  `docs/fsevents-watcher.md` but not built. `--all` selects every item. Add `--json` for machine-readable output.
 
 ## Settings
 
@@ -94,6 +98,12 @@ for `export` and `xml`.
 | `match_threshold` / `candidate_threshold` | `0.85` / `0.6` |
 | `format_preference` | `aiff, flac, wav, alac, m4a, mp3-320, other` |
 | `cookies_file`, `bandcamp_username` | the fresh cookies file, `herrasti` |
+| `downloads_dir` / `download_format` | `""` (= the owned root; must be inside an owned root) / `aiff-lossless` |
+| `lookup_source` | `bandcamp` (`musicbrainz`: hints only, no Bandcamp requests; `both`) |
+| `bandcamp_request_interval_s` | `1.0` (≥ 0.1; the server's pace for Bandcamp lookups) |
+| `bandcamp_browser_concurrency` / `bandcamp_browser_spacing_ms` | `2` / `400` (for the extension's own fetches) |
+| `watch_roots` / `watch_debounce_seconds` | `false` / `3` |
+| `last_browse_dir` | `""` (the folder of the last file picked by hand for an import row) |
 
 `GET /api/settings` also returns `presets.test` and `presets.production` (the
 `/Volumes/Stationary Backup` roots) so the settings page can switch between them. Indexing the
@@ -104,6 +114,20 @@ server) are picked up by the others.
 If a drive is unmounted, or disappears in the middle of a scan, its files stay in the index (they
 show as located but can't be streamed or exported until the drive is back). Only a complete walk of
 a mounted root drops files that were deleted.
+
+**Nothing is ever written onto an unplugged drive.** With the drive unplugged, `/Volumes/<name>` is just a
+folder on the internal disk (and macOS would later mount the real drive as "<name> 1"). Every write into a
+root (downloads and the downloader's folders, XML output, rekordbox backups and commits, the match report)
+first requires the volume to be mounted and the root to exist; folders are only created below an existing
+root. The refusal reads "music drive not mounted: /Volumes/<name> (plug it in; nothing was written)".
+
+## Items: dates and sorting
+
+`GET /api/items?sort=modified_at|date_added&order=desc|asc` sorts both collections by that date; items
+without it count as earlier than any date (last when newest first). `modified_at` (ISO, the extension's
+`…Z` milliseconds) is set by app tag edits (also carried in the queued edit), `other`-item tag changes,
+import commits (new items, every merge, pending adds) and, on extension sync, when the tags changed and the
+extension's date isn't newer than the server's (unchanged tags keep the later date).
 
 ## rekordbox write guard
 
@@ -280,7 +304,25 @@ Rows below the threshold keep up to three candidates to pick (`PUT …/rows/<n> 
 search misses can be linked from the extension to the Bandcamp page the user has open
 (`POST /api/import/<id>/rows/<n>/link {item}`; `POST /api/import/link-candidates {item}` says which
 rows fit that page). On commit, Bandcamp rows go to the extension's pending-adds queue and the rest
-to the server's `other` collection with Bandcamp/Discogs/YouTube links.
+to the server's `other` collection with Bandcamp/Discogs/YouTube links. The commit result lists
+`item_ids {added, merged, other_added, other_merged}`, `selected` and the `modified_at` it stamped, so the
+collection page can select exactly what the import added or merged and sort it to the top.
+
+More import options:
+
+- **Look up in my browser** (`POST /api/import {…, lookup: "browser"}`): the server runs its own lookup code
+  against its cache and hands every missing request to the extension (`GET /api/import/<id>/lookups`), which
+  fetches it in the user's Chrome and posts the answer back (`POST …/lookups`). A bot check stops, HTTP 429
+  pauses (`resume`); either way the batch becomes ready to review.
+- **MusicBrainz** (`lookup_source`): `musicbrainz` searches recordings (≤ 1 request/s, the app's User-Agent)
+  and uses their releases' Bandcamp/Discogs links as hints, with no Bandcamp request; `both` asks Bandcamp
+  first and MusicBrainz for the misses, reading the Bandcamp page its release links to.
+- **Default tags to all rows** (`default_tags_all`, or `PUT /api/import/<id>/default-tags {tags, all}` on an
+  open batch, reversible: rows remember `default_added`).
+- **Re-locate** (`POST /api/import/<id>/locate {rows, scan}`, `POST …/rows/<n>/locate`), **pick a file by hand**
+  (`PUT …/rows/<n> {path}`, with `GET /api/fs/list` to browse the roots and `GET /api/index/search`), and
+  **reopen** a batch after a restart (`GET /api/import` gives each batch's `step`, `progress`, `job`,
+  `resumable`; a batch caught mid-lookup becomes `interrupted` and `resume` finishes it from the cache).
 
 ## Tests
 

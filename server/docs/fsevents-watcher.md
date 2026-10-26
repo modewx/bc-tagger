@@ -1,4 +1,12 @@
-# FSEvents watcher (design only, not built)
+# FSEvents watcher
+
+**Built, opt-in (Phase 5), default off:** `bc_tagger_server/watcher.py`, setting `watch_roots` (+
+`watch_debounce_seconds`, default 3). It has the `WatchSource` interface, debouncing with a stable-size check,
+bursts as subtree walks, "removed only if the volume is mounted and the file is gone", and pausing during
+full scans. Status is in `GET /api/index/status` → `watcher`; SSE `index` events with `kind: "watch"`. Only
+`bct serve` starts it. Its one backend is `watchdog` (live events only), used when that package is installed;
+otherwise the watcher reports itself unavailable. **Not built yet:** the native FSEvents backend
+(pyobjc) with event IDs and history replay across restarts and drive unplug/replug, as designed below.
 
 Goal: keep the file index current while the server runs, so a quick scan before Locate/Export
 finds nothing to do and a manual full rescan is rarely needed.

@@ -37,6 +37,9 @@ def cmd_serve(svc: Service, args: argparse.Namespace) -> int:
     from .api import create_app
 
     port = args.port or svc.settings.get("server_port")
+    watch = svc.start_watcher()  # opt-in (watch_roots); never from the other CLI commands
+    if watch.get("enabled"):
+        print(f"file watcher: {'running' if watch.get('running') else watch.get('error')}")
     # Open SSE streams would otherwise keep a stopping server alive forever.
     uvicorn.run(create_app(svc), host="127.0.0.1", port=port, log_level="info", timeout_graceful_shutdown=3)
     return 0

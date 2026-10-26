@@ -26,6 +26,26 @@ def by_number(item: dict) -> bool:
     return "match_by_track_num" in (item.get("flags") or []) and bool(item.get("track_num"))
 
 
+def parse_ts(value: Any) -> datetime | None:
+    """An item's ``modified_at``/``date_added`` as a datetime (None when missing or unreadable)."""
+    if not isinstance(value, str) or not value:
+        return None
+    try:
+        dt = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
+
+
+def by_date(items: list[dict], key: str = "modified_at", newest_first: bool = True) -> list[dict]:
+    """Sorted by ``key``; items without that date count as earlier than any date (last when newest
+    first, first when oldest first)."""
+    dated = [it for it in items if parse_ts(it.get(key))]
+    undated = [it for it in items if not parse_ts(it.get(key))]
+    dated.sort(key=lambda it: parse_ts(it[key]), reverse=newest_first)
+    return dated + undated if newest_first else undated + dated
+
+
 def other_id(artist: str | None, title: str, album: str | None = None, track: int | None = None) -> str:
     key = "|".join((norm(artist), norm_title(title), norm(album)) + ((str(track),) if track else ()))
     return "o" + hashlib.sha1(key.encode()).hexdigest()[:10]
@@ -77,7 +97,10 @@ def other_set_tags(store: Store, item_id: str, tags: list[str]) -> dict | None:
     item = other_get(store, item_id)
     if item is None:
         return None
-    item["tags"] = [t for t in dict.fromkeys(tags) if isinstance(t, str) and t.strip()]
+    clean = [t for t in dict.fromkeys(tags) if isinstance(t, str) and t.strip()]
+    if clean != item.get("tags"):
+        item["modified_at"] = now_ms_iso()
+    item["tags"] = clean
     return other_put(store, item)
 
 
@@ -120,6 +143,7 @@ def merge_pending_item_tags(store: Store, item_id: str, tags: list[str], replace
     payload = json.loads(row["payload"])
     old = [] if replace else payload["item"].get("tags", [])
     payload["item"]["tags"] = list(dict.fromkeys(old + tags))
+    payload["item"]["modified_at"] = now_ms_iso()
     with store.tx() as c:
         c.execute("UPDATE pending_adds SET payload = ? WHERE add_id = ?", (json.dumps(payload), row["add_id"]))
     return True

@@ -105,6 +105,9 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     # Downloads of owned releases (Phase 4); empty: the owned root. Must be inside an owned root.
     "downloads_dir": "",
     "download_format": "aiff-lossless",
+    # Opt-in file watcher (docs/fsevents-watcher.md): keeps the index current while the server runs.
+    "watch_roots": False,
+    "watch_debounce_seconds": 3,
     # Imports: where rows are looked up: "bandcamp" (default), "musicbrainz" (hints only) or "both".
     "lookup_source": "bandcamp",
     "downloader_dir": str(DEFAULT_DOWNLOADER_DIR),
@@ -158,6 +161,14 @@ def _check_downloads_dir(settings: dict[str, Any]) -> None:
 def _validate(merged: dict[str, Any]) -> dict[str, Any]:
     out = dict(merged)
     out["settings_version"] = SETTINGS_VERSION
+    out["watch_roots"] = bool(out.get("watch_roots"))
+    try:
+        debounce = float(out.get("watch_debounce_seconds"))
+    except (TypeError, ValueError):
+        raise SettingsError("watch_debounce_seconds must be a number") from None
+    if debounce < 0.5:
+        raise SettingsError("watch_debounce_seconds must be at least 0.5")
+    out["watch_debounce_seconds"] = debounce
     if out.get("lookup_source") not in ("bandcamp", "musicbrainz", "both"):
         raise SettingsError("lookup_source must be bandcamp, musicbrainz or both")
     if out.get("download_format") not in ("flac", "wav", "aac-hi", "mp3-320", "aiff-lossless", "vorbis", "mp3-v0", "alac"):

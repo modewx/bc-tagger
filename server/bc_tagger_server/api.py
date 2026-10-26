@@ -172,10 +172,13 @@ def create_app(service: Service | None = None) -> FastAPI:
         offset: int = Query(0, ge=0),
         ids: Optional[str] = Query(None, description="comma-separated item ids"),
         source: Optional[str] = Query(None, description="bandcamp,other (default both)"),
+        sort: Optional[Literal["modified_at", "date_added"]] = Query(None, description="undated items sort earliest"),
+        order: Literal["desc", "asc"] = "desc",
     ) -> list[dict]:
         id_list = [i for i in ids.split(",") if i] if ids else None
         sources = [x for x in source.split(",") if x in ("bandcamp", "other")] if source else None
-        total, page = svc.list_items(q=q, tag=tag, limit=limit, offset=offset, ids=id_list, sources=sources)
+        total, page = svc.list_items(q=q, tag=tag, limit=limit, offset=offset, ids=id_list, sources=sources,
+                                     sort=sort, order=order)
         response.headers["X-Total-Count"] = str(total)
         return page
 
