@@ -80,6 +80,8 @@ class RowChanges(BaseModel):
     title: Optional[str] = None
     album: Optional[str] = None
     re_resolve: bool = False
+    match_url: Optional[str] = None  # a Bandcamp page the user found (stored, not fetched)
+    link_item: Optional[dict] = None  # the item the extension saved from the open Bandcamp page
 
 
 class LinkBody(BaseModel):
@@ -210,6 +212,10 @@ def create_app(service: Service | None = None) -> FastAPI:
     @app.get("/api/import")
     def import_list() -> list[dict]:
         return imp.list_batches(svc)
+
+    @app.get("/api/import/open-rows")
+    def import_open_rows() -> list[dict]:
+        return imp.open_rows(svc)
 
     @app.get("/api/import/{batch_id}")
     def import_get(batch_id: str) -> dict:

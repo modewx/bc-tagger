@@ -275,8 +275,9 @@ class Service:
             return None
         return min(dates) - timedelta(days=float(self.settings.get("quick_scan_margin_days")))
 
-    def prepare_index(self, items: list[dict], scan: str | None = None, ctx=None) -> dict[str, Any]:
-        """Bring the index up to date before matching ``items``: "quick" (default), "none" or "full"."""
+    def prepare_index(self, items: list[dict], scan: str | None = None, ctx=None, cutoff=None) -> dict[str, Any]:
+        """Bring the index up to date before matching ``items``: "quick" (default), "none" or "full".
+        ``cutoff`` overrides the quick scan's date (else it comes from the items)."""
         from .indexer import quick_scan
 
         mode = scan or self.default_scan_mode
@@ -286,7 +287,7 @@ class Service:
             return {"mode": "none"}
         if mode == "full":
             return self.scan(ctx)
-        cutoff = self.quick_scan_cutoff(items)
+        cutoff = cutoff or self.quick_scan_cutoff(items)
         if cutoff is None:
             return {"mode": "quick", "skipped": "the selected items have no tag dates"}
         self._scanning = {"kind": "quick", "job_id": ctx.job.id if ctx else None, "progress": {}}

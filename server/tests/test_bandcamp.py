@@ -237,3 +237,20 @@ def test_live_smoke(tmp_path):
     assert r["status"] == "accepted" and r["chosen"]["id"] == "t3244411361"
     item = bandcamp.fetch_item(f, r["chosen"])
     assert item["album_id"] == "a4071322060" and item["file"]["mp3-128"].startswith("https://")
+
+
+def test_ownership_refresh_stops_on_the_bot_check(tmp_path):
+    from bc_tagger_server import ownership
+
+    cookies = tmp_path / "cookies.txt"
+    cookies.write_text("# Netscape HTTP Cookie File\n.bandcamp.com\tTRUE\t/\tTRUE\t0\tidentity\tx\n")
+    calls = []
+
+    def handler(request):
+        calls.append(request.headers["user-agent"])
+        return httpx.Response(200, text="<html><title>Client Challenge</title></html>")
+
+    client = httpx.Client(headers={"User-Agent": ownership.USER_AGENT}, transport=httpx.MockTransport(handler))
+    with pytest.raises(ownership.OwnershipError, match="bot check"):
+        ownership.fetch_collection(cookies, client=client)
+    assert calls == [bandcamp.USER_AGENT] and "Mozilla" not in ownership.USER_AGENT  # one honest request

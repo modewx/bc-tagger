@@ -1,9 +1,12 @@
 """Find imported rows on Bandcamp, and build tagger items from Bandcamp pages.
 
 * Search: the public autocomplete JSON (``bcsearch_public_api/1/autocomplete_elastic``), from the
-  local server with an identifying User-Agent, at most one request per second, cached (see
-  ``fetcher``). Fallback: the HTML search page. Bandcamp answers non-browser clients there with a
-  bot-check page; that is detected and reported as unavailable, never worked around.
+  local server with the honest User-Agent below (never a browser's), at most one request per
+  second, cached (see ``fetcher``). Fallback: the HTML search page.
+* Bandcamp's bot check ("Client Challenge") raises ``Challenged``: the import stops its Bandcamp
+  lookups and marks the rest of the rows unavailable. Never retried, never worked around.
+* ``BC_TAGGER_BANDCAMP=off``: no requests at all (rows not in the collection end unavailable).
+  ``BC_TAGGER_BANDCAMP_FIXTURES=<file or dir>``: recorded responses only (tests, e2e).
 * A Bandcamp URL in the import file (``bandcamp_url``, often a release page) is read directly:
   the row's track is picked from the page's tracklist, no search needed.
 * Accepted matches: the track/album page's ``data-tralbum`` gives the full item in the content
@@ -15,25 +18,34 @@ from __future__ import annotations
 
 import html
 import json
+import os
 import re
 from dataclasses import dataclass
 from typing import Any
 from urllib.parse import urlencode, urljoin, urlsplit
 
-from .fetcher import Fetcher, Unavailable
+from .fetcher import Challenged, Fetcher, Unavailable, load_fixtures
 from .rowmatch import ACCEPT_AT, score_row
 from .store import Store
 
 SEARCH_URL = "https://bandcamp.com/api/bcsearch_public_api/1/autocomplete_elastic"
 HTML_SEARCH_URL = "https://bandcamp.com/search"
-USER_AGENT = "bc-tagger/0.1 (personal music-collection tool; local server)"
+USER_AGENT = "bc-tagger-dev/0.1 (personal collection tool; not used for AI training; https://github.com/modewx/bc-tagger)"
 ITEM_FIELDS = ("id", "raw_id", "tralbum_type", "item_type", "title", "artist", "album_title", "album_id",
                "album_url", "item_url", "url", "art_url", "band_id", "track_num", "publish_date", "file")
 _ID = re.compile(r"^[at]\d+$")
 BandcampUnavailable = Unavailable
+__all__ = ["Challenged", "Unavailable"]
+
+
+def lookups_off() -> bool:
+    return os.environ.get("BC_TAGGER_BANDCAMP", "").strip().lower() in ("off", "0", "false", "no")
 
 
 def make_fetcher(store: Store, **kw) -> Fetcher:
+    fixtures = os.environ.get("BC_TAGGER_BANDCAMP_FIXTURES")
+    if fixtures and "fixtures" not in kw:
+        kw["fixtures"] = load_fixtures(fixtures)
     return Fetcher(store, USER_AGENT, **kw)
 
 

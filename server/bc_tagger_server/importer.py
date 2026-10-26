@@ -13,7 +13,9 @@ to the ``other`` collection.
 from __future__ import annotations
 
 import json
+import re
 import secrets
+from datetime import datetime, timedelta
 from typing import Any
 
 from . import bandcamp
@@ -21,11 +23,13 @@ from .collection import (
     DuplicateIndex, by_number, merge_pending_item_tags, now_ms_iso, other_get, other_id, other_put, queue_add,
     search_links,
 )
-from .fetcher import Unavailable
+from .fetcher import Challenged, Unavailable
 from .rowmatch import score_row
 from .store import now_iso
 
 FORMAT = "bc-tagger-import/1"
+CHALLENGE_COOLDOWN_S = 3600  # after a bot check, no Bandcamp lookups from any batch for an hour
+_PAGE_URL = re.compile(r"^https://[^/\s?#]+/(track|album)/[^/\s?#]+$")
 ROW_FIELDS = ("line", "raw", "kind", "artist", "title", "album", "album_artist", "flags", "note", "label", "catalog",
               "year", "track_num", "position", "duration", "expanded_from", "bandcamp_url", "discogs_url",
               "existing_id", "existing_tags", "tag_fixes")
@@ -42,7 +46,36 @@ def _clean_tags(tags) -> list[str]:
 
 
 def _empty_match() -> dict[str, Any]:
-    return {"status": "pending", "source": None, "confidence": 0.0, "query": None, "candidates": [], "chosen": None}
+    return {"status": "pending", "source": None, "confidence": 0.0, "query": None, "candidates": [], "chosen": None,
+            "item": None}
+
+
+def _unavailable(reason: str, error: str) -> dict[str, Any]:
+    """Not looked up: Bandcamp lookups are off, or stopped after Bandcamp's bot check."""
+    return {**_empty_match(), "status": "unavailable", "reason": reason, "error": error}
+
+
+def _stop_reason(svc, batch: dict) -> tuple[str, str] | None:
+    """Why this batch must not ask Bandcamp anything right now, or None."""
+    if bandcamp.lookups_off():
+        return "off", "Bandcamp lookups are off (BC_TAGGER_BANDCAMP=off)"
+    stopped = batch.get("bandcamp_lookups") or {}
+    if stopped.get("state") == "stopped":
+        return stopped["reason"], stopped["error"]
+    last = svc.store.get_meta("bandcamp_challenge")
+    if last and (datetime.now().astimezone() - datetime.fromisoformat(last["at"])).total_seconds() < CHALLENGE_COOLDOWN_S:
+        return "challenge", f"Bandcamp lookup unavailable: bot check at {last['at']}"
+    return None
+
+
+def _challenged(svc, batch: dict, e: Exception) -> tuple[str, str]:
+    """Bandcamp answered with its bot check: stop this batch's lookups (and others', for a while)."""
+    error = f"Bandcamp lookup unavailable: {e}"
+    at = now_iso()
+    batch["bandcamp_lookups"] = {"state": "stopped", "reason": "challenge", "error": error, "at": at}
+    svc.store.set_meta("bandcamp_challenge", {"at": at, "error": str(e)})
+    _save_batch(svc.store, batch)
+    return "challenge", error
 
 
 # -- persistence -------------------------------------------------------------------------------
@@ -98,6 +131,7 @@ def compute_stats(batch: dict, rows: list[dict]) -> dict[str, int]:
         "checked": sum(bool(r.get("checked")) for r in rows),
         "needs_pick": sum((r.get("match") or {}).get("status") == "candidates" and r["source"] != "bandcamp"
                           for r in rows),
+        "unavailable": sum((r.get("match") or {}).get("status") == "unavailable" for r in rows),
         "pending_releases": len(batch.get("pending_releases") or []),
     }
 
@@ -121,12 +155,19 @@ def _own(row: dict) -> dict | None:
 
 
 def _hints(row: dict) -> dict[str, Any]:
-    """Link hints from the import file."""
-    return {"bandcamp_url": row.get("bandcamp_url"), "discogs_url": row.get("discogs_url")}
+    """Link hints: the import file's, or a Bandcamp page URL the user set (``match_url``)."""
+    match = row.get("match") or {}
+    url = match.get("url") if match.get("source") == "url" else None
+    return {"bandcamp_url": url or row.get("bandcamp_url"), "discogs_url": row.get("discogs_url")}
 
 
 def _refresh(row: dict) -> None:
     row["source"] = "bandcamp" if row.get("bandcamp") else "other"
+    row.setdefault("match", _empty_match())
+    row["match"]["item"] = row["bandcamp"]["item"] if row.get("bandcamp") else None
+    if (row.get("bandcamp") or {}).get("via") == "collection" and row["match"]["status"] in ("pending", "in_collection"):
+        row["match"].update(status="in_collection", source="collection")
+    row["match_source"] = row["match"].get("source")
     row["hints"] = _hints(row)
     row["links"] = search_links(row.get("artist"), row.get("title") or row.get("album"), row.get("album"),
                                 row["hints"])
@@ -169,6 +210,19 @@ def _check_duplicate(dups: DuplicateIndex, row: dict) -> None:
     _refresh(row)
 
 
+def _refresh_index(svc, ctx=None) -> dict[str, Any]:
+    """Before locating: pick up files added since the last full scan (a quick scan from its date)."""
+    mode = svc.default_scan_mode
+    if mode != "quick":
+        return svc.prepare_index([], mode, ctx)
+    last = svc.index_status().get("last_scan_at")
+    if not last:
+        return {"mode": "none", "skipped": "no full scan yet"}
+    cutoff = datetime.fromisoformat(last.replace("Z", "+00:00")) - \
+        timedelta(days=float(svc.settings.get("quick_scan_margin_days")))
+    return svc.prepare_index([], "quick", ctx, cutoff=cutoff)
+
+
 def _locate(svc, rows: list[dict], index=None) -> None:
     from .matcher import locate_item
 
@@ -182,6 +236,8 @@ def _locate(svc, rows: list[dict], index=None) -> None:
 def _item_for(fetcher, candidate: dict) -> dict:
     try:
         return bandcamp.fetch_item(fetcher, candidate) or bandcamp.minimal_item(candidate)
+    except Challenged:
+        raise
     except Unavailable:
         return bandcamp.minimal_item(candidate)
 
@@ -195,7 +251,7 @@ def _lookup(fetcher, row: dict) -> None:
         cand = {"id": item["id"], "type": item["item_type"], "title": item["title"], "artist": item.get("artist"),
                 "album": item.get("album_title"), "url": item.get("item_url"), "art_url": item.get("art_url"),
                 "confidence": round(confidence, 3)}
-        row["match"] = {"status": "accepted", "source": "file_url", "confidence": cand["confidence"], "query": hint,
+        row["match"] = {"status": "accepted", "source": "file", "confidence": cand["confidence"], "query": hint,
                         "candidates": [cand], "chosen": cand}
         row["bandcamp"] = {"item": item, "via": "resolved"}
         return
@@ -263,21 +319,36 @@ def run_batch(svc, batch_id: str, ctx=None) -> dict:
         if ctx:
             ctx.progress(current, total, f"{phase} {current}/{total}")
 
+    stop = _stop_reason(svc, batch)
+    batch["bandcamp_lookups"] = {"state": "on"} if stop is None else \
+        {"state": "off" if stop[0] == "off" else "stopped", "reason": stop[0], "error": stop[1], "at": now_iso()}
     try:
         for i, row in enumerate(rows, 1):
             _check_duplicate(dups, row)
             if row["source"] == "bandcamp":
-                row["match"] = {**_empty_match(), "status": "in_collection"}
+                row["match"] = {**_empty_match(), "status": "in_collection", "source": "collection"}
+            elif stop:
+                row["match"] = _unavailable(*stop)
             else:
                 try:
                     _lookup(fetcher, row)
+                except Challenged as e:  # the bot check: stop asking Bandcamp, never retry
+                    stop = _challenged(svc, batch, e)
+                    row["match"] = _unavailable(*stop)
+                    row["bandcamp"] = None
+                except Unavailable as e:  # not recorded, network error: this row only
+                    row["match"] = _unavailable("error", f"Bandcamp lookup unavailable: {e}")
+                    row["bandcamp"] = None
                 except Exception as e:  # one bad row must not stop the batch
                     row["match"] = {**_empty_match(), "status": "error", "error": f"{type(e).__name__}: {e}"}
+                    row["bandcamp"] = None
                 _check_duplicate(dups, row)
+            _refresh(row)
             if i % 10 == 0 or i == len(rows):
                 _save_rows(store, batch_id, rows)
             event("resolving", i, len(rows))
         event("locating", 0, len(rows))
+        batch["scan"] = _refresh_index(svc, ctx)
         _locate(svc, rows)
         _save_rows(store, batch_id, rows)
         batch["status"] = "ready"
@@ -329,34 +400,66 @@ def update_row(svc, batch_id: str, n: int, changes: dict) -> dict:
         if key in changes:
             row[key] = (changes[key] or "").strip() or None
             identity = True
-    if changes.get("re_resolve"):
-        try:
-            _lookup(svc.bandcamp_fetcher(), row)
-        except Unavailable as e:
-            row["match"] = {**_empty_match(), "status": "error", "error": str(e)}
-            row["bandcamp"] = None
+    if changes.get("re_resolve") and _own(row) is None:
+        stop = _stop_reason(svc, batch)
+        if stop:  # stopped or off: the same state, no request
+            row["match"] = _unavailable(*stop)
+        else:
+            try:
+                _lookup(svc.bandcamp_fetcher(), row)
+            except Challenged as e:
+                row["match"], row["bandcamp"] = _unavailable(*_challenged(svc, batch, e)), None
+            except Unavailable as e:
+                row["match"], row["bandcamp"] = _unavailable("error", f"Bandcamp lookup unavailable: {e}"), None
         identity = True
     if "choose" in changes:  # a Bandcamp candidate, or None: not on Bandcamp (→ other)
         match = dict(row.get("match") or _empty_match())
         cid = changes["choose"]
         if cid is None:
-            match.update(chosen=None, status="manual")
+            match.update(chosen=None, status="manual", source=None)
             row["bandcamp"] = None
         else:
             cand = next((c for c in match.get("candidates") or [] if c["id"] == cid), None)
             if cand is None:
                 raise ImportError_(f"{cid} is not one of the row's candidates")
-            match.update(chosen=cand, status="manual")
-            row["bandcamp"] = {"item": _item_for(svc.bandcamp_fetcher(), cand), "via": "chosen"}
+            match.update(chosen=cand, status="manual", source="picked")
+            if _stop_reason(svc, batch):
+                item = bandcamp.minimal_item(cand)
+            else:
+                try:
+                    item = bandcamp.fetch_item(svc.bandcamp_fetcher(), cand) or bandcamp.minimal_item(cand)
+                except Challenged as e:
+                    _challenged(svc, batch, e)
+                    item = bandcamp.minimal_item(cand)
+                except Unavailable:
+                    item = bandcamp.minimal_item(cand)
+            row["bandcamp"] = {"item": item, "via": "chosen"}
         row["match"] = match
         identity = True
+    if "match_url" in changes:  # a Bandcamp page the user found; nothing is fetched
+        url = (changes["match_url"] or "").strip().split("?")[0].split("#")[0].rstrip("/")
+        if url and not _PAGE_URL.match(url):
+            raise ImportError_("match_url must look like https://host/track/slug or https://host/album/slug")
+        if url:
+            row["match"] = {**_empty_match(), "status": "manual", "source": "url", "url": url}
+        else:
+            row["match"] = {**_empty_match(), "status": "manual"}
+        row["bandcamp"] = None
+        identity = True
+    if changes.get("link_item") is not None:  # the item the extension saved from the page
+        return link_row(svc, batch_id, n, {"item": changes["link_item"]})
     if identity:
         _check_duplicate(DuplicateIndex(store), row)
         _locate(svc, [row])
     _refresh(row)
     _save_rows(store, batch_id, [row])
     _refresh_stats(store, batch, rows)
+    _row_event(svc, batch_id, n, len(rows))
     return row
+
+
+def _row_event(svc, batch_id: str, n: int, total: int) -> None:
+    svc.jobs.bus.publish("import", {"batch_id": batch_id, "phase": "row", "n": n, "current": n, "total": total})
 
 
 def link_row(svc, batch_id: str, n: int, payload: dict) -> dict:
@@ -366,24 +469,48 @@ def link_row(svc, batch_id: str, n: int, payload: dict) -> dict:
     batch, rows, row = _editable(store, batch_id, n)
     item = bandcamp.tagger_item(payload["tralbum"], payload.get("embed") or {}) if payload.get("tralbum") \
         else payload.get("item")
-    if item is None:
+    if item is None:  # unlink
         row["bandcamp"] = None
-        if (row.get("match") or {}).get("chosen"):  # back to what the resolver found
-            row["bandcamp"] = {"item": _item_for(svc.bandcamp_fetcher(), row["match"]["chosen"]),
-                               "via": "chosen" if row["match"]["status"] == "manual" else "resolved"}
+        row["match"] = {**_empty_match(), "status": "manual"}
     else:
         try:
             item = bandcamp.link_item(item)
         except ValueError as e:
             raise ImportError_(str(e)) from e
+        cand = {"id": item["id"], "type": item["item_type"], "title": item["title"], "artist": item.get("artist"),
+                "album": item.get("album_title"), "url": item.get("item_url"), "art_url": item.get("art_url"),
+                "confidence": 1.0, "album_id": item.get("album_id"), "band_id": item.get("band_id")}
+        row["match"] = {**_empty_match(), "status": "manual", "source": "linked", "confidence": 1.0, "chosen": cand,
+                        "candidates": [cand]}
         row["bandcamp"] = {"item": item, "via": "linked", "linked_at": now_iso(),
                            "page_url": payload.get("page_url") or item.get("item_url")}
     _check_duplicate(DuplicateIndex(store), row)
     _locate(svc, [row])
     _save_rows(store, batch_id, [row])
     _refresh_stats(store, batch, rows)
-    svc.jobs.bus.publish("import", {"batch_id": batch_id, "phase": "linked", "current": n, "total": len(rows)})
+    _row_event(svc, batch_id, n, len(rows))
     return row
+
+
+def open_rows(svc) -> list[dict]:
+    """Rows of uncommitted batches that have no Bandcamp item yet (cheap: the content script asks
+    on every Bandcamp page view)."""
+    rows = svc.store.query(
+        "SELECT b.id AS batch_id, json_extract(b.data, '$.name') AS batch_name, r.n, r.data FROM import_rows r "
+        "JOIN import_batches b ON b.id = r.batch_id "
+        "WHERE json_extract(b.data, '$.status') = 'ready' AND json_extract(r.data, '$.bandcamp') IS NULL "
+        "AND json_extract(r.data, '$.committed') IS NULL ORDER BY b.created_at DESC, r.n"
+    )
+    out = []
+    for r in rows:
+        row = json.loads(r["data"])
+        match = row.get("match") or {}
+        out.append({"batch_id": r["batch_id"], "batch_name": r["batch_name"], "n": r["n"], "line": row.get("line"),
+                    "artist": row.get("artist"), "title": row.get("title"), "album": row.get("album"),
+                    "position": row.get("position"), "track_num": row.get("track_num"),
+                    "hint": (row.get("hints") or {}).get("bandcamp_url"),
+                    "match_url": match.get("url") if match.get("source") == "url" else None})
+    return out
 
 
 class _PageItem:
@@ -450,6 +577,7 @@ def apply_tag_mapping(svc, batch_id: str, mapping: dict[str, list[str]], unmappe
     batch["tag_mapping"] = {"map": mapping, "unmapped": unmapped}
     _save_rows(store, batch_id, rows)
     _refresh_stats(store, batch, rows)
+    svc.jobs.bus.publish("import", {"batch_id": batch_id, "phase": "tags", "current": changed, "total": len(rows)})
     return {"unknown_tags": {}, "new_tags": batch["new_tags"], "rows_changed": changed}
 
 
