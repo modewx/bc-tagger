@@ -76,31 +76,34 @@ export function createIndexStatus({ events, jobs, onScanning }) {
     return missing.length ? [`Drive was missing at the last full scan (${missing.join(", ")}): run Rescan drive`] : [];
   }
 
+  // Only a full scan blocks Locate/Export (quick scans are part of them).
+  const fullScanRunning = (sc) => !!sc && (sc === true || sc.kind === "full");
+
   async function refresh() {
     try {
       status = await apiJson("/api/index/status");
       available = true;
-      setScanning(!!status.scanning);
+      setScanning(fullScanRunning(status.scanning));
+      if (status.scanning && status.scanning.progress) progress = status.scanning.progress;
     } catch (e) {
       if (e.status === 404) available = false;
     }
     render();
   }
 
-  // SSE `index`: either a full status, or a progress/phase event.
+  // SSE `index`: {phase: started|progress|finished, kind: full|quick, ...}.
   events.on("index", (d) => {
     if (!d || typeof d !== "object") return;
-    if ("last_scan_at" in d || "files" in d) {
-      status = { ...(status || {}), ...d };
-      setScanning(!!d.scanning);
-    } else {
-      const phase = d.state || d.phase || d.event || "";
-      if (/start|progress|running/.test(phase)) setScanning(true);
-      if (d.progress || d.current != null) progress = d.progress || d;
-      if (/finish|done|end|error/.test(phase)) {
-        setScanning(false);
-        refresh();
-      }
+    if (d.kind && d.kind !== "full") {
+      if (d.phase === "finished") refresh(); // a quick scan grew the index
+      return;
+    }
+    if (d.phase === "started" || d.phase === "progress") {
+      setScanning(true);
+      if (d.files != null) progress = { current: d.files, message: d.message };
+    } else if (d.phase === "finished") {
+      setScanning(false);
+      refresh();
     }
     render();
   });

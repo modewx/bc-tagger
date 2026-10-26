@@ -55,24 +55,32 @@ export function progressText(job) {
 
 // One line for a finished job. Results differ per job kind, so show its
 // numeric fields (located: 3, missing: 2, ...) plus a short message if any.
-// What a Locate/Export's quick scan did, from the job result: e.g.
-// "checked 586 files added since Oct 18 · via Spotlight".
+// What a Locate/Export's scan did, from the job result's `scan`, e.g.
+// "checked 586 files new or changed since Oct 18 · via Spotlight".
+const METHODS = { "spotlight+walk": "Spotlight", spotlight: "Spotlight", walk: "folder walk", fsevents: "FSEvents" };
+
 export function scanSummary(r) {
-  const s = r && typeof r === "object" ? r.scan || r.quick_scan || r.index_scan : null;
+  const s = r && typeof r === "object" ? r.scan || r.quick_scan : null;
   if (!s || typeof s !== "object") return "";
-  const mode = s.mode || s.kind || "";
-  const method = s.method || s.source || "";
-  if (mode === "none" || method === "none" || s.skipped) {
-    return s.reason ? `no scan: ${s.reason}` : "no scan";
-  }
-  const n = [s.files_checked, s.checked, s.files, s.found, s.files_added, s.added].find((v) => typeof v === "number");
-  const since = s.cutoff || s.since;
-  const d = since ? new Date(since) : null;
+  if (s.mode === "none") return "no scan";
+  if (s.skipped) return `no scan: ${typeof s.skipped === "string" ? s.skipped : "skipped"}`;
+  if (s.mode === "full") return `full scan · ${s.files ?? "?"} files`;
+  const d = s.cutoff ? new Date(s.cutoff) : null;
   const date = d && !isNaN(d) ? d.toLocaleDateString(undefined, { month: "short", day: "numeric" }) : "";
-  const what = mode === "full" ? "full scan" : "checked";
+  const methods = [
+    ...new Set(
+      (s.roots || [])
+        .map((x) => x.method)
+        .filter((m) => m && !/^skipped/.test(m))
+        .map((m) => METHODS[m] || m)
+    ),
+  ];
+  const skippedRoots = (s.roots || []).filter((x) => /^skipped/.test(x.method || "")).length;
   return [
-    `${what}${n != null ? ` ${n} files` : ""}${date ? ` added since ${date}` : ""}`,
-    method ? `via ${method === "spotlight" ? "Spotlight" : method === "fsevents" ? "FSEvents" : method}` : "",
+    `checked ${s.checked ?? 0} files new or changed${date ? ` since ${date}` : ""}`,
+    s.added ? `${s.added} new` : "",
+    methods.length ? `via ${methods.join(" + ")}` : "",
+    skippedRoots ? `${skippedRoots} folder${skippedRoots > 1 ? "s" : ""} not mounted` : "",
   ]
     .filter(Boolean)
     .join(" · ");
