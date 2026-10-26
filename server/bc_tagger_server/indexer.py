@@ -351,6 +351,41 @@ def quick_scan(
     return stats
 
 
+def index_file(store: Store, path: str | Path, roots: list[dict[str, Any]]) -> dict[str, Any]:
+    """Index one audio file the user picked by hand (re-read if it changed). It belongs to the
+    configured root that contains it, else to its own folder as a not-owned root."""
+    path = Path(path).expanduser()
+    if path.suffix.lower() not in AUDIO_EXTS:
+        raise ValueError(f"not an audio file: {path.name}")
+    st = path.stat()  # FileNotFoundError if it isn't there
+    root_key, kind = str(path.parent), "not_owned"
+    for r in sorted(roots, key=lambda r: -len(str(Path(r["path"]).expanduser()))):
+        rp = Path(r["path"]).expanduser()
+        if rp in path.parents:
+            root_key, kind = str(rp), r["kind"]
+            break
+    known = store.query_one("SELECT size, mtime FROM files WHERE path = ?", (str(path),))
+    if known is None or (known["size"], known["mtime"]) != (st.st_size, st.st_mtime):
+        _flush(store, [file_record(path, root_key, kind, st)])
+    return {"path": str(path), "added": known is None}
+
+
+def search_files(store: Store, q: str, limit: int = 20) -> list[dict[str, Any]]:
+    """Files whose artist/title/album/path contain every word of ``q`` (case-insensitive), newest first."""
+    words = [w for w in q.lower().split() if w][:8]
+    if not words:
+        return []
+    hay = "lower(coalesce(artist,'') || ' ' || coalesce(albumartist,'') || ' ' || coalesce(title,'') || ' ' " \
+          "|| coalesce(album,'') || ' ' || path)"
+    where = " AND ".join(f"{hay} LIKE ?" for _ in words)
+    rows = store.query(
+        f"SELECT path, title, artist, album, tracknumber, format, root_kind, duration, mtime FROM files "
+        f"WHERE {where} ORDER BY mtime DESC LIMIT ?",
+        [f"%{w}%" for w in words] + [max(1, min(int(limit), 200))],
+    )
+    return [dict(r) for r in rows]
+
+
 def load_files(store: Store) -> list[dict]:
     rows = store.query("SELECT * FROM files")
     out = []

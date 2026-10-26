@@ -652,6 +652,14 @@ class Service:
         batch["job_id"] = job.id
         return batch, job
 
+    def start_relocate(self, batch_id: str, rows: Any = "missing", scan: str | None = "quick"):
+        from . import importer
+
+        importer.load_batch(self.store, batch_id)  # 404 early
+        job = self.jobs.submit("import-locate", lambda ctx: importer.relocate_batch(self, batch_id, rows, scan, ctx))
+        importer.set_job(self, batch_id, job)
+        return job
+
     def start_import_job(self, batch_id: str, what: str):
         """Resume a batch's paused lookups, or fetch Bandcamp details for its rows: a job."""
         from . import importer
