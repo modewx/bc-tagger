@@ -61,6 +61,9 @@ npm run test:e2e                         # Playwright e2e: own profile, server :
   - Column widths are stored by column id. Adding a column once shifted them onto the wrong columns.
   - **Columns ▾** shows and hides columns per page; Selection comes first; **Modified** sits next to Added;
     Track # is off by default.
+  - In windows narrower than 1570 px the app's table scrolls sideways, so Title and Artist keep their width. Tag
+    editors are built when their row comes into view, not their cell, because the Tags column can be scrolled off
+    to the right.
   - One player per row.
 - **Extension:**
   - Syncs to the server (diffs, a guarded full sync) and is the bridge for the local app (tag edits, page fetches,

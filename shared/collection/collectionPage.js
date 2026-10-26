@@ -523,12 +523,16 @@ export function createCollectionPage(opts) {
 
   // Lazily turn a Tags cell into a chosen multi-select (same widget as track
   // annotation) when it scrolls into view, so we don't instantiate ~900 at once.
+  // Tag editors are built lazily as their row comes near the viewport. The row
+  // is watched, not the Tags cell: in a table that scrolls sideways the cell
+  // may be off to the right while the row is on screen.
   const tagEditorObserver = new IntersectionObserver(
     (entries) => {
       entries.forEach((entry) => {
         if (!entry.isIntersecting) return;
-        const cell = entry.target;
-        tagEditorObserver.unobserve(cell);
+        tagEditorObserver.unobserve(entry.target);
+        const cell = entry.target.tagName === "TR" ? entry.target.querySelector("td.tags-cell") : entry.target;
+        if (!cell || !cell._item || cell.querySelector(".tag-editor-wrap")) return;
         cell.innerHTML = "";
         cell.appendChild(makeTagEditor(cell._item, cell._key));
       });
@@ -619,7 +623,11 @@ export function createCollectionPage(opts) {
     cell.appendChild(text);
     cell._item = item;
     cell._key = key;
-    tagEditorObserver.observe(cell);
+    // Watch its row once the cell is in it (refreshRow inserts it right after).
+    queueMicrotask(() => {
+      const row = cell.closest("tr");
+      if (row && !cell.querySelector(".tag-editor-wrap")) tagEditorObserver.observe(row);
+    });
   }
 
   // A chosen multi-select tag filter (same widget style as track annotation):
