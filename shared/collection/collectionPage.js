@@ -975,10 +975,11 @@ export function createCollectionPage(opts) {
   }
 
   // "Fix album IDs": tracks tagged on their own track page used to get "a" +
-  // the track's own id (or nothing) as album_id, so ownership through the
-  // album couldn't work. Read the real album from each track page
-  // (current.album_id; null for a single) and mark the item checked so it
-  // isn't fetched again.
+  // the track's own id as album_id, and tracks tagged from a fan collection
+  // page got none (plus an album_url built from the track's slug), so
+  // ownership through the album couldn't work. Read the real album from each
+  // track page (current.album_id and album_url; null for a single) and mark
+  // the item checked so it isn't fetched again.
   async function fixAlbumIds(statusEl, button) {
     if (needsPageFetch(statusEl)) return;
     if (button) button.disabled = true;
@@ -1009,9 +1010,14 @@ export function createCollectionPage(opts) {
           const current = tralbum && tralbum.current;
           if (current && "album_id" in current) {
             const album_id = current.album_id ? `a${current.album_id}` : null;
-            item.album_id = album_id;
-            item.album_checked = true;
-            pending[key] = { album_id, album_checked: true };
+            let album_url = null;
+            try {
+              if (album_id && tralbum.album_url) album_url = new URL(tralbum.album_url, tralbum.url || item.url || item.item_url).href;
+            } catch (e) {
+              /* keep null */
+            }
+            Object.assign(item, { album_id, album_url, album_checked: true });
+            pending[key] = { album_id, album_url, album_checked: true };
             if (album_id) fixed++;
             else singles++;
           }

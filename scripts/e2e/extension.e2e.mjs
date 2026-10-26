@@ -332,6 +332,8 @@ test("Fix album IDs reads the real album from track pages (Bandcamp)", async () 
   assert.equal(items.t1004723757.album_id, targets.t1004723757);
   assert.match(String(items.t1011914860.album_id), /^a\d+$/);
   assert.equal(items.t1011914860.album_checked, true);
+  // album_url becomes the real (absolute) album page.
+  assert.match(items.t1004723757.album_url, /^https:\/\/[a-z0-9-]+\.bandcamp\.com\/album\//);
   await page.close();
 });
 

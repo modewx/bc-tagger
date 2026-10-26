@@ -628,10 +628,13 @@ function extractAlbumData(tralbum) {
 function extractCollectionItemData(tralbum, art_url) {
   console.log("---- extractCollectionItemData");
   console.log(tralbum);
+  // For a track, url_hints.slug is the track's own slug, so it can't name or
+  // locate the album; the collection data has the album's id and title.
+  const isTrack = tralbum.tralbum_type === "t";
   return {
     track_num: -1,
     title: tralbum.item_title,
-    album_title: tralbum.url_hints.slug,
+    album_title: isTrack ? tralbum.album_title || null : tralbum.url_hints.slug,
     url: tralbum.item_url,
     tralbum_type: tralbum.tralbum_type,
     artist: tralbum.band_name,
@@ -641,9 +644,9 @@ function extractCollectionItemData(tralbum, art_url) {
     id: `${tralbum.tralbum_type}${tralbum.tralbum_id}`,
     item_url: tralbum.item_url,
     art_id: tralbum.item_art_id,
-    album_id: null,
+    album_id: isTrack && tralbum.album_id ? `a${tralbum.album_id}` : null,
     collected_count: tralbum.also_collected_count,
-    album_url: `https://${tralbum.url_hints.subdomain}.bandcamp.com/album/${tralbum.url_hints.slug}`,
+    album_url: isTrack ? null : `https://${tralbum.url_hints.subdomain}.bandcamp.com/album/${tralbum.url_hints.slug}`,
     art_url: art_url
   }
 }
