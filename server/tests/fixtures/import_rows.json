@@ -1,0 +1,170 @@
+[
+ {
+  "line": 1,
+  "raw": "Take It As A Game (Super Drama Mix)",
+  "artist": "Super Drama",
+  "title": "Take It As A Game (Super Drama Mix)",
+  "album": "Select Edits (2017-2020)",
+  "tags": [],
+  "track_num": 4,
+  "bandcamp_url": "https://superdrama.bandcamp.com/album/select-edits-2017-2020",
+  "note": "Artist and release confirmed by the user; owned on Bandcamp."
+ },
+ {
+  "line": 11,
+  "raw": "Conrad* & Gregor Schnitzler – Conrad & Sohn - 9",
+  "artist": "Gregor Schnitzler",
+  "title": "Untitled",
+  "album": "Conrad & Sohn",
+  "tags": [],
+  "album_artist": "Conrad Schnitzler & Gregor Schnitzler",
+  "track_num": 9,
+  "year": 1981,
+  "flags": [
+   "match_by_track_num"
+  ],
+  "note": "'9' is the track number; the release's tracks are untitled. Match by album + track number in the filename."
+ },
+ {
+  "line": 13,
+  "raw": "Shinichi atobe -\t\tButterfly Effect",
+  "artist": "Shinichi Atobe",
+  "title": "Butterfly Effect",
+  "album": null,
+  "tags": []
+ },
+ {
+  "line": 14,
+  "raw": "Squadra Blanco – Night Of The Illuminati - The Night Must Fall",
+  "artist": "Squadra Blanco",
+  "title": "The Night Must Fall",
+  "album": "Night Of The Illuminati",
+  "tags": []
+ },
+ {
+  "line": 48,
+  "raw": "\tThe Carbon Boys - B1 / B2",
+  "artist": "The Carbon Boys",
+  "title": "Untitled",
+  "album": "Cosmic Function",
+  "tags": [],
+  "track_num": 2,
+  "position": "B1",
+  "year": 1995,
+  "label": "212 Productions",
+  "catalog": "212-001-1",
+  "discogs_url": "https://www.discogs.com/release/91375-The-Carbon-Boys-Cosmic-Function",
+  "flags": [
+   "match_by_track_num"
+  ],
+  "note": "Release from the user; every track is untitled (Discogs: A, B1, B2), so match by position/track number."
+ },
+ {
+  "line": 48,
+  "raw": "\tThe Carbon Boys - B1 / B2",
+  "artist": "The Carbon Boys",
+  "title": "Untitled",
+  "album": "Cosmic Function",
+  "tags": [],
+  "track_num": 3,
+  "position": "B2",
+  "year": 1995,
+  "label": "212 Productions",
+  "catalog": "212-001-1",
+  "discogs_url": "https://www.discogs.com/release/91375-The-Carbon-Boys-Cosmic-Function",
+  "flags": [
+   "match_by_track_num"
+  ]
+ },
+ {
+  "line": 85,
+  "raw": "  Bones\nby Wata Igarashi",
+  "artist": "Wata Igarashi",
+  "title": "Bones",
+  "album": null,
+  "tags": []
+ },
+ {
+  "line": 168,
+  "raw": "Forbidden Words\nby Thomass Jackson",
+  "artist": "Thomass Jackson",
+  "title": "Forbidden Words",
+  "album": "Forbidden Words",
+  "tags": [],
+  "track_num": 1,
+  "bandcamp_url": "https://thomassjackson.bandcamp.com/album/forbidden-words",
+  "note": "Spelling confirmed by the user; title track of the release."
+ },
+ {
+  "line": 181,
+  "raw": "Uf0 -- The Human Being Disgusts[mourn, closer]",
+  "artist": "Uf0",
+  "title": "The Human Being Disgusts",
+  "album": "Birth",
+  "tags": [
+   "mourn",
+   "closer"
+  ],
+  "album_artist": "Various",
+  "discogs_url": "https://www.discogs.com/master/1792579-Various-Birth",
+  "unknown_tags": [
+   "mourn"
+  ],
+  "flags": [
+   "tag_unknown"
+  ],
+  "note": "'Uf0' is the artist's name as credited on the release (user)."
+ },
+ {
+  "line": 206,
+  "raw": "Space Drum Meditation - astika [build]",
+  "artist": "Space Drum Meditation",
+  "title": "Astika",
+  "album": null,
+  "tags": [
+   "build"
+  ]
+ },
+ {
+  "line": 211,
+  "raw": " Gil.Barte - Elhwah [muertos, dubstep, industrial, ritual]",
+  "artist": "Gil.Barte",
+  "title": "Elhwah",
+  "album": "Claviceps Purpurea",
+  "tags": [
+   "muertos",
+   "dubstep",
+   "industrial",
+   "ritual"
+  ],
+  "existing_id": "t3244411361",
+  "existing_tags": [
+   "must",
+   "industrial",
+   "dubstep",
+   "breaks",
+   "muertos"
+  ],
+  "flags": [
+   "duplicate_existing"
+  ]
+ },
+ {
+  "line": 297,
+  "raw": "Atacama\nby Bunzinelli",
+  "artist": "Bunzinelli",
+  "title": "Atacama",
+  "album": null,
+  "tags": [],
+  "existing_id": "t3973705564",
+  "existing_tags": [
+   "must",
+   "build",
+   "chants",
+   "ritual"
+  ],
+  "flags": [
+   "duplicate_existing"
+  ]
+ }
+]

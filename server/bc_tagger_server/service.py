@@ -27,6 +27,9 @@ class Service:
         self._scan_job_id: str | None = None
         self._scan_lock = threading.Lock()
         self.last_prepare: dict[str, Any] | None = None
+        self._file_index = None
+        # Bandcamp lookups for imports; tests swap in an offline fetcher with recorded responses.
+        self.bandcamp_fetcher = lambda: __import__("bc_tagger_server.bandcamp", fromlist=["x"]).make_fetcher(self.store)
         if seed:
             self.seed_items()
         self._migrate_playlist_keys()
@@ -98,8 +101,11 @@ class Service:
         limit: int | None = None,
         offset: int = 0,
         ids: Iterable[str] | None = None,
+        sources: Iterable[str] | None = None,
     ) -> tuple[int, list[dict]]:
-        items = self.store.all_items()
+        from .collection import SOURCES, all_items
+
+        items = all_items(self.store, sources or SOURCES)
         if ids is not None:
             wanted = set(ids)
             items = [it for it in items if it["id"] in wanted]
@@ -114,8 +120,16 @@ class Service:
         return total, [item_view(self.store, it, db_path, rule) for it in page]
 
     def get_item_view(self, item_id: str) -> dict | None:
-        item = self.store.get_item(item_id)
+        from .collection import all_items
+
+        item = next((it for it in all_items(self.store) if it["id"] == item_id), None)
         return item_view(self.store, item, self.db_path(), self.playlist_rule()) if item else None
+
+    def collection_items(self) -> list[dict]:
+        """Both collections (bandcamp mirror + pending adds + other), newest first."""
+        from .collection import all_items
+
+        return all_items(self.store)
 
     def sync_items(self, items: dict[str, dict], deleted: list[str], full: bool) -> dict[str, Any]:
         result = self.store.upsert_items(items, deleted, full=full)
@@ -135,6 +149,21 @@ class Service:
         import json
 
         clean = [t for t in dict.fromkeys(tags) if isinstance(t, str) and t.strip()]
+        if item_id.startswith("o"):  # "other" items belong to the server: apply right away
+            from fastapi import HTTPException
+
+            from .collection import other_set_tags
+
+            if other_set_tags(self.store, item_id, clean) is None:
+                raise HTTPException(404, f"unknown item {item_id}")
+            self.jobs.bus.publish("item", {"id": item_id})
+            return {"edit_id": None, "item_id": item_id, "tags": clean, "applied": True}
+        if self.store.get_item(item_id) is None:  # still queued for the tagger: edit the queued add
+            from .collection import merge_pending_item_tags
+
+            if merge_pending_item_tags(self.store, item_id, clean, replace=True):
+                self.jobs.bus.publish("item", {"id": item_id})
+                return {"edit_id": None, "item_id": item_id, "tags": clean, "applied": True, "pending": "tagger"}
         with self.store.tx() as c:
             cur = c.execute(
                 "INSERT INTO tag_edits(item_id, tags, created_at) VALUES(?, ?, ?)",
@@ -364,17 +393,22 @@ class Service:
         )
 
     def file_index(self):
+        """The matcher's index of all files (cached until the files table changes)."""
         from .indexer import load_files
         from .matcher import FileIndex
 
-        return FileIndex(load_files(self.store))
+        stamp = self.store.query_one("SELECT COUNT(*) AS n, MAX(scanned_at) AS t FROM files")
+        key = (stamp["n"], stamp["t"])
+        if self._file_index is None or self._file_index[0] != key:
+            self._file_index = (key, FileIndex(load_files(self.store)))
+        return self._file_index[1]
 
     def locate(self, ids=None, latest=None, ctx=None, scan: str | None = None) -> dict[str, Any]:
         """Locate the selected items (all valid items if neither ``ids`` nor ``latest``)."""
         from .items import select_items
         from .matcher import load_overrides, locate_item, save_result
 
-        chosen = select_items(self.store.all_items(), ids=ids, latest=latest)
+        chosen = select_items(self.collection_items(), ids=ids, latest=latest)
         scan_stats = self.prepare_index(chosen, scan, ctx)
         index = self.file_index()
         cfg = self.match_config()
@@ -407,7 +441,7 @@ class Service:
         from .items import select_items
         from .matcher import load_overrides, locate_item, save_result
 
-        pool = select_items(self.store.all_items(), ids=ids)
+        pool = select_items(self.collection_items(), ids=ids)
         self.last_prepare = self.prepare_index(pool[:latest] if latest is not None else pool, scan, ctx)
         index = self.file_index()
         cfg = self.match_config()
@@ -596,6 +630,17 @@ class Service:
 
         return stream_response(self.store, path)
 
+    # -- imports (Phase 3) --------------------------------------------------------------
+
+    def start_import(self, file_obj: dict, default_tags: list[str], name: str | None = None):
+        from . import importer
+
+        batch = importer.create_batch(self, file_obj, default_tags, name)
+        job = self.jobs.submit("import", lambda ctx: importer.run_batch(self, batch["batch_id"], ctx))
+        batch["job_id"] = job.id
+        importer._save_batch(self.store, batch)
+        return batch, job
+
     # -- health -----------------------------------------------------------------------
 
     def health(self) -> dict[str, Any]:
@@ -622,7 +667,7 @@ class Service:
         return f"{int(newest * 1000):x}" if newest else "0"
 
     def valid_item_ids(self) -> list[str]:
-        return [it["id"] for it in self.store.all_items() if is_valid_id(it["id"])]
+        return [it["id"] for it in self.collection_items() if is_valid_id(it["id"])]
 
 
 def _locate_summary(item: dict, result: dict) -> dict[str, Any]:

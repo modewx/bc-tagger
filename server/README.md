@@ -243,6 +243,28 @@ Item views carry hints like `owned_but_only_in_not_owned_root`.
 without a filter, refuses more than 5 releases, and only downloads into `test-downloads/`.
 `POST /api/download {filter, number, format, dry_run}` runs it as a job and rescans afterwards.
 
+## Importing track lists
+
+`POST /api/import {file, default_tags}` takes a `bc-tagger-import/1` file (format and reading rules:
+`annotations-import-rules.md`) and runs a job that, for each row:
+
+1. checks the collection: `existing_id`, the row's id, then normalized artist + title (untitled
+   tracks and vinyl sides by album + track number). Rows already there are Bandcamp rows whose tags
+   are merged on commit; they cost no requests.
+2. reads the file's `bandcamp_url` when there is one (a release page: the track is picked from its
+   tracklist), else searches Bandcamp's public autocomplete. Requests come from this server with an
+   identifying User-Agent, at most one per second per host (redirect hops included) and cached for
+   30 days in `http_cache`. The HTML search answers scripted clients with a bot-check page; that is
+   reported as unavailable, never worked around. Accepted matches get the full item from the page's
+   `data-tralbum`; custom-domain pages that redirect forever keep the search data (`partial`).
+3. locates the row in the file index (no rescan); `match_by_track_num` rows match by album + track number.
+
+Rows below the threshold keep up to three candidates to pick (`PUT …/rows/<n> {choose}`). A row the
+search misses can be linked from the extension to the Bandcamp page the user has open
+(`POST /api/import/<id>/rows/<n>/link {item}`; `POST /api/import/link-candidates {item}` says which
+rows fit that page). On commit, Bandcamp rows go to the extension's pending-adds queue and the rest
+to the server's `other` collection with Bandcamp/Discogs/YouTube links.
+
 ## Tests
 
 ```bash
