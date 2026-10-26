@@ -53,6 +53,14 @@ button.chip:hover { filter: brightness(0.95); border-color: #bbb; }
 #toolbar { flex-wrap: wrap; }
 #refreshStatus { max-width: 520px; }
 
+/* "Show" status filter next to the search box */
+#searchBar { flex-wrap: wrap; }
+.status-filter-group { display: inline-flex; align-items: center; gap: 8px; }
+.status-filter { font-size: 13px; color: #444; }
+#statusFilter { padding: 5px 6px; border: 1px solid #aaa; border-radius: 5px; font-size: 13px; background: #fff; }
+#viewCount { font-size: 12px; color: #777; white-space: nowrap; }
+#emptyState { margin: 24px 12px; color: #777; font-size: 14px; }
+
 /* Popover (match details / candidates) */
 .popover {
   position: absolute;

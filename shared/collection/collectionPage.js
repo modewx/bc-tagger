@@ -68,6 +68,8 @@ const SHELL_HTML = `
  * @param {Array}  [opts.extraColumns]      [{id, label, after, sortKey?, compare?(a,b), render(cell,key,item)}]
  * @param {Array}  [opts.extraToolbarButtons] [{id, label, run(statusEl, button)}] after the base buttons
  * @param {function} [opts.localPlayUrl]    (item, key) -> url of a local file to play, or null
+ * @param {function} [opts.filterItem]      (item) -> false hides the row (extra filters, e.g. statuses)
+ * @param {function} [opts.onView]          (shown, total) after each filter/search
  */
 export function createCollectionPage(opts) {
   const ds = opts.dataSource;
@@ -452,10 +454,12 @@ export function createCollectionPage(opts) {
         if (!ok) return false;
       }
       if (!matchesSearch(item, terms)) return false;
+      if (opts.filterItem && !opts.filterItem(item)) return false;
       return true;
     });
     currentView = Object.fromEntries(entries);
     renderCollectionTable(currentView);
+    if (opts.onView) opts.onView(entries.length, Object.keys(allItems).length);
   }
 
   // Lazily turn a Tags cell into a chosen multi-select (same widget as track
@@ -1109,6 +1113,7 @@ export function createCollectionPage(opts) {
     start,
     reload,
     refreshRow,
+    refilter: () => computeView(),
     render: () => renderCollectionTable(currentView),
     getItems: () => allItems,
     statusEl,

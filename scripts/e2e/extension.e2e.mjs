@@ -297,3 +297,18 @@ test("ownership from Bandcamp via the extension (cookie file)", async (t) => {
   console.log(`# ownership: ${owned} owned items`);
   await app.close();
 });
+
+test("local app: the Show filter narrows by status and explains an empty result", async () => {
+  const app = await context.newPage();
+  await app.goto(SERVER + "/");
+  await app.waitForFunction(() => document.querySelectorAll("#collectionTable tbody tr").length > 0);
+  const total = await app.$$eval("#collectionTable tbody tr", (rows) => rows.length);
+  await app.selectOption("#statusFilter", "unknown"); // nothing located on this fresh server
+  assert.equal(await app.$$eval("#collectionTable tbody tr", (rows) => rows.length), total);
+  await app.selectOption("#statusFilter", "located");
+  assert.equal(await app.$$eval("#collectionTable tbody tr", (rows) => rows.length), 0);
+  assert.equal(await app.isVisible("#emptyState"), true);
+  assert.match(await app.textContent("#viewCount"), new RegExp(`0 of ${total}`));
+  await app.selectOption("#statusFilter", "all");
+  await app.close();
+});

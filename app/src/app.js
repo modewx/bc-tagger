@@ -9,12 +9,14 @@ import { Jobs, progressText, resultText } from "./jobs";
 import { buildNav } from "./nav";
 import { appColumns, localPlayUrl } from "./columns";
 import { startDevReload } from "./devReload";
+import { createStatusFilter } from "./statusFilter";
 
 const bridge = new ExtensionBridge();
 const events = new ServerEvents();
 const ds = new HttpDataSource({ bridge, events });
 const jobs = new Jobs(events);
 const nav = buildNav("collection");
+const statusFilter = createStatusFilter();
 
 let page = null;
 
@@ -37,6 +39,7 @@ function jobButton(id, label, title, start) {
       statusEl.textContent = `${label}: ${resultText(job)}`;
       button.disabled = false;
       await page.reload();
+      if (statusFilter.active()) page.refilter(); // e.g. newly located items join "Located"
     },
   };
 }
@@ -89,6 +92,8 @@ async function refreshHealth() {
       jobButton("refreshOwnership", "Refresh ownership", "Check which items you own on Bandcamp", refreshOwnership),
     ],
     localPlayUrl,
+    filterItem: statusFilter.filterItem,
+    onView: statusFilter.onView,
   });
 
   // Let the wide table scroll sideways on narrow screens.
@@ -97,6 +102,7 @@ async function refreshHealth() {
   scroller.id = "tableScroll";
   table.before(scroller);
   scroller.appendChild(table);
+  statusFilter.mount(document.getElementById("searchBar"), scroller, () => page.refilter());
 
   events.on("tags", () => refreshHealth());
   events.start();
