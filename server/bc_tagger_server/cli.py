@@ -37,7 +37,8 @@ def cmd_serve(svc: Service, args: argparse.Namespace) -> int:
     from .api import create_app
 
     port = args.port or svc.settings.get("server_port")
-    uvicorn.run(create_app(svc), host="127.0.0.1", port=port, log_level="info")
+    # Open SSE streams would otherwise keep a stopping server alive forever.
+    uvicorn.run(create_app(svc), host="127.0.0.1", port=port, log_level="info", timeout_graceful_shutdown=3)
     return 0
 
 
