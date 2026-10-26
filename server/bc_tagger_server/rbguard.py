@@ -176,6 +176,47 @@ def _prune_backups(bdir: Path, stem: str, keep: int) -> None:
             p.unlink(missing_ok=True)
 
 
+def open_by_other_process(path: Path) -> list[str]:
+    """Processes holding the DB (or its -wal/-shm) open, via lsof; empty if none."""
+    import subprocess
+
+    targets = [str(p) for p in (path, path.with_name(path.name + "-wal"), path.with_name(path.name + "-shm")) if p.exists()]
+    if not targets:
+        return []
+    proc = subprocess.run(["lsof", "-F", "pc", *targets], capture_output=True, text=True)
+    holders, pid = [], None
+    for line in proc.stdout.splitlines():
+        if line.startswith("p"):
+            pid = line[1:]
+        elif line.startswith("c") and pid:
+            holders.append(f"{line[1:]} (pid {pid})")
+    return sorted(set(holders))
+
+
+def restore(db_path: str | Path, backup_path: str | Path, **guard_kwargs: Any) -> dict[str, Any]:
+    """Replace the test DB with one of its backups (backing up the current DB first)."""
+    target = resolve(db_path)
+    src = resolve(backup_path)
+    require_write(target, **guard_kwargs)
+    if not src.is_file() or src.parent != target.parent / BACKUP_DIRNAME:
+        raise WriteRefused(f"refusing: {src} is not a backup in {target.parent / BACKUP_DIRNAME}")
+    holders = open_by_other_process(target)
+    if holders:
+        raise WriteRefused(f"refusing: the DB is open in {', '.join(holders)}")
+    safety = backup(target, **guard_kwargs)
+    with _commit_lock:
+        tmp = target.with_name(target.name + ".restoring")
+        shutil.copy2(src, tmp)
+        for side in ("-wal", "-shm"):
+            target.with_name(target.name + side).unlink(missing_ok=True)
+            extra = src.with_name(src.name + side)
+            if extra.exists():
+                shutil.copy2(extra, target.with_name(target.name + side))
+        tmp.replace(target)
+    log.info("Restored %s from %s (previous state saved as %s)", target, src, safety)
+    return {"db_path": str(target), "restored_from": str(src), "previous_saved_as": str(safety)}
+
+
 def _quiet_pyrekordbox() -> None:
     """pyrekordbox adds its own console handler and warns "Rekordbox is running!" /
     "No masterPlaylists6.xml" on every open; route it through our logging, errors only."""

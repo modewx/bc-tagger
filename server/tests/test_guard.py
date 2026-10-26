@@ -185,3 +185,27 @@ def test_backup_refused_without_marker(tmp_path):
     with pytest.raises(WriteRefused):
         rbguard.backup(db, running=False)
     assert not (tmp_path / "lib" / "backups").exists()
+
+
+def test_restore_from_backup(test_db, monkeypatch):
+    monkeypatch.setattr(rbdb, "get_rekordbox_pid", lambda *a, **k: 0)  # independent of the real app
+    pristine = rbguard.backup(test_db, running=False)
+    db = _add_playlist(test_db, "pytest-restore")
+    guarded_commit(db, test_db, running=False)
+    _close(db)
+    assert "pytest-restore" in _playlist_names(test_db)
+    result = rbguard.restore(test_db, pristine, running=False)
+    assert "pytest-restore" not in _playlist_names(test_db)
+    saved = rbguard.resolve(result["previous_saved_as"])
+    assert saved.parent == test_db.parent / "backups" and saved != pristine
+
+
+def test_restore_refuses_foreign_file_and_missing_marker(test_db, tmp_path):
+    outside = tmp_path / "elsewhere.db"
+    outside.write_bytes(test_db.read_bytes())
+    with pytest.raises(WriteRefused, match="not a backup"):
+        rbguard.restore(test_db, outside, running=False)
+    pristine = rbguard.backup(test_db, running=False)
+    (test_db.parent / MARKER_NAME).unlink()
+    with pytest.raises(WriteRefused, match="marker"):
+        rbguard.restore(test_db, pristine, running=False)
