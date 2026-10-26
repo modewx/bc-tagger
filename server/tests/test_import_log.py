@@ -81,6 +81,7 @@ def test_a_partial_import_is_logged_and_so_is_the_retry(svc, monkeypatch):  # no
     batch = run(svc, recorded_rows())
     bid = batch["batch_id"]
     importer.apply_tag_mapping(svc, bid, {}, "create")
+    assert importer.get_batch(svc, bid)["logs"] == [] and importer.list_batches(svc)[0]["logs"] == []
     real, calls = importer.queue_add, []
 
     def flaky(store, **kw):
