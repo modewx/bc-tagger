@@ -24,6 +24,7 @@ MESSAGES = {
     "downloaded": "downloaded",
     "on_disk": "already on disk",
     "cached": "downloaded before (the downloader's cache): nothing new; download again with force",
+    "redownloaded": "downloaded again: the downloader's cache listed it, but its files weren't found",
     "not_in_collection": "not in your Bandcamp collection",
     "challenged": "Bandcamp answered with its bot check; downloads stopped",
     "rate_limited": "Bandcamp is rate-limiting; try again later",
@@ -192,6 +193,17 @@ def run(svc, refs: list[str], force: bool = False, ctx=None, full_release: bool 
                        "errors": [str(err)]}
                 if "not mounted" in str(err):
                     stop = str(err)  # the drive went away: don't try the rest
+            if res["outcome"] == "cached" and not force and not all(_locate_refs(svc, entries).values()):
+                # The tool's cache says "downloaded", but the files aren't in the index (moved, renamed or
+                # deleted): the user asked for them, so fetch it again, ignoring that cache once.
+                report("the downloader's cache lists it, but its files weren't found: downloading again")
+                try:
+                    again = downloader.run_release(svc.settings, rel["release"], p["format"], True, on_line=report)
+                except (DownloadRefused, OSError) as err:
+                    again = {"outcome": "failed", "ok": False, "folder": None, "files": [], "errors": [str(err)]}
+                if again["outcome"] == "downloaded":
+                    again["outcome"] = "redownloaded"
+                res = {**again, "release": rel["release"], "retries": res.get("retries", []) + again.get("retries", [])}
             if res["outcome"] in ("challenged", "rate_limited"):
                 stop = MESSAGES[res["outcome"]]
             indexed = _index_folder(svc, res.get("folder")) if res["ok"] else 0

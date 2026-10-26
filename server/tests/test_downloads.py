@@ -198,3 +198,22 @@ def test_import_rows_say_what_can_be_downloaded(svc):
     rows = importer.get_batch(svc, batch["batch_id"])["rows"]
     assert rows[0]["owned"]["status"] == "owned" and rows[0]["owned"]["full_release"] == "a50"
     assert rows[1]["owned"] is None  # not a Bandcamp row
+
+
+def test_cached_but_missing_files_are_downloaded_again(svc, tmp_path):
+    import shutil
+
+    first = downloads.run(svc, ["t200"])
+    assert by_ref(first)["t200"]["located"] is True
+    folder = tmp_path / "owned" / "Artist B"
+    shutil.rmtree(folder)  # the files were moved away; the tool's cache still lists the release
+    with svc.store.tx() as c:
+        c.execute("DELETE FROM files WHERE path LIKE ?", (str(folder.resolve()) + "%",))
+    svc.locate(ids=["t200"], scan="none")
+    result = downloads.run(svc, ["t200"])
+    item = by_ref(result)["t200"]
+    assert result["releases"][0]["outcome"] == "redownloaded" and item["state"] == "done" and item["located"] is True
+    assert item["message"].startswith("downloaded again")
+    # with force (the user asked explicitly) it is fetched again even though it is on disk and located
+    again = downloads.run(svc, ["t200"], force=True)
+    assert again["releases"][0]["outcome"] in ("downloaded", "on_disk")  # force: the user asked explicitly
