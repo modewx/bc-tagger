@@ -27,3 +27,4 @@ packages = ["bc_tagger_server"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+pythonpath = ["."]

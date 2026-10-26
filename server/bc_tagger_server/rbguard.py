@@ -18,10 +18,11 @@ import json
 import logging
 import shutil
 import threading
+from contextlib import contextmanager
 from dataclasses import asdict, dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterator
 from unittest import mock
 
 from .config import MAIN_LIBRARY_DIR, PROTECTED_VOLUME, REKORDBOX_OPTIONS_JSON
@@ -175,10 +176,21 @@ def _prune_backups(bdir: Path, stem: str, keep: int) -> None:
             p.unlink(missing_ok=True)
 
 
+def _quiet_pyrekordbox() -> None:
+    """pyrekordbox adds its own console handler and warns "Rekordbox is running!" /
+    "No masterPlaylists6.xml" on every open; route it through our logging, errors only."""
+    pl = logging.getLogger("pyrekordbox")
+    for h in list(pl.handlers):
+        pl.removeHandler(h)
+    if not log.isEnabledFor(logging.DEBUG):
+        pl.setLevel(logging.ERROR)
+
+
 def open_database(db_path: str | Path, *, for_write: bool, **guard_kwargs: Any):
     """Open a ``MasterDatabase`` by explicit path (never auto-detected)."""
     from pyrekordbox.masterdb import MasterDatabase
 
+    _quiet_pyrekordbox()
     target = resolve(db_path)
     if is_within(target, MAIN_LIBRARY_DIR):
         raise WriteRefused(f"refusing to open the main rekordbox library ({target})")
@@ -187,6 +199,21 @@ def open_database(db_path: str | Path, *, for_write: bool, **guard_kwargs: Any):
     elif not target.is_file():
         raise FileNotFoundError(target)
     return MasterDatabase(path=target, db_dir=target.parent)
+
+
+@contextmanager
+def database(db_path: str | Path, *, for_write: bool, **guard_kwargs: Any) -> Iterator[Any]:
+    """``open_database`` that also closes the session and disposes the engine's pool."""
+    db = open_database(db_path, for_write=for_write, **guard_kwargs)
+    try:
+        yield db
+    finally:
+        try:
+            if db.session is not None:
+                db.rollback()
+                db.close()
+        finally:
+            db.engine.dispose()
 
 
 def guarded_commit(db: Any, db_path: str | Path, **guard_kwargs: Any) -> GuardDecision:

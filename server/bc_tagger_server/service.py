@@ -146,29 +146,158 @@ class Service:
     def start_ownership_refresh(self):
         return self._not_yet("ownership-refresh")
 
+    # -- index & locate ---------------------------------------------------------------
+
+    def scan(self, ctx=None) -> dict[str, Any]:
+        from .indexer import scan
+
+        progress = (lambda cur, tot, msg: ctx.progress(cur, tot, msg)) if ctx else None
+        return scan(self.store, self.settings.roots(), progress)
+
     def start_scan(self):
-        return self._not_yet("scan")
+        return self.jobs.submit("scan", lambda ctx: self.scan(ctx))
+
+    def match_config(self):
+        from .matcher import MatchConfig
+
+        s = self.settings.all()
+        return MatchConfig(
+            threshold=s["match_threshold"],
+            candidate_threshold=s["candidate_threshold"],
+            format_preference=s["format_preference"],
+        )
+
+    def file_index(self):
+        from .indexer import load_files
+        from .matcher import FileIndex
+
+        return FileIndex(load_files(self.store))
+
+    def locate(self, ids=None, latest=None, ctx=None, rescan: bool = True) -> dict[str, Any]:
+        """Locate the selected items (all valid items if neither ``ids`` nor ``latest``)."""
+        from .items import select_items
+        from .matcher import load_overrides, locate_item, save_result
+
+        scan_stats = self.scan(ctx) if rescan else None
+        index = self.file_index()
+        cfg = self.match_config()
+        chosen = select_items(self.store.all_items(), ids=ids, latest=latest)
+        summary = []
+        for n, item in enumerate(chosen, 1):
+            result = locate_item(item, index, cfg, load_overrides(self.store, item["id"]))
+            save_result(self.store, item["id"], result)
+            summary.append(_locate_summary(item, result))
+            if ctx:
+                ctx.progress(n, len(chosen), f"located {n}/{len(chosen)}")
+                ctx.item_updated(item["id"])
+        counts: dict[str, int] = {}
+        for s in summary:
+            counts[s["status"]] = counts.get(s["status"], 0) + 1
+        return {"items": summary, "counts": counts, "files_indexed": len(index.files), "scan": scan_stats}
 
     def start_locate(self, ids=None, latest=None):
-        return self._not_yet("locate")
+        return self.jobs.submit("locate", lambda ctx: self.locate(ids=ids, latest=latest, ctx=ctx))
+
+    # -- rekordbox --------------------------------------------------------------------
+
+    def select_located(self, ids=None, latest=None, ctx=None) -> list[dict]:
+        """Locate and pick the items to export.
+
+        ``ids``: exactly those items. ``latest``: the N most recent items that are *located*
+        (walking newest first). Neither: every item.
+        """
+        from .items import select_items
+        from .matcher import load_overrides, locate_item, save_result
+
+        self.scan(ctx)
+        index = self.file_index()
+        cfg = self.match_config()
+        pool = select_items(self.store.all_items(), ids=ids)
+        chosen: list[dict] = []
+        for item in pool:
+            result = locate_item(item, index, cfg, load_overrides(self.store, item["id"]))
+            save_result(self.store, item["id"], result)
+            if latest is None:
+                chosen.append(item)
+            elif result["status"] == "located":
+                chosen.append(item)
+                if len(chosen) >= latest:
+                    break
+        return chosen
+
+    def file_meta(self, paths) -> dict[str, dict]:
+        out = {}
+        for p in paths:
+            row = self.store.query_one("SELECT * FROM files WHERE path = ?", (p,))
+            if row:
+                out[p] = dict(row)
+        return out
+
+    def export(self, ids=None, latest=None, dry_run=False, ctx=None, guard_kwargs=None) -> dict[str, Any]:
+        from .rbexport import build_selection, export
+
+        items = self.select_located(ids=ids, latest=latest, ctx=ctx)
+        selection = build_selection(self.store, items, self.store.get_tags())
+        progress = (lambda cur, tot, msg: ctx.progress(cur, tot, msg)) if ctx else None
+        diff = export(
+            self.store,
+            self.db_path(),
+            self.settings.get("playlist_folder"),
+            selection,
+            dry_run=dry_run,
+            file_meta=self.file_meta(selection.tracks),
+            guard_kwargs=guard_kwargs,
+            progress=progress,
+        )
+        diff["selected_items"] = [{"id": it["id"], "title": it.get("title"), "tags": it.get("tags")} for it in items]
+        if ctx:
+            for it in items:
+                ctx.item_updated(it["id"])
+        return diff
 
     def start_export(self, ids=None, latest=None, dry_run=False):
-        return self._not_yet("export")
+        return self.jobs.submit(
+            "export", lambda ctx: self.export(ids=ids, latest=latest, dry_run=dry_run, ctx=ctx)
+        )
 
     def write_xml(self, ids=None, latest=None) -> dict[str, Any]:
-        from fastapi import HTTPException
+        from .rbexport import build_selection
+        from .xmlexport import write_xml
 
-        raise HTTPException(501, "XML export is not implemented yet")
+        items = self.select_located(ids=ids, latest=latest)
+        selection = build_selection(self.store, items, self.store.get_tags())
+        result = write_xml(
+            selection,
+            self.settings.get("playlist_folder"),
+            self.file_meta(selection.tracks),
+            self.settings.xml_output_dir(),
+        )
+        result["selected_items"] = [{"id": it["id"], "title": it.get("title")} for it in items]
+        return result
 
     def set_match_override(self, item_id: str, path: str, decision: str) -> dict[str, Any]:
+        """Confirm or reject a candidate path, then re-locate the item right away."""
+        from fastapi import HTTPException
+
+        from .matcher import load_overrides, locate_item, save_result
+
+        item = self.store.get_item(item_id)
+        if item is None:
+            raise HTTPException(404, f"unknown item {item_id}")
         with self.store.tx() as c:
+            if decision == "confirm":
+                # One confirmed path per item.
+                c.execute("DELETE FROM match_overrides WHERE item_id = ? AND decision = 'confirm'", (item_id,))
             c.execute(
                 "INSERT INTO match_overrides(item_id, path, decision, created_at) VALUES(?, ?, ?, ?) "
                 "ON CONFLICT(item_id, path) DO UPDATE SET decision = excluded.decision, "
                 "created_at = excluded.created_at",
                 (item_id, path, decision, now_iso()),
             )
-        return {"item_id": item_id, "path": path, "decision": decision}
+        result = locate_item(item, self.file_index(), self.match_config(), load_overrides(self.store, item_id))
+        save_result(self.store, item_id, result)
+        self.jobs.bus.publish("item", {"id": item_id})
+        return {"item_id": item_id, "path": path, "decision": decision, "item": self.get_item_view(item_id)}
 
     def stream_file(self, request, path: str):
         from fastapi import HTTPException
@@ -201,6 +330,24 @@ class Service:
 
     def valid_item_ids(self) -> list[str]:
         return [it["id"] for it in self.store.all_items() if is_valid_id(it["id"])]
+
+
+def _locate_summary(item: dict, result: dict) -> dict[str, Any]:
+    from .items import is_album
+
+    best = result.get("best") or {}
+    return {
+        "id": item["id"],
+        "is_album": is_album(item),
+        "artist": item.get("artist"),
+        "title": item.get("title"),
+        "status": result["status"],
+        "path": best.get("path"),
+        "format": best.get("format"),
+        "confidence": best.get("confidence"),
+        "tracks": len(best.get("tracks") or []) if best.get("tracks") else (1 if best else 0),
+        "candidates": len(result.get("candidates") or []),
+    }
 
 
 def _newest_mtime(d: Path, limit: int = 5000) -> float:

@@ -1,0 +1,204 @@
+"""rekordbox export: layout, idempotency, managed sync, dry run, guard, XML fallback."""
+
+from __future__ import annotations
+
+import urllib.parse
+import xml.etree.ElementTree as ET
+
+import pytest
+
+from bc_tagger_server import rbguard
+from bc_tagger_server.rbexport import find_content, read_back
+from bc_tagger_server.rbguard import MARKER_NAME, WriteRefused
+
+from .conftest import write_aiff
+
+FOLDER = "bct-pytest"
+GUARD: dict = {}
+
+
+@pytest.fixture(autouse=True)
+def rekordbox_not_running(monkeypatch):
+    """Export tests must not depend on whether the user has rekordbox open."""
+    import pyrekordbox.masterdb.database as rbdb
+
+    monkeypatch.setattr(rbguard, "rekordbox_running", lambda: False)
+    monkeypatch.setattr(rbdb, "get_rekordbox_pid", lambda *a, **k: 0)
+
+
+def _item(item_id, title, artist, album, track, tags, date, **extra):
+    return {"id": item_id, "title": title, "artist": artist, "album_title": album, "track_num": track,
+            "tags": tags, "date_added": date, **extra}
+
+
+@pytest.fixture
+def library(tmp_path):
+    root = tmp_path / "music"
+    alpha = [write_aiff(root / "Alpha - Alpha Album" / f"0{n} - Alpha {n}.aiff", f"Alpha {n}", "Alpha", "Alpha Album", n)
+             for n in (1, 2, 3)]
+    beta = write_aiff(root / "Beta - Single" / "01 - Beta Song.aiff", "Beta Song", "Beta", "Single", 1)
+    items = {
+        "a100": _item("a100", "Alpha Album", "Alpha", "alpha-album", -1, ["must", "closer"], "2026-10-26T03:00:00Z"),
+        "t200": _item("t200", "Beta Song", "Beta", "Single", 1, ["pool", "electro"], "2026-10-26T02:00:00Z"),
+        "t300": _item("t300", "Alpha 2", "Alpha", "Alpha Album", 2, ["must", "ritual"], "2026-10-26T01:00:00Z"),
+        "t400": _item("t400", "Not Here", "Nobody", "Nothing", 1, ["must"], "2026-10-26T04:00:00Z"),
+    }
+    return {"root": root, "alpha": [str(p) for p in alpha], "beta": str(beta), "items": items}
+
+
+@pytest.fixture
+def svc(make_service, library, test_db):
+    s = make_service(library["root"], db_path=test_db, items=library["items"], tags=["must", "pool", "electro", "closer", "ritual"])
+    s.settings.update({"playlist_folder": FOLDER})
+    return s
+
+
+def export(svc, **kw):
+    return svc.export(guard_kwargs=GUARD, **kw)
+
+
+def test_export_layout_and_idempotency(svc, library, test_db):
+    before = read_back(test_db, FOLDER)
+    diff = export(svc, ids=["a100", "t200", "t300", "t400"])
+    assert diff["changed"] and diff["folder"]["created"]
+    assert [s["id"] for s in diff["skipped_items"]] == ["t400"]
+    assert sorted(diff["content_added"]) == sorted(library["alpha"] + [library["beta"]])
+    assert diff["backup"] and (test_db.parent / "backups").is_dir()
+
+    state = read_back(test_db, FOLDER)
+    alpha, beta = library["alpha"], library["beta"]
+    assert state["playlists"] == {
+        "must": alpha,  # album tag + t300's own 'must' on Alpha 2: no duplicate entry
+        "pool": [beta],
+        "electro": [beta],
+        "closer": alpha,
+        "ritual": [alpha[1]],
+    }
+    assert state["content_count"] == before["content_count"] + 4
+    assert state["duplicate_content_paths"] == []
+
+    again = export(svc, ids=["a100", "t200", "t300", "t400"])
+    assert not again["changed"]
+    assert again["content_added"] == [] and again["entries_added"] == [] and again["entries_removed"] == []
+    assert again["backup"] is None
+    assert read_back(test_db, FOLDER) == state
+
+    view = svc.get_item_view("a100")["rekordbox"]
+    assert view["status"] == "exported" and sorted(view["playlists"]) == ["closer", "must"]
+
+
+def _user_adds(test_db, playlist_name, path):
+    """Simulate the user adding a track to a playlist inside rekordbox."""
+    with rbguard.database(test_db, for_write=True, **GUARD) as db:
+        content = find_content(db, path) or db.add_content(path)
+        folder = next(p for p in db.get_playlist(Name=FOLDER))
+        pl = next(p for p in db.get_playlist(Name=playlist_name) if p.ParentID == folder.ID)
+        db.add_to_playlist(pl, content)
+        rbguard.guarded_commit(db, test_db, **GUARD)
+
+
+def test_managed_sync_only_removes_own_entries(svc, library, test_db, tmp_path):
+    export(svc, ids=["a100", "t200", "t300"])
+    extra = str(write_aiff(tmp_path / "manual" / "Manual.aiff", "Manual", "Someone", "Else", 1))
+    _user_adds(test_db, "pool", extra)  # a track we never exported
+    _user_adds(test_db, "must", library["beta"])  # a user entry for a track we manage elsewhere
+
+    item = svc.store.get_item("t200")
+    item["tags"] = ["electro"]  # untag 'pool'
+    svc.store.upsert_items({"t200": item})
+    diff = export(svc, ids=["t200"])
+    assert [(e["tag"], e["path"]) for e in diff["entries_removed"]] == [("pool", library["beta"])]
+
+    state = read_back(test_db, FOLDER)
+    assert state["playlists"]["pool"] == [extra]
+    assert library["beta"] in state["playlists"]["must"]  # the user's own entry stays
+    assert state["playlists"]["electro"] == [library["beta"]]
+    # Items outside the selection keep their entries.
+    assert state["playlists"]["closer"] == library["alpha"]
+
+
+def test_shared_claims_keep_entry(svc, library, test_db):
+    """Alpha 2 is in 'must' via the album and via t300; untagging t300 keeps the entry."""
+    export(svc, ids=["a100", "t300"])
+    item = svc.store.get_item("t300")
+    item["tags"] = ["ritual"]
+    svc.store.upsert_items({"t300": item})
+    diff = export(svc, ids=["t300"])
+    assert diff["entries_removed"] == []
+    assert library["alpha"][1] in read_back(test_db, FOLDER)["playlists"]["must"]
+
+
+def test_existing_content_is_reused(svc, library, test_db):
+    with rbguard.database(test_db, for_write=True, **GUARD) as db:
+        db.add_content(library["beta"], Title="Imported by hand")
+        rbguard.guarded_commit(db, test_db, **GUARD)
+    diff = export(svc, ids=["t200"])
+    assert diff["content_existing"] == 1 and diff["content_added"] == []
+    assert read_back(test_db, FOLDER)["duplicate_content_paths"] == []
+
+
+def test_dry_run_writes_nothing(svc, test_db):
+    before = test_db.read_bytes()
+    diff = export(svc, ids=["a100", "t200"], dry_run=True)
+    assert diff["dry_run"] and diff["changed"] and diff["folder"]["created"]
+    assert len(diff["entries_added"]) == 3 * 2 + 2
+    assert test_db.read_bytes() == before
+    assert not (test_db.parent / "backups").exists()
+    assert svc.store.query("SELECT * FROM rb_claims") == []
+
+
+def test_export_refused_without_marker(svc, test_db):
+    (test_db.parent / MARKER_NAME).unlink()
+    before = test_db.read_bytes()
+    with pytest.raises(WriteRefused):
+        export(svc, ids=["t200"])
+    assert test_db.read_bytes() == before
+    assert not (test_db.parent / "backups").exists()
+
+
+def test_export_while_rekordbox_runs_on_another_library(svc, library, test_db, tmp_path, monkeypatch):
+    import pyrekordbox.masterdb.database as rbdb
+
+    monkeypatch.setattr(rbguard, "rekordbox_running", lambda: True)
+    monkeypatch.setattr(rbdb, "get_rekordbox_pid", lambda *a, **k: 4242)
+    monkeypatch.setattr(rbguard, "options_db_path", lambda *a, **k: tmp_path / "Pioneer" / "rekordbox" / "master.db")
+    diff = svc.export(ids=["t200"])
+    assert diff["guard"]["bypass_running_check"] and diff["changed"]
+    assert read_back(test_db, FOLDER)["playlists"]["pool"] == [library["beta"]]
+
+    # ...but not when rekordbox has this very DB open.
+    monkeypatch.setattr(rbguard, "options_db_path", lambda *a, **k: test_db)
+    item = svc.store.get_item("t200")
+    item["tags"] = ["pool", "house"]
+    svc.store.upsert_items({"t200": item})
+    with pytest.raises(WriteRefused, match="this DB open"):
+        svc.export(ids=["t200"])
+    assert "house" not in read_back(test_db, FOLDER)["playlists"]
+
+
+def test_latest_counts_located_items(svc):
+    diff = export(svc, latest=2, dry_run=True)
+    # t400 is the newest item but not located, so the two most recent located items are picked.
+    assert [i["id"] for i in diff["selected_items"]] == ["a100", "t200"]
+
+
+def test_xml_fallback(svc, library):
+    result = svc.write_xml(ids=["a100", "t200", "t300", "t400"])
+    root = ET.parse(result["path"]).getroot()
+    tracks = {t.get("TrackID"): t for t in root.find("COLLECTION")}
+    assert len(tracks) == 4
+    paths = {tid: urllib.parse.unquote(t.get("Location").removeprefix("file://localhost")) for tid, t in tracks.items()}
+    assert all(t.get("Location").startswith("file://localhost/") and not t.get("Location").startswith("file://localhost//")
+               for t in tracks.values())
+    assert sorted(paths.values()) == sorted(library["alpha"] + [library["beta"]])
+    folder = root.find("PLAYLISTS/NODE/NODE")
+    assert folder.get("Name") == FOLDER
+    lists = {n.get("Name"): [paths[t.get("Key")] for t in n] for n in folder}
+    assert lists == {
+        "must": library["alpha"],
+        "pool": [library["beta"]],
+        "electro": [library["beta"]],
+        "closer": library["alpha"],
+        "ritual": [library["alpha"][1]],
+    }
+    assert all(int(n.get("Entries")) == len(n) for n in folder)
