@@ -102,7 +102,9 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     # Where the built local app (Session B) lives; served at "/".
     "app_dist_dir": "",
     "xml_output_dir": "",
-    "downloads_dir": str(TEST_OWNED_ROOT),
+    # Downloads of owned releases (Phase 4); empty: the owned root. Must be inside an owned root.
+    "downloads_dir": "",
+    "download_format": "aiff-lossless",
     "downloader_dir": str(DEFAULT_DOWNLOADER_DIR),
     # Empty: <downloader_dir>/build/libs/bandcamp-collection-downloader.jar, then ~/Scripts/bc-download/...
     "downloader_jar": "",
@@ -139,9 +141,24 @@ def check_playlist_name(name: str) -> None:
         raise SettingsError(f"invalid playlist name {name!r} (empty path segment)")
 
 
+def _check_downloads_dir(settings: dict[str, Any]) -> None:
+    """``downloads_dir`` (when set) must be inside an owned root."""
+    value = (settings.get("downloads_dir") or "").strip()
+    if not value:
+        return
+    folder = Path(value).expanduser().resolve()
+    owned = [Path(settings["owned_root"]).expanduser().resolve()] + [
+        Path(r["path"]).expanduser().resolve() for r in settings.get("extra_roots") or [] if r.get("kind") == "owned"]
+    if not any(folder == o or o in folder.parents for o in owned):
+        raise SettingsError(f"downloads_dir must be inside an owned root ({', '.join(map(str, owned))})")
+
+
 def _validate(merged: dict[str, Any]) -> dict[str, Any]:
     out = dict(merged)
     out["settings_version"] = SETTINGS_VERSION
+    if out.get("download_format") not in ("flac", "wav", "aac-hi", "mp3-320", "aiff-lossless", "vorbis", "mp3-v0", "alac"):
+        raise SettingsError("download_format must be one of the downloader's audio formats")
+    out["downloads_dir"] = out.get("downloads_dir") or ""
     if out.get("last_browse_dir") is None:
         out["last_browse_dir"] = ""  # cleared
     if not isinstance(out["last_browse_dir"], str):
@@ -303,6 +320,8 @@ class Settings:
             if changes.get("allow_main_writes") is False and "rekordbox_target" not in changes:
                 changes["rekordbox_target"] = "test"  # unticking the checkbox returns to test
             merged = _validate({**self._fresh(), **changes})
+            if "downloads_dir" in changes:
+                _check_downloads_dir(merged)
             self._data = merged
             self.path.parent.mkdir(parents=True, exist_ok=True)
             tmp = self.path.with_suffix(".tmp")

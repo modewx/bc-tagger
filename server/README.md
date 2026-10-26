@@ -235,13 +235,21 @@ counts as owned if it or its album is in the collection. After a full sync from 
 everything else counts as `not_owned`; before that it's `unknown`. Cookie values are never logged.
 Item views carry hints like `owned_but_only_in_not_owned_root`.
 
-## Downloader
+## Downloading owned releases
 
-`./bct download --filter "<artist or album substring>" -n 1` wraps
-`bandcamp-collection-downloader` (jar from setting `downloader_jar`, else
-`bandcamp-collection-downloader/build/libs/`, else `~/Scripts/bc-download/…`). It refuses
-without a filter, refuses more than 5 releases, and only downloads into `test-downloads/`.
-`POST /api/download {filter, number, format, dry_run}` runs it as a job and rescans afterwards.
+For an owned item (or import row) that isn't located, `POST /api/download {ids: ["t123", "<batch>:<n>"]}`
+runs the user's `bandcamp-collection-downloader` (branch `bc-tagger-item-id`, `./gradlew fatJar`, JDK 11) with
+`--item-id a<id>|t<id>`: exactly that collection item, respecting the tool's cache unless `force`. Tracks map
+to their album when the album is owned, releases are deduped and downloaded one at a time (`--skip-hidden
+--jobs=1`, the app's User-Agent, the cookies file), into `downloads_dir` (empty: the owned root; refused
+unless inside an owned root), in `download_format` (default `aiff-lossless`). After each release its folder is
+indexed and the affected items and rows are located. Bandcamp's bot check or a rate limit stops the rest.
+`dry_run: true` answers the plan (destination, releases, per-item state) without downloading.
+Only the user's clicks download into the real Collection; tests and e2e use the stub
+(`BC_TAGGER_DOWNLOADER_STUB=server/tests/fixtures/stub_downloader.py`).
+
+`./bct download --filter "<artist or album substring>" -n 1` (agents) still wraps a filtered run, at most 5
+releases, into `test-downloads/` only.
 
 ## Importing track lists
 
