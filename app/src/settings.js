@@ -29,7 +29,7 @@ const SECTIONS = [
   ["folders", "general", "Music folders", "Where the indexer looks for your files. Files are referenced in place, never moved."],
   ["matching", "general", "Matching", "How tagged Bandcamp items are matched to local files."],
   ["bandcamp", "general", "Bandcamp", "Ownership normally comes from the extension's live session; these are the fallback."],
-  ["lookups", "general", "Import lookups", "Where an import looks rows up."],
+  ["lookups", "general", "Import", "Where an import looks rows up, and where its logs go."],
   ["downloads", "general", "Downloads", "Download (in the Located column) gets releases you own from your Bandcamp collection."],
   ["bandcamp_requests", "general", "Bandcamp requests", "Lower values are faster, but can trigger Bandcamp's rate limiting (HTTP 429); then the server backs off and waits."],
   ["server", "general", "Server", ""],
@@ -155,6 +155,13 @@ const FIELDS = {
     help:
       "bandcamp (default): Bandcamp's search. musicbrainz: MusicBrainz only, no Bandcamp requests; rows get its Bandcamp/Discogs links as hints. " +
       "both: Bandcamp first, then MusicBrainz for what Bandcamp didn't find.",
+  },
+  import_log_dir: {
+    section: "lookups",
+    type: "path",
+    label: "Import log folder",
+    placeholder: "default: the server's data folder / import-logs",
+    help: "Import selected saves a log of everything it imported here, named by date and time.",
   },
   downloads_dir: {
     section: "downloads",
