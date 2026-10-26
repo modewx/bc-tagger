@@ -14,12 +14,12 @@ const DEV_NAME = 'Bc Tagger (dev)';
 // Dev builds (`--env dev`) go to the dev-extension-build folder and always keep
 // the "(dev)" name so they never look like (or replace) the production install.
 // No manifest `key`: the dev extension ID must keep coming from the folder path.
-function transformManifest(dev) {
+function transformManifest(dev, name) {
   return (content) => {
     const manifest = JSON.parse(content.toString());
     if (dev) {
-      manifest.name = DEV_NAME;
-      manifest.action = { ...(manifest.action || {}), default_title: DEV_NAME };
+      manifest.name = name;
+      manifest.action = { ...(manifest.action || {}), default_title: name };
       manifest.description =
         'Development copy of Bc Tagger (separate storage from the main install)';
       delete manifest.key;
@@ -39,8 +39,16 @@ class DevBuildIdPlugin {
   }
 }
 
+// Builds:
+//   (default)   production, extension/build
+//   --env dev   "Bc Tagger (dev)" into ../dev-extension-build (hot reload)
+//   --env e2e   "Bc Tagger (e2e)" into .e2e/extension, for scripts/e2e (its own
+//               server via BC_DEFAULT_SERVER_URL, so tests never reach :8765)
 const config = (env, argv) => {
-  const dev = !!(env && env.dev);
+  const e2e = !!(env && env.e2e);
+  const dev = e2e || !!(env && env.dev);
+  const outDir = e2e && !process.env.BC_EXT_OUT ? PATHS.root + '/.e2e/extension' : PATHS.buildDir(dev);
+  const defaultServer = process.env.BC_DEFAULT_SERVER_URL || 'http://127.0.0.1:8765';
   return merge(common, {
     entry: {
       popup: PATHS.src + '/popup.js',
@@ -56,11 +64,14 @@ const config = (env, argv) => {
     },
     output: {
       // the build folder to output bundles and assets in.
-      path: PATHS.buildDir(dev),
+      path: outDir,
     },
     devtool: argv.mode === 'production' ? false : 'source-map',
     plugins: [
-      new webpack.DefinePlugin({ __DEV_BUILD__: JSON.stringify(dev) }),
+      new webpack.DefinePlugin({
+        __DEV_BUILD__: JSON.stringify(dev),
+        __DEFAULT_SERVER_URL__: JSON.stringify(defaultServer),
+      }),
       // Copy static assets (extension pages + shared vendor libs) to the build root.
       new CopyWebpackPlugin({
         patterns: [
@@ -72,7 +83,7 @@ const config = (env, argv) => {
           {
             from: 'manifest.json',
             context: PATHS.public,
-            transform: transformManifest(dev),
+            transform: transformManifest(dev, e2e ? 'Bc Tagger (e2e)' : DEV_NAME),
           },
           { from: '**/*', context: PATHS.vendor },
         ],

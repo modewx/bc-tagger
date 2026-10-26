@@ -12,7 +12,9 @@
     "build:all": "npm run build && npm run build:dev && npm run build:app",
     "pack": "node extension/pack.js",
     "repack": "npm run build && npm run pack",
-    "format": "prettier --write --ignore-unknown \"{extension,shared,app}/**/*.{html,css,js,ts,json}\""
+    "format": "prettier --write --ignore-unknown \"{extension,shared,app}/**/*.{html,css,js,ts,json}\"",
+    "build:e2e": "webpack --mode=development --env e2e --config extension/config/webpack.config.js",
+    "test:e2e": "node --test --test-concurrency=1 scripts/e2e/extension.e2e.mjs"
   },
   "devDependencies": {
     "adm-zip": "^0.5.10",
@@ -20,6 +22,7 @@
     "css-loader": "^6.8.1",
     "file-loader": "^6.2.0",
     "mini-css-extract-plugin": "^2.7.6",
+    "playwright": "1.63.0",
     "prettier": "^2.8.8",
     "webpack": "^5.88.2",
     "webpack-cli": "^4.10.0",

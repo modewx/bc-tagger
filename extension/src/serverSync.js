@@ -14,7 +14,8 @@
 // Status:    chrome.storage.session bcSyncStatus = {...} (shown in the popup)
 // ---------------------------------------------------------------------------
 
-export const DEFAULT_SERVER_URL = "http://127.0.0.1:8765";
+// http://127.0.0.1:8765 unless the build sets BC_DEFAULT_SERVER_URL (e2e builds).
+export const DEFAULT_SERVER_URL = __DEFAULT_SERVER_URL__;
 const FULL_SYNC_EVERY_MS = 15 * 60 * 1000;
 const OWNERSHIP_EVERY_MS = 6 * 60 * 60 * 1000;
 const PUSH_DEBOUNCE_MS = 800;

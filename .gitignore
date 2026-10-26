@@ -23,3 +23,6 @@ taggedItems.json
 
 # local dev server data (BC_TAGGER_DATA_DIR for test servers)
 /.dev-data
+
+# extension e2e harness (build, browser profile, server data)
+/.e2e
