@@ -90,11 +90,12 @@ a mounted root drops files that were deleted.
 
 ## rekordbox write guard
 
-Every write to a `master.db` goes through `bc_tagger_server/rbguard.py`:
+Every write to a `master.db` goes through `bc_tagger_server/rbguard.py`. With the default target
+(`rekordbox_target: "test"`):
 
-1. **Never** the main library: anything inside `~/Library/Pioneer/rekordbox/` is refused, even for
-   reading, and so is anything under `/Volumes/Stationary Backup/`. Paths are resolved first, so
-   symlinks can't sneak around this.
+1. **Never** the main library: anything inside `~/Library/Pioneer/rekordbox/` (or `rekordbox_main/`
+   while the test library is switched in) is refused, even for reading, and so is anything under
+   `/Volumes/Stationary Backup/`. Paths are resolved first, so symlinks can't sneak around this.
 2. The DB folder must contain the marker file `.bc-tagger-test-library`.
 3. If a `rekordbox` process is running, the write is allowed only when `options.json`'s
    `db-path` (the DB rekordbox has open) is a **different** file; then pyrekordbox's own
@@ -103,21 +104,66 @@ Every write to a `master.db` goes through `bc_tagger_server/rbguard.py`:
 4. A timestamped backup (`<db dir>/backups/master_YYYYmmdd_HHMMSS.db`, last 50 kept) is taken
    before every write. An export first plans with a dry pass; if nothing would change it
    doesn't back up or write at all.
-5. DBs are always opened by explicit path; pyrekordbox auto-detection is never used.
+5. DBs are always opened by explicit path; pyrekordbox's auto-detection is switched off before
+   every open.
 
 To restore: `./bct rb-restore <backup>`. It refuses if any process has the DB open, backs up the
 current DB first, and resets this data dir's export tracking for that DB.
 
+## Writing to your main collection
+
+Off by default. Turn it on in the app's Settings → Rekordbox ("Allow bc-tagger to write to my main
+rekordbox collection"), or with
+`./bct settings --set allow_main_writes=true --set rekordbox_target='"main"'`.
+
+**Before your first export, make your own backup in rekordbox: *File → Library → Backup
+Library*.** bc-tagger also copies `master.db` and `masterPlaylists6.xml` to
+`~/Library/Application Support/bc-tagger/backups/main/<timestamp>/` before every write (last 5,
+~300 MB each), but a rekordbox backup is the one rekordbox itself can restore.
+
+- **Quit rekordbox first.** Writes are refused while any rekordbox process runs.
+- The main library must be switched in: if `~/Library/Pioneer/rekordbox` holds the test library
+  (marker file), writes are refused; run `scripts/rb-switch-library.sh main`.
+- **Every export is a dry run first.** It shows the playlists/folders to create, the tracks to
+  add and the entries to add/remove per playlist, plus a confirmation token. Only
+  `./bct export … --confirm <token>` (or the app's confirm button) writes, and only if nothing
+  changed since the dry run (same plan, library files untouched, within 15 minutes, once).
+  The dry run reads a copy of your library, never the live file.
+- Existing tracks (`Content`) are never modified; only files rekordbox doesn't have yet are added
+  (matched by path, Unicode-normalized). Entries you put in playlists yourself are never removed;
+  bc-tagger only removes entries it added. Playlists are never deleted.
+- `masterPlaylists6.xml` gets the new folders/playlists, and only the playlists the export changed
+  get a new timestamp (verified on a copy of your library: 4 added, 5 updated, 1,549 untouched).
+- The switch is only in settings; no request can point an export at another library. Turning
+  the checkbox off sets the target back to `test`.
+
+### Tag → playlist mapping
+
+`tag_playlist_mode: "auto"` (default): each tag → a playlist named like the tag inside
+`playlist_folder` (default `bc-tagger`). `"custom"`: `tag_playlist_map` maps a tag to one or more
+playlists; a tag with no playlists isn't exported.
+
+| name | means |
+|---|---|
+| `Must` | `/<playlist_folder>/Must` |
+| `Genres/Acid` | `/<playlist_folder>/Genres/Acid` |
+| `/DJ/Status/Must` | that path from the library root |
+
+Missing playlists and folders are created. A name that resolves to a smart playlist, a folder,
+or two entries with the same name is an error, and nothing is written. A track gets the union of
+the playlists of all its tags. `./bct rb-playlists` (or `GET /api/rekordbox/playlists`) lists the
+target's playlist tree; `POST /api/rekordbox/resolve` says which names exist or will be created.
+
 ## How the export works
 
-- A folder named `playlist_folder` at the playlist root, with one flat playlist per tag
-  (`must` and `pool` included), ordered like the tag vocabulary.
+- Playlists per the mapping above (auto: a folder named `playlist_folder` at the playlist root
+  with one flat playlist per tag, `must` and `pool` included, ordered like the tag vocabulary).
 - Files are referenced in place. `Content` rows are looked up by file path first, so nothing is
   ever duplicated, and they are never deleted. New rows get title/artist/album/genre/label,
   length, bitrate, sample rate, bit depth, year and track number from the file tags. rekordbox
   analyses them (BPM, key, waveform) when you load or batch-analyse them.
 - Album tags apply to every track of the album.
-- **Managed sync:** each tagged item "claims" (tag, track) pairs. An export of a selection updates
+- **Managed sync:** each tagged item "claims" (playlist, track) pairs. An export of a selection updates
   only the selected items' claims, adds missing entries, and removes an entry only if this tool
   created it and no item claims it any more. Entries you add by hand in rekordbox are left
   alone. Items that aren't located right now are left out of the selection, so an unmounted
