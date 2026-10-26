@@ -52,6 +52,19 @@ Tests never touch Bandcamp, the music drive or a real rekordbox library: Bandcam
   - `full_release: true` downloads the whole album or EP a track is on, when that release is owned. Items and
     import rows say what's owned (`track_owned`, `album_owned`, `full_release`), so the app shows Download File
     only for owned items and Download Full Release only where it works.
+- **Import logs (user's request: "a log of everything that was imported saved with datetime"):**
+  - Every import commit writes `YYYY-MM-DD_HHMMSS_<batch name>_<batch_id>.json` and a Markdown summary beside it,
+    to `import_log_dir` (default `~/Library/Application Support/bc-tagger/import-logs/`; refused inside a root
+    or on the music drive).
+  - For each row it records:
+    - what it became (added, merged with tags before → after, other, unchecked);
+    - its final tags and which came from the defaults or the tag mapping;
+    - how it was matched and its Bandcamp URL;
+    - where it was located;
+    - downloads made for it.
+  - A commit that stops part way is logged too, and so is the retry.
+  - Downloads are now kept in a `download_log` table, so the logs can say what each row got.
+  - API: `GET /api/import/logs`, `GET /api/import/logs/<name>`, `POST /api/import/logs/reveal`.
 
 ## App and extension (`app/`, `extension/`, `shared/`, branch `claude/local-collection-ui-e8f6f6`)
 
