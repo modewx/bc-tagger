@@ -651,6 +651,7 @@ def test_browse_files_under_the_roots_only(svc, tmp_path):
         assert sub["parent"] == real_music and sub["dirs"] == []
         assert [(f["name"], f["indexed"]) for f in sub["files"]] == [("01. Astika.aiff", True), ("02. New.aiff", False)]
         assert sub["files"][0]["title"] == "Astika" and sub["files"][0]["artist"] == "Space Drum Meditation"
+        assert sub["files"][0]["album"] == "SDM005" and sub["files"][0]["format"] == "aiff"
         for outside in (str(tmp_path), str(music / ".."), str(music / "escape"), "/etc"):
             assert c.get("/api/fs/list", params={"path": outside}).status_code == 403, outside
         assert c.get("/api/fs/list", params={"path": str(music / "nope")}).status_code == 404
@@ -659,3 +660,6 @@ def test_browse_files_under_the_roots_only(svc, tmp_path):
         pick = sub["files"][1]["path"]
         c.put(f"/api/import/{batch['batch_id']}/rows/{row_at(batch, 181)['n']}", json={"path": pick})
         assert c.get("/api/settings").json()["last_browse_dir"] == str(Path(pick).parent)
+        assert c.put("/api/settings", json={"last_browse_dir": None}).status_code == 200  # cleared
+        assert c.get("/api/settings").json()["last_browse_dir"] == ""
+        assert c.get("/api/nope").json() == {"detail": "Not Found"}  # unknown routes stay plain 404
