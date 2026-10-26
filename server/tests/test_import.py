@@ -512,3 +512,56 @@ def test_restart_mid_commit_lets_the_user_import_again(svc):
     assert result["skipped"] == 1 and result["tag_merges"] == 1  # the done row isn't merged twice
     assert set(result["new_tags"]) >= {"muertos", "dubstep"}  # its new tags still reach the vocabulary
     assert importer.list_batches(svc)[0]["step"] == "committed"
+
+
+def test_default_tags_to_all_rows_and_back(svc):
+    rows = recorded_rows()
+    batch = importer.create_batch(svc, {"format": "bc-tagger-import/1", "items": rows}, ["must"], default_tags_all=True)
+    elhwah = row_at(importer.get_batch(svc, batch["batch_id"]), 211)
+    assert elhwah["tags"] == ["muertos", "dubstep", "industrial", "ritual", "must"] and elhwah["default_added"] == ["must"]
+    assert importer.list_batches(svc)[0]["default_tags_all"] is True
+    importer.discard(svc, batch["batch_id"])
+
+    batch = run(svc, rows)  # the usual: defaults only for untagged rows
+    bid = batch["batch_id"]
+    assert row_at(batch, 211)["tags"] == ["muertos", "dubstep", "industrial", "ritual"]
+    assert row_at(batch, 297)["tags"] == ["must"] and row_at(batch, 297)["default_added"] == ["must"]
+    importer.update_row(svc, bid, row_at(batch, 85)["n"], {"tags": ["must", "pool"]})  # the user's own "must"
+    with TestClient(create_app(svc)) as c:
+        r = c.put(f"/api/import/{bid}/default-tags", json={"tags": ["must"], "all": True}).json()
+        assert r["default_tags_all"] is True and r["stats"]["total"] == len(rows) and len(r["rows"]) == len(rows)
+        got = {(x["line"], x["title"]): x for x in r["rows"]}
+        elhwah = next(x for x in r["rows"] if x["line"] == 211)
+        assert elhwah["tags"] == ["muertos", "dubstep", "industrial", "ritual", "must"]
+        assert all("must" in x["tags"] for x in got.values())
+        assert row_at(importer.get_batch(svc, bid), 211)["source"] == "bandcamp"  # nothing looked up again
+        # off again: exactly what the defaults added goes away
+        r = c.put(f"/api/import/{bid}/default-tags", json={"tags": ["must"], "all": False}).json()
+        back = {x["line"]: x for x in r["rows"]}
+        assert back[211]["tags"] == ["muertos", "dubstep", "industrial", "ritual"] and back[211]["default_added"] == []
+        assert back[297]["tags"] == ["must"]  # untagged: still gets the default
+        assert back[85]["tags"] == ["must", "pool"]  # the user's own edit is kept
+        r = c.put(f"/api/import/{bid}/default-tags", json={"tags": [], "all": False}).json()
+        assert {x["line"]: x for x in r["rows"]}[297]["tags"] == []
+        c.put(f"/api/import/{bid}/default-tags", json={"tags": ["must"], "all": True})
+    # duplicates merge with the defaults included
+    result = importer.commit(svc, bid)
+    assert result["tag_merges"] == 2
+    edits = {e["item_id"]: e["tags"] for e in svc.pending_tag_edits()}
+    assert "must" in edits["t3244411361"]
+    with pytest.raises(importer.ImportError_):
+        importer.set_default_tags(svc, bid, ["must"], True)
+
+
+def test_default_tags_on_a_batch_from_before_default_added(svc):
+    batch = run(svc, recorded_rows())
+    bid = batch["batch_id"]
+    rows = importer.load_rows(svc.store, bid)
+    for r in rows:  # how batches looked before default_added existed
+        r.pop("default_added", None)
+    importer._save_rows(svc.store, bid, rows)
+    out = importer.set_default_tags(svc, bid, ["must"], True)
+    by_line = {x["line"]: x for x in out["rows"]}
+    assert by_line[211]["tags"][-1] == "must" and by_line[297]["tags"] == ["must"]
+    out = importer.set_default_tags(svc, bid, ["must"], False)
+    assert {x["line"]: x for x in out["rows"]}[211]["tags"] == ["muertos", "dubstep", "industrial", "ritual"]
