@@ -162,6 +162,28 @@ def cmd_rb_status(svc: Service, args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_rb_restore(svc: Service, args: argparse.Namespace) -> int:
+    from .rbguard import BACKUP_DIRNAME, resolve, restore
+
+    db_path = resolve(svc.db_path())
+    backups = sorted((db_path.parent / BACKUP_DIRNAME).glob(f"{db_path.stem}_*.db"))
+    if not args.backup:
+        for b in backups:
+            print(b.name)
+        return 0
+    src = Path(args.backup)
+    if not src.is_absolute():
+        src = db_path.parent / BACKUP_DIRNAME / src
+    result = restore(db_path, src)
+    # The DB no longer holds what this data dir recorded as exported.
+    with svc.store.tx() as c:
+        for table in ("rb_content", "rb_claims", "rb_entries"):
+            c.execute(f"DELETE FROM {table} WHERE db_path = ?", (str(db_path),))
+    _out(result, args, f"restored {result['db_path']} from {Path(result['restored_from']).name}\n"
+         f"previous state saved as {result['previous_saved_as']}\nexport tracking for this DB reset")
+    return 0
+
+
 def cmd_settings(svc: Service, args: argparse.Namespace) -> int:
     if args.set:
         changes = {}
@@ -221,6 +243,11 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--tracks", action="store_true", help="list track paths per playlist")
     s.add_argument("--json", action="store_true")
     s.set_defaults(func=cmd_rb_status)
+
+    s = sub.add_parser("rb-restore", help="list backups of the rekordbox test DB, or restore one")
+    s.add_argument("backup", nargs="?", help="backup file name (from the list) or path")
+    s.add_argument("--json", action="store_true")
+    s.set_defaults(func=cmd_rb_restore)
 
     s = sub.add_parser("settings", help="show or change settings")
     s.add_argument("--set", action="append", metavar="KEY=VALUE", help="JSON values allowed")
