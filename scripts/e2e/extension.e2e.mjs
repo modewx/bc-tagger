@@ -656,3 +656,76 @@ test("Main target: every export runs a dry run and writes only after confirming"
   await app.close();
   await put({ allow_main_writes: false });
 });
+
+// Real server + a sandbox copy of the TEST library's master.db (never the main
+// library) standing in for "main". With rekordbox running, the server must
+// refuse the write and leave the sandbox untouched; otherwise the confirmed
+// export writes the mapped playlists and a re-run changes nothing.
+test("Main target, real server: dry run, confirm, and write to a sandbox copy", async (t) => {
+  const template = process.env.E2E_TEMPLATE_DB || path.join(process.env.HOME, "Library/Pioneer/rekordbox_test/master.db");
+  if (!fs.existsSync(template)) {
+    t.skip(`no template DB at ${template} (test library switched out?)`);
+    return;
+  }
+  const sandboxDir = path.join(E2E, "main-sandbox", "rekordbox");
+  fs.rmSync(path.dirname(sandboxDir), { recursive: true, force: true });
+  fs.mkdirSync(sandboxDir, { recursive: true });
+  const sandboxDb = path.join(sandboxDir, "master.db");
+  fs.copyFileSync(template, sandboxDb); // a copy: the template is only read
+  const stat = () => {
+    const st = fs.statSync(sandboxDb);
+    return `${st.size}:${st.mtimeMs}`;
+  };
+  let rekordboxRunning = false;
+  try {
+    execFileSync("pgrep", ["-x", "rekordbox"], { stdio: "ignore" });
+    rekordboxRunning = true;
+  } catch (e) {
+    /* not running */
+  }
+
+  await put({
+    rekordbox_main_db_path: sandboxDb,
+    allow_main_writes: true,
+    rekordbox_target: "main",
+    tag_playlist_mode: "custom",
+    tag_playlist_map: { must: ["/E2E/Must"], pool: ["Pool"] },
+  });
+  const loc = await post("/api/locate", { latest: 10 });
+  await waitFor(() => api(`/api/jobs/${loc.job_id}`).then((j) => j.status === "done" || j.status === "error"), {
+    timeout: 120000,
+    what: "locate",
+  });
+  const before = stat();
+
+  const app = await context.newPage();
+  await app.goto(SERVER + "/");
+  await app.waitForSelector("#mainLibraryBanner:not([hidden])");
+  await app.waitForFunction(() => document.querySelectorAll("#collectionTable tbody tr").length > 0);
+  await app.click("#exportLatest");
+  await app.waitForSelector("#exportConfirm", { timeout: 120000 });
+  const dialog = await app.textContent("#exportConfirm");
+  assert.match(dialog, /MAIN rekordbox library/);
+  assert.match(dialog, /\/E2E\/Must/, "the mapped playlist is in the dry run");
+  assert.equal(stat(), before, "the dry run doesn't touch the sandbox");
+  await app.click("#exportConfirm .dialog-confirm");
+  await app.waitForFunction(() => !document.getElementById("exportLatest").disabled, null, { timeout: 120000 }); // the flow ended
+  const status = await app.textContent("#refreshStatus");
+  if (rekordboxRunning) {
+    assert.match(status, /failed/, "refused while rekordbox runs");
+    assert.equal(stat(), before, "nothing written");
+    console.log("# main write refused as expected: rekordbox is running");
+  } else {
+    assert.match(status, /done/);
+    const tree = await api("/api/rekordbox/playlists");
+    const must = tree.find((p) => p.path === "/E2E/Must");
+    assert.ok(must && must.kind === "playlist" && must.count > 0, "the mapped playlist was written");
+    // A second export finds nothing to do.
+    await app.click("#exportLatest");
+    await app.waitForFunction(() => !document.getElementById("exportLatest").disabled, null, { timeout: 120000 });
+    assert.match(await app.textContent("#refreshStatus"), /up to date/);
+  }
+  await app.close();
+  await put({ allow_main_writes: false, tag_playlist_mode: "auto" });
+  fs.rmSync(path.dirname(sandboxDir), { recursive: true, force: true });
+});

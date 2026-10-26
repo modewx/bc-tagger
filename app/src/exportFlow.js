@@ -125,8 +125,13 @@ export async function runExport(jobs, selection, onProgress, { ask = false } = {
   const target = await exportTarget();
   if (target !== "main" && !ask) return jobs.run("/api/rekordbox/export", selection, onProgress);
 
+  // The preview is only the first step: never show it as "done".
   const preview = await jobs.run("/api/rekordbox/export", { ...selection, dry_run: true }, (j) =>
-    onProgress({ ...j, progress: { ...(j.progress || {}), message: `dry run · ${(j.progress || {}).message || ""}` } })
+    onProgress({
+      ...j,
+      status: j.status === "done" ? "running" : j.status,
+      progress: { ...(j.progress || {}), message: `dry run · ${(j.progress || {}).message || ""}` },
+    })
   );
   if (preview.status !== "done") return preview;
   const d = preview.result || {};
@@ -138,6 +143,17 @@ export async function runExport(jobs, selection, onProgress, { ask = false } = {
   if (Array.isArray(d.errors) && d.errors.length) {
     await confirmDialog({ id: "exportConfirm", infoOnly: true, title: "This export can't run yet", body: diffView(d, target) });
     return { status: "error", error: d.errors.join("; ") };
+  }
+  // The server refuses main writes while rekordbox runs: say so before asking.
+  if (target === "main" && d.rekordbox_running) {
+    await confirmDialog({
+      id: "exportConfirm",
+      infoOnly: true,
+      danger: true,
+      title: "Quit rekordbox first",
+      body: diffView(d, target),
+    });
+    return { status: "error", error: "rekordbox is running: quit it, then export again" };
   }
   const ok = await confirmDialog({
     id: "exportConfirm",
