@@ -42,6 +42,18 @@ export function cmpDate(a, b) {
   return (Date.parse(a.date_added) || 0) - (Date.parse(b.date_added) || 0);
 }
 
+// When the item's tags last changed; items without a date count as the
+// earliest (last when sorted newest first).
+export function cmpModified(a, b) {
+  return (Date.parse(a.modified_at) || 0) - (Date.parse(b.modified_at) || 0);
+}
+
+// Track number (or a vinyl position like B1 when there's no number).
+export function cmpTrack(a, b) {
+  const n = (x) => (Number(x.track_num) > 0 ? Number(x.track_num) : Infinity);
+  return n(a) - n(b) || String(a.position || "").localeCompare(String(b.position || ""));
+}
+
 export function cmpText(field) {
   return (a, b) =>
     String(a[field] || "").toLowerCase().localeCompare(String(b[field] || "").toLowerCase());

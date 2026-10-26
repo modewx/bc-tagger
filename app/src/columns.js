@@ -96,7 +96,7 @@ export function sourceColumn() {
     id: "source",
     label: "Src",
     title: "Source: Bandcamp (tagger) or other",
-    after: "date",
+    after: "modified", // Added and Modified stay side by side
     sortKey: "source",
     compare: (a, b) => sourceOf(a).localeCompare(sourceOf(b)),
     render: renderSource,

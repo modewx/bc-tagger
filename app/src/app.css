@@ -8,6 +8,7 @@ html { background: #fff; color: #222; color-scheme: light; }
 /* Local-app columns. Tags (the tag editors) keeps a fixed width; Title and
    Artist share whatever is left. */
 #collectionTable .col-date { width: 84px; }
+#collectionTable .col-modified { width: 84px; }
 #collectionTable .col-source { width: 58px; }
 #collectionTable .col-owned { width: 64px; }
 #collectionTable .col-located { width: 80px; }
@@ -113,8 +114,10 @@ button.chip:hover { filter: brightness(0.95); border-color: #bbb; }
 
 /* Narrow screens: wrap the controls, scroll the table sideways. */
 #tableScroll { overflow-x: auto; }
-@media (max-width: 1390px) {
-  #collectionTable { min-width: 1380px; }
+/* Selection + Modified added ~150 px of fixed columns: below this, scroll sideways
+   so Title and Artist keep ~100 px each. */
+@media (max-width: 1570px) {
+  #collectionTable { min-width: 1560px; }
 }
 @media (max-width: 640px) {
   #topBar { padding: 8px; gap: 8px; }

@@ -18,7 +18,7 @@ import {
   splitArtistFromTitle,
   createBandcampFetcher,
 } from "./bandcamp";
-import { fmtDate, cmpDate, cmpText, cmpTags, matchesSearch } from "./sorting";
+import { fmtDate, cmpDate, cmpModified, cmpTrack, cmpText, cmpTags, matchesSearch } from "./sorting";
 import { setupColumnResizing } from "./columnResize";
 import { buildTagEditorWrap, syncChosenOptions } from "./tagEditor";
 
@@ -75,7 +75,8 @@ const SHELL_HTML = `
  * @param {boolean}  [opts.baseToolbar]     false hides the Bandcamp tools (refresh players, ...)
  * @param {function} [opts.rowClass]        (item, key) -> extra class names for the row
  * @param {function} [opts.titleUrl]        (item) -> link for the title, instead of its Bandcamp page
- * @param {string[]} [opts.hideColumns]     ids of base columns to leave out (e.g. "date")
+ * @param {string[]} [opts.hideColumns]     ids of columns hidden until shown with the Columns chooser (e.g. "date")
+ * @param {string} [opts.columnsKey]        localStorage key for the shown/hidden columns (default: from colWidthKey)
  * @param {function} [opts.playable]        (item) -> false: nothing to play (no Bandcamp page, no local file)
  *
  * Columns may also have headerRender(th) to fill their header themselves, and
@@ -717,6 +718,29 @@ export function createCollectionPage(opts) {
       },
     },
     {
+      id: "modified",
+      label: "Modified",
+      title: "When the item's tags last changed (tag edits, imports, merges)",
+      sortKey: "modified",
+      compare: cmpModified,
+      render: (cell, key, item) => {
+        cell.classList.add("date-cell");
+        cell.textContent = fmtDate(item.modified_at);
+        if (item.modified_at) cell.title = new Date(item.modified_at).toLocaleString();
+      },
+    },
+    {
+      id: "track",
+      label: "Track #",
+      hidden: true, // available in the Columns chooser
+      sortKey: "track",
+      compare: cmpTrack,
+      render: (cell, key, item) => {
+        cell.classList.add("track-cell");
+        cell.textContent = [item.position, Number(item.track_num) > 0 ? item.track_num : null].filter(Boolean).join(" · ");
+      },
+    },
+    {
       id: "thumb",
       label: "Thumbnail",
       render: (cell, key, item) => {
@@ -751,15 +775,76 @@ export function createCollectionPage(opts) {
     { id: "tags", label: "Tags", sortKey: "tags", compare: cmpTags, render: renderTagsCell },
   ];
 
-  const columns = BASE_COLUMNS.filter((c) => !(opts.hideColumns || []).includes(c.id));
+  // Every column in display order; `columns` are the ones shown (the Columns
+  // chooser toggles them, remembered per page).
+  const allColumns = BASE_COLUMNS.slice();
   (opts.extraColumns || []).forEach((col) => {
     if (col.first) {
-      columns.unshift(col);
+      allColumns.unshift(col);
       return;
     }
-    const at = columns.findIndex((c) => c.id === col.after);
-    columns.splice(at === -1 ? columns.length : at + 1, 0, col);
+    const at = allColumns.findIndex((c) => c.id === col.after);
+    allColumns.splice(at === -1 ? allColumns.length : at + 1, 0, col);
   });
+  const columnsKey = opts.columnsKey || `${colWidthKey}_shown`;
+  const hiddenByDefault = (c) => !!c.hidden || (opts.hideColumns || []).includes(c.id);
+  let shownChoice = {}; // column id -> true / false, where the user chose
+  try {
+    shownChoice = JSON.parse(localStorage.getItem(columnsKey) || "{}") || {};
+  } catch (e) {
+    shownChoice = {};
+  }
+  const isShown = (c) => (c.id in shownChoice ? !!shownChoice[c.id] : !hiddenByDefault(c));
+  let columns = allColumns.filter(isShown);
+
+  function setColumnShown(id, shown) {
+    shownChoice[id] = shown;
+    try {
+      localStorage.setItem(columnsKey, JSON.stringify(shownChoice));
+    } catch (e) {
+      /* ignore */
+    }
+    columns = allColumns.filter(isShown);
+    renderCollectionTable(currentView);
+  }
+
+  // The Columns chooser: every column in display order, a checkbox each.
+  const chooserBtn = document.createElement("button");
+  chooserBtn.id = "columnsChooser";
+  chooserBtn.className = "toolbar-btn columns-btn";
+  chooserBtn.type = "button";
+  chooserBtn.textContent = "Columns ▾";
+  chooserBtn.title = "Show or hide columns";
+  toolbar.insertBefore(chooserBtn, statusEl);
+  let chooser = null;
+  const closeChooser = () => {
+    if (chooser) chooser.remove();
+    chooser = null;
+  };
+  chooserBtn.addEventListener("click", (e) => {
+    e.stopPropagation();
+    if (chooser) return closeChooser();
+    chooser = document.createElement("div");
+    chooser.id = "columnsMenu";
+    chooser.className = "columns-menu";
+    allColumns.forEach((c) => {
+      const label = document.createElement("label");
+      label.dataset.col = c.id;
+      const box = document.createElement("input");
+      box.type = "checkbox";
+      box.checked = isShown(c);
+      box.addEventListener("change", () => setColumnShown(c.id, box.checked));
+      label.append(box, " " + (c.chooserLabel || c.label || c.id));
+      chooser.appendChild(label);
+    });
+    chooser.addEventListener("click", (ev) => ev.stopPropagation());
+    const r = chooserBtn.getBoundingClientRect();
+    chooser.style.top = `${r.bottom + window.scrollY + 4}px`;
+    chooser.style.left = `${r.left + window.scrollX}px`;
+    document.body.appendChild(chooser);
+  });
+  document.addEventListener("click", closeChooser);
+  document.addEventListener("keydown", (e) => e.key === "Escape" && closeChooser());
 
   function renderCollectionTable(items) {
     const collectionTable = document.getElementById("collectionTable");
@@ -807,7 +892,7 @@ export function createCollectionPage(opts) {
 
     // Keep original (storage/JSON) order until a column is clicked.
     const entries = Object.entries(items);
-    const sortCol = columns.find((c) => c.sortKey === sortColumn);
+    const sortCol = allColumns.find((c) => c.sortKey === sortColumn); // hidden columns still sort
     if (sortColumn === "index") {
       entries.sort((x, y) => ((indexByKey[x[0]] || 0) - (indexByKey[y[0]] || 0)) * sortDir);
     } else if (sortCol && sortCol.compare) {
@@ -1322,6 +1407,12 @@ export function createCollectionPage(opts) {
     refilter: () => computeView(),
     getView: () => currentView,
     render: () => renderCollectionTable(currentView),
+    // Sort by a column's sortKey; dir 1 = ascending, -1 = descending (newest first for dates).
+    sortBy(key, dir = 1) {
+      sortColumn = key;
+      sortDir = dir;
+      renderCollectionTable(currentView);
+    },
     getItems: () => allItems,
     statusEl,
   };
