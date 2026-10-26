@@ -35,8 +35,9 @@ def test_db(tmp_path) -> Path:
     return lib / "master.db"
 
 
-def write_aiff(path: Path, title: str, artist: str, album: str, track: int, seconds: float = 0.1) -> Path:
-    """A tiny valid 16-bit mono AIFF with ID3 tags."""
+def write_aiff(path: Path, title: str | None, artist: str | None, album: str | None, track: int | None,
+               seconds: float = 0.1) -> Path:
+    """A tiny valid 16-bit mono AIFF with ID3 tags (none if all of title/artist/album are None)."""
     import mutagen.aiff
     from mutagen.id3 import TALB, TIT2, TPE1, TRCK
 
@@ -50,6 +51,8 @@ def write_aiff(path: Path, title: str, artist: str, album: str, track: int, seco
     ssnd = struct.pack(">LL", 0, 0) + data
     body = b"AIFF" + b"COMM" + struct.pack(">L", len(comm)) + comm + b"SSND" + struct.pack(">L", len(ssnd)) + ssnd
     path.write_bytes(b"FORM" + struct.pack(">L", len(body)) + body)
+    if title is None and artist is None and album is None:
+        return path
     f = mutagen.aiff.AIFF(path)
     f.add_tags()
     f.tags.add(TIT2(encoding=3, text=title))

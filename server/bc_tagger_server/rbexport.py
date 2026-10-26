@@ -20,7 +20,8 @@ from pathlib import Path
 from typing import Any
 
 from . import rbguard
-from .items import item_tags
+from .items import album_name, is_album, item_tags
+from .normalize import norm
 from .store import Store, now_iso
 from .views import located_tracks
 
@@ -36,14 +37,31 @@ class TrackPlan:
     tags: list[str] = field(default_factory=list)  # ordered, unique
     items: list[str] = field(default_factory=list)
     claims: set[tuple[str, str]] = field(default_factory=set)  # (tag, item_id)
+    # Bandcamp's title/artist/album for this track, for fields the file's tags leave empty.
+    meta: dict[str, str] = field(default_factory=dict)
 
 
 @dataclass
 class ExportSelection:
     items: list[dict]  # selected items (dicts with "id", "tags")
     tracks: dict[str, TrackPlan]  # path -> plan
-    skipped: list[dict]  # items without a located file
+    skipped: list[dict]  # items without a located (or currently available) file
     tag_order: list[str]
+
+
+def item_metadata(item: dict, track: dict) -> dict[str, str]:
+    """Title/artist/album of one located track as the tagger item knows them."""
+    from .matcher import VARIOUS
+
+    artist = str(item.get("artist") or item.get("band_name") or "")
+    if is_album(item):
+        meta = {"title": track.get("title"), "artist": artist or track.get("artist"), "album": album_name(item)}
+    else:
+        title = str(item.get("title") or "")
+        if norm(artist) in VARIOUS and " - " in title:  # "V/A" + "Artist - Title"
+            artist, title = (part.strip() for part in title.split(" - ", 1))
+        meta = {"title": title, "artist": artist, "album": item.get("album_title")}
+    return {k: str(v) for k, v in meta.items() if v}
 
 
 def build_selection(store: Store, items: list[dict], tag_vocabulary: list[str]) -> ExportSelection:
@@ -59,10 +77,16 @@ def build_selection(store: Store, items: list[dict], tag_vocabulary: list[str]) 
         if not files:
             skipped.append({"id": item["id"], "title": item.get("title"), "status": local["status"]})
             continue
+        if not all(Path(f["path"]).is_file() for f in files):
+            # e.g. on an unmounted drive: leave the item (and its existing entries) alone
+            skipped.append({"id": item["id"], "title": item.get("title"), "status": "unavailable"})
+            continue
         used_items.append(item)
         tags = item_tags(item)
         for f in files:
             plan = tracks.setdefault(f["path"], TrackPlan(path=f["path"]))
+            for k, v in item_metadata(item, f).items():
+                plan.meta.setdefault(k, v)
             if item["id"] not in plan.items:
                 plan.items.append(item["id"])
             for t in tags:
@@ -111,6 +135,48 @@ def _get_or_add(db: Any, model: Any, adder: str, name: str | None, **kw: Any):
     return getattr(db, adder)(name, **kw)
 
 
+def merged_meta(file_tags: dict[str, Any], item_meta: dict[str, str]) -> dict[str, Any]:
+    """File tags, with title/artist/album taken from the tagger item where the tags are empty."""
+    merged = dict(file_tags)
+    for key in ("title", "artist", "album"):
+        if not merged.get(key) and item_meta.get(key):
+            merged[key] = item_meta[key]
+    return merged
+
+
+def _album_for(db: Any, meta: dict[str, Any]):
+    from pyrekordbox.masterdb import models as m
+
+    name = meta.get("album")
+    if not name:
+        return None
+    album_artist = _get_or_add(db, m.DjmdArtist, "add_artist", meta.get("albumartist") or meta.get("artist"))
+    q = db.query(m.DjmdAlbum).filter(m.DjmdAlbum.Name == name)
+    if album_artist is not None:
+        q = q.filter(m.DjmdAlbum.AlbumArtistID == album_artist.ID)
+    return q.first() or db.add_album(name, artist=album_artist)
+
+
+def fill_empty_fields(db: Any, content: Any, meta: dict[str, Any], dry_run: bool) -> list[str]:
+    """Fill Title/Artist/Album of an existing Content row where they are empty."""
+    from pyrekordbox.masterdb import models as m
+
+    filled = []
+    if not content.Title and meta.get("title"):
+        filled.append("Title")
+        if not dry_run:
+            content.Title = meta["title"]
+    if not content.ArtistID and meta.get("artist"):
+        filled.append("Artist")
+        if not dry_run:
+            content.ArtistID = _get_or_add(db, m.DjmdArtist, "add_artist", meta["artist"]).ID
+    if not content.AlbumID and meta.get("album"):
+        filled.append("Album")
+        if not dry_run:
+            content.AlbumID = _album_for(db, meta).ID
+    return filled
+
+
 def content_kwargs(db: Any, meta: dict[str, Any]) -> dict[str, Any]:
     from pyrekordbox.masterdb import models as m
 
@@ -120,13 +186,8 @@ def content_kwargs(db: Any, meta: dict[str, Any]) -> dict[str, Any]:
     artist = _get_or_add(db, m.DjmdArtist, "add_artist", meta.get("artist"))
     if artist is not None:
         kw["ArtistID"] = artist.ID
-    album_name = meta.get("album")
-    if album_name:
-        album_artist = _get_or_add(db, m.DjmdArtist, "add_artist", meta.get("albumartist") or meta.get("artist"))
-        q = db.query(m.DjmdAlbum).filter(m.DjmdAlbum.Name == album_name)
-        if album_artist is not None:
-            q = q.filter(m.DjmdAlbum.AlbumArtistID == album_artist.ID)
-        album = q.first() or db.add_album(album_name, artist=album_artist)
+    album = _album_for(db, meta)
+    if album is not None:
         kw["AlbumID"] = album.ID
     genre = _get_or_add(db, m.DjmdGenre, "add_genre", meta.get("genre"))
     if genre is not None:
@@ -263,6 +324,7 @@ def _export(
         "folder": {"name": folder_name, "created": False, "id": None},
         "content_added": [],
         "content_existing": 0,
+        "content_updated": [],
         "playlists_created": [],
         "entries_added": [],
         "entries_removed": [],
@@ -307,15 +369,26 @@ def _export(
                 diff["missing_files"].append(path)
                 continue
             existing = known.get(unicodedata.normalize("NFC", path))
+            meta = merged_meta(file_meta.get(path, {}), selection.tracks[path].meta)
             if existing is not None:
                 content_ids[path] = existing
                 diff["content_existing"] += 1
+                ours = store.query_one(
+                    "SELECT created_by_us FROM rb_content WHERE db_path = ? AND path = ?", (db_key, path)
+                )
+                if ours is not None and ours["created_by_us"]:
+                    from pyrekordbox.masterdb.models import DjmdContent
+
+                    row = db.query(DjmdContent).filter(DjmdContent.ID == existing).first()
+                    filled = fill_empty_fields(db, row, meta, dry_run) if row is not None else []
+                    if filled:
+                        diff["content_updated"].append({"path": path, "fields": filled})
             elif Path(path).suffix.lstrip(".").upper() not in _FILE_TYPES:
                 diff["failed_files"].append({"path": path, "error": "file type not supported by rekordbox"})
             else:
                 diff["content_added"].append(path)
                 if not dry_run:
-                    row = db.add_content(path, **content_kwargs(db, file_meta.get(path, {})))
+                    row = db.add_content(path, **content_kwargs(db, meta))
                     content_ids[path] = str(row.ID)
                     created_content.append((path, str(row.ID)))
                 else:
@@ -417,6 +490,7 @@ def _export(
         changed = bool(
             diff["folder"]["created"]
             or diff["content_added"]
+            or diff["content_updated"]
             or diff["playlists_created"]
             or diff["entries_added"]
             or diff["entries_removed"]

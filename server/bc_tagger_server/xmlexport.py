@@ -17,7 +17,7 @@ from pathlib import Path
 from typing import Any
 
 from . import __version__
-from .rbexport import ExportSelection
+from .rbexport import ExportSelection, merged_meta
 
 KIND = {
     "aiff": "AIFF File",
@@ -42,7 +42,7 @@ def build_xml(selection: ExportSelection, folder_name: str, file_meta: dict[str,
     today = dt.date.today().isoformat()
     ids: dict[str, int] = {}
     for n, path in enumerate(paths, 1):
-        meta = file_meta.get(path, {})
+        meta = merged_meta(file_meta.get(path, {}), selection.tracks[path].meta)
         ids[path] = n
         attrib: dict[str, Any] = {
             "TrackID": n,

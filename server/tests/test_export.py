@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import urllib.parse
+from pathlib import Path
 import xml.etree.ElementTree as ET
 
 import pytest
@@ -202,3 +203,62 @@ def test_xml_fallback(svc, library):
         "ritual": [library["alpha"][1]],
     }
     assert all(int(n.get("Entries")) == len(n) for n in folder)
+
+
+def _content_fields(test_db, path):
+    with rbguard.database(test_db, for_write=False) as db:
+        c = find_content(db, path)
+        return (c.Title, c.Artist.Name if c.Artist else None, c.Album.Name if c.Album else None)
+
+
+def test_untagged_file_gets_metadata_from_the_item(svc, library, test_db):
+    bare = str(write_aiff(library["root"] / "Farfa - Ability EP" / "07.Francesco Farfa - File #2.aiff", None, None, None, None))
+    item = _item("t500", "File #2", "Francesco Farfa", "Farfability", 7, ["must"], "2026-10-26T05:00:00Z")
+    va = _item("t600", "Lechuga Zafiro - Oração", "V/A", "NAAFI X", 1, ["must"], "2026-10-26T05:00:00Z")
+    va_file = str(write_aiff(library["root"] / "loose" / "Lechuga Zafiro - Oração.aiff", None, None, None, None))
+    svc.store.upsert_items({"t500": item, "t600": va})
+    export(svc, ids=["t500", "t600", "t200"])
+    assert _content_fields(test_db, bare) == ("File #2", "Francesco Farfa", "Farfability")
+    assert _content_fields(test_db, va_file) == ("Oração", "Lechuga Zafiro", "NAAFI X")
+    # Tags in the file win over the item's metadata.
+    item200 = svc.store.get_item("t200")
+    item200["title"], item200["album_title"] = "Beta Song (Bandcamp spelling)", "Other Album Name"
+    svc.store.upsert_items({"t200": item200})
+    export(svc, ids=["t200"])
+    assert _content_fields(test_db, library["beta"]) == ("Beta Song", "Beta", "Single")
+
+
+def test_empty_fields_of_our_rows_are_filled_on_reexport(svc, library, test_db):
+    bare = str(write_aiff(library["root"] / "Real Artist - Real Album" / "01 Real Title.aiff", None, None, None, None))
+    svc.store.upsert_items({"t500": _item("t500", "Real Title", "Real Artist", "Real Album", 1, ["pool"], "2026-10-26T05:00:00Z")})
+    export(svc, ids=["t500"])
+    with rbguard.database(test_db, for_write=True, **GUARD) as db:  # as an older export left it
+        c = find_content(db, bare)
+        c.Title, c.ArtistID, c.AlbumID = None, None, None
+        rbguard.guarded_commit(db, test_db, **GUARD)
+    diff = export(svc, ids=["t500"])
+    assert diff["changed"] and diff["content_updated"] == [{"path": bare, "fields": ["Title", "Artist", "Album"]}]
+    assert _content_fields(test_db, bare) == ("Real Title", "Real Artist", "Real Album")
+    assert not export(svc, ids=["t500"])["changed"]
+
+
+def test_user_rows_are_not_filled(svc, library, test_db):
+    with rbguard.database(test_db, for_write=True, **GUARD) as db:
+        db.add_content(library["beta"])  # imported by hand, no title
+        rbguard.guarded_commit(db, test_db, **GUARD)
+    diff = export(svc, ids=["t200"])
+    assert diff["content_updated"] == [] and _content_fields(test_db, library["beta"])[0] is None
+
+
+def test_unavailable_files_leave_existing_entries_alone(svc, library, test_db, tmp_path):
+    export(svc, ids=["t200"])
+    (tmp_path / "unmounted").mkdir()
+    moved = tmp_path / "unmounted" / "beta.aiff"
+    Path(library["beta"]).rename(moved)  # the drive goes away; the locate result still points there
+    from bc_tagger_server.rbexport import build_selection, export as rb_export
+
+    selection = build_selection(svc.store, [svc.store.get_item("t200")], svc.store.get_tags())
+    assert selection.skipped == [{"id": "t200", "title": "Beta Song", "status": "unavailable"}]
+    diff = rb_export(svc.store, str(test_db), FOLDER, selection, guard_kwargs=GUARD)
+    assert not diff["changed"] and diff["entries_removed"] == []
+    assert read_back(test_db, FOLDER)["playlists"]["pool"] == [library["beta"]]
