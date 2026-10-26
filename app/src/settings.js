@@ -29,6 +29,7 @@ const SECTIONS = [
   ["folders", "general", "Music folders", "Where the indexer looks for your files. Files are referenced in place, never moved."],
   ["matching", "general", "Matching", "How tagged Bandcamp items are matched to local files."],
   ["bandcamp", "general", "Bandcamp", "Ownership normally comes from the extension's live session; these are the fallback."],
+  ["lookups", "general", "Import lookups", "Where an import looks rows up."],
   ["downloads", "general", "Downloads", "Download (in the Located column) gets releases you own from your Bandcamp collection."],
   ["bandcamp_requests", "general", "Bandcamp requests", "Lower values are faster, but can trigger Bandcamp's rate limiting (HTTP 429); then the server backs off and waits."],
   ["server", "general", "Server", ""],
@@ -146,6 +147,15 @@ const FIELDS = {
   },
   seed_export_json: { section: "advanced", type: "path", label: "Seed export JSON" },
   app_dist_dir: { section: "advanced", type: "path", label: "App build folder", placeholder: "default: bc-tagger/app/dist" },
+  lookup_source: {
+    section: "lookups",
+    type: "select",
+    label: "Look rows up on",
+    options: ["bandcamp", "musicbrainz", "both"],
+    help:
+      "bandcamp (default): Bandcamp's search. musicbrainz: MusicBrainz only, no Bandcamp requests; rows get its Bandcamp/Discogs links as hints. " +
+      "both: Bandcamp first, then MusicBrainz for what Bandcamp didn't find.",
+  },
   downloads_dir: {
     section: "downloads",
     type: "path",

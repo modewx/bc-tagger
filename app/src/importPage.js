@@ -290,6 +290,11 @@ const SOURCES = {
   picked: ["picked", "match-bc", "Picked by you from the search results."],
   url: ["URL", "match-url", "You pasted its Bandcamp page: open it and the tagger links the row from the page. Imported without it, the row goes to Other with that link."],
   file: ["from file", "match-bc", "The Bandcamp URL given in the import file."],
+  musicbrainz: [
+    "MusicBrainz",
+    "match-cand",
+    "Found on MusicBrainz (no Bandcamp item): its Bandcamp/Discogs links are the row's hints. Open on Bandcamp, then link the page with the tagger's button on it.",
+  ],
   linked: ["linked", "match-bc", "Linked by you on its Bandcamp page (the tagger's “Link to import” button)."],
   candidates: ["options", "match-cand", "The search found possible matches: pick one."],
   error: ["lookup failed", "match-none", "The Bandcamp lookup failed for this row."],
@@ -389,7 +394,11 @@ function matchPopover(anchor, row) {
         name.target = "_blank";
         name.rel = "noopener";
       }
-      r.append(name, el("div", "pop-file-meta", [c.type || c.kind, pct(c.confidence ?? c.score)].filter(Boolean).join(" · ")));
+      const fromMb = String(c.id || "").startsWith("mb:");
+      r.append(
+        name,
+        el("div", "pop-file-meta", [fromMb ? "MusicBrainz" : c.type || c.kind, c.album, c.year, pct(c.confidence ?? c.score)].filter(Boolean).join(" · "))
+      );
       const chosen = chosenId != null && (c.id ?? c.url) === chosenId;
       const btns = el("div", "pop-actions");
       const use = el("button", chosen ? "" : "primary", chosen ? "Chosen" : "Use this");

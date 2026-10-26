@@ -1238,6 +1238,23 @@ test("import: lookups paused by Bandcamp's rate limiting resume from the preview
   await page.close();
 });
 
+test("Settings → Import lookups: lookup_source (bandcamp by default) round-trips", async () => {
+  const page = await context.newPage();
+  try {
+    await page.goto(SERVER + "/settings/");
+    await page.waitForSelector("#f_lookup_source");
+    assert.equal(await page.inputValue("#f_lookup_source"), "bandcamp");
+    assert.deepEqual(await page.$$eval("#f_lookup_source option", (o) => o.map((x) => x.value)), ["bandcamp", "musicbrainz", "both"]);
+    await page.selectOption("#f_lookup_source", "both");
+    await page.click("#saveBtn");
+    await page.waitForFunction(() => /Saved/.test(document.getElementById("saveState").textContent));
+    assert.equal((await api("/api/settings")).lookup_source, "both");
+  } finally {
+    await put({ lookup_source: "bandcamp" });
+    await page.close();
+  }
+});
+
 test("Settings → Bandcamp requests: the three values round-trip, and both collection pages use the browser ones", async () => {
   const page = await context.newPage();
   await page.goto(SERVER + "/settings/");
