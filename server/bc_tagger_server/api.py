@@ -66,6 +66,37 @@ class NamesBody(BaseModel):
     names: list[str]
 
 
+class ImportBody(BaseModel):
+    file: dict
+    default_tags: list[str] = Field(default_factory=list)
+    name: Optional[str] = None
+
+
+class RowChanges(BaseModel):
+    tags: Optional[list[str]] = None
+    checked: Optional[bool] = None
+    choose: Optional[str] = None
+    artist: Optional[str] = None
+    title: Optional[str] = None
+    album: Optional[str] = None
+    re_resolve: bool = False
+
+
+class LinkBody(BaseModel):
+    """The Bandcamp page the user has open: the item the extension read from it (content-script
+    shape), or the page's raw ``data-tralbum`` (+ ``data-embed``). ``item: null`` unlinks a row."""
+
+    item: Optional[dict] = None
+    tralbum: Optional[dict] = None
+    embed: Optional[dict] = None
+    page_url: Optional[str] = None
+
+
+class TagMappingBody(BaseModel):
+    map: dict[str, list[str]] = Field(default_factory=dict)
+    unmapped: Literal["create", "ignore"] = "create"
+
+
 class PathBody(BaseModel):
     path: str
 
@@ -115,9 +146,11 @@ def create_app(service: Service | None = None) -> FastAPI:
         limit: Optional[int] = Query(None, ge=0),
         offset: int = Query(0, ge=0),
         ids: Optional[str] = Query(None, description="comma-separated item ids"),
+        source: Optional[str] = Query(None, description="bandcamp,other (default both)"),
     ) -> list[dict]:
         id_list = [i for i in ids.split(",") if i] if ids else None
-        total, page = svc.list_items(q=q, tag=tag, limit=limit, offset=offset, ids=id_list)
+        sources = [x for x in source.split(",") if x in ("bandcamp", "other")] if source else None
+        total, page = svc.list_items(q=q, tag=tag, limit=limit, offset=offset, ids=id_list, sources=sources)
         response.headers["X-Total-Count"] = str(total)
         return page
 
@@ -153,6 +186,73 @@ def create_app(service: Service | None = None) -> FastAPI:
     @app.post("/api/tag-edits/ack")
     def tag_edits_ack(body: AckBody) -> dict:
         return svc.ack_tag_edits(body.ids)
+
+    # -- imports + extension channel (Phase 3) -----------------------------------------
+
+    from . import importer as imp
+
+    def _import_call(fn, *a):
+        try:
+            return fn(*a)
+        except KeyError as e:
+            raise HTTPException(404, f"unknown import batch or row: {e}") from e
+        except imp.ImportError_ as e:
+            raise HTTPException(400, str(e)) from e
+
+    @app.post("/api/import")
+    def import_create(body: ImportBody) -> dict:
+        try:
+            batch, job = svc.start_import(body.file, body.default_tags, body.name)
+        except imp.ImportError_ as e:
+            raise HTTPException(400, str(e)) from e
+        return {"batch_id": batch["batch_id"], "job_id": job.id}
+
+    @app.get("/api/import")
+    def import_list() -> list[dict]:
+        return imp.list_batches(svc)
+
+    @app.get("/api/import/{batch_id}")
+    def import_get(batch_id: str) -> dict:
+        return _import_call(imp.get_batch, svc, batch_id)
+
+    @app.put("/api/import/{batch_id}/rows/{n}")
+    def import_row(batch_id: str, n: int, body: RowChanges) -> dict:
+        return _import_call(imp.update_row, svc, batch_id, n, body.model_dump(exclude_unset=True))
+
+    @app.post("/api/import/{batch_id}/rows/{n}/link")
+    def import_link(batch_id: str, n: int, body: LinkBody) -> dict:
+        payload = body.model_dump(exclude_unset=True)
+        if "item" not in payload and not payload.get("tralbum"):
+            raise HTTPException(400, "send item (null to unlink) or tralbum")
+        return _import_call(imp.link_row, svc, batch_id, n, payload)
+
+    @app.post("/api/import/link-candidates")
+    def import_link_candidates(body: LinkBody) -> list[dict]:
+        return _import_call(imp.link_candidates, svc, body.model_dump(exclude_unset=True))
+
+    @app.post("/api/import/{batch_id}/tags")
+    def import_tags(batch_id: str, body: TagMappingBody) -> dict:
+        return _import_call(imp.apply_tag_mapping, svc, batch_id, body.map, body.unmapped)
+
+    @app.post("/api/import/{batch_id}/commit")
+    def import_commit(batch_id: str) -> dict:
+        return _import_call(imp.commit, svc, batch_id)
+
+    @app.delete("/api/import/{batch_id}")
+    def import_discard(batch_id: str) -> dict:
+        return _import_call(imp.discard, svc, batch_id)
+
+    @app.get("/api/tagger/pending-adds")
+    def pending_adds() -> list[dict]:
+        from .collection import pending_adds as pending
+
+        return pending(svc.store)
+
+    @app.post("/api/tagger/pending-adds/ack")
+    def pending_adds_ack(body: AckBody) -> dict:
+        from .collection import ack_adds
+
+        return {"acked": ack_adds(svc.store, body.ids)}
 
     # -- ownership ---------------------------------------------------------------------
 

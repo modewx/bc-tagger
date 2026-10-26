@@ -10,16 +10,18 @@ from urllib.parse import urlparse
 
 from .store import Store
 
-ITEM_ID_RE = re.compile(r"^[at]\d+$")
+ITEM_ID_RE = re.compile(r"^([at]\d+|o[0-9a-f]{10})$")
 
 
 def is_valid_id(item_id: str) -> bool:
-    """Real Bandcamp items are ``t<trackid>`` / ``a<albumid>``; storage also has junk keys."""
+    """Bandcamp items are ``t<trackid>`` / ``a<albumid>``, "other" items ``o<10 hex>``;
+    the extension's storage also has junk keys."""
     return bool(ITEM_ID_RE.match(item_id or ""))
 
 
 def is_album(item: dict) -> bool:
-    return str(item.get("id", "")).startswith("a")
+    item_id = str(item.get("id", ""))
+    return item_id.startswith("a") or (item_id.startswith("o") and item.get("kind") == "album")
 
 
 def item_tags(item: dict) -> list[str]:

@@ -114,6 +114,46 @@ CREATE TABLE IF NOT EXISTS confirm_tokens (
     used_at TEXT
 );
 
+-- The "other" collection: items not on Bandcamp, owned by the server (Phase 3).
+CREATE TABLE IF NOT EXISTS other_items (
+    id TEXT PRIMARY KEY,
+    data TEXT NOT NULL,
+    date_added TEXT,
+    updated_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS import_batches (
+    id TEXT PRIMARY KEY,
+    data TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS import_rows (
+    batch_id TEXT NOT NULL,
+    n INTEGER NOT NULL,
+    data TEXT NOT NULL,
+    PRIMARY KEY (batch_id, n)
+);
+
+-- Items (and new vocabulary tags) for the extension to add to chrome.storage.
+CREATE TABLE IF NOT EXISTS pending_adds (
+    add_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    item_id TEXT,
+    payload TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    acked_at TEXT
+);
+
+-- Cached Bandcamp search/page responses.
+CREATE TABLE IF NOT EXISTS http_cache (
+    key TEXT PRIMARY KEY,
+    url TEXT NOT NULL,
+    status INTEGER NOT NULL,
+    body TEXT NOT NULL,
+    fetched_at TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS tag_edits (
     seq INTEGER PRIMARY KEY AUTOINCREMENT,
     item_id TEXT NOT NULL,

@@ -33,6 +33,8 @@ def local_status(store: Store, item_id: str) -> dict[str, Any]:
 
 
 def ownership_status(store: Store, item: dict) -> dict[str, Any]:
+    if item.get("source") == "other" or str(item.get("id", "")).startswith("o"):
+        return {"status": "unknown", "source": "other", "checked_at": None}
     ids = [item["id"]]
     album_id = item.get("album_id")
     if isinstance(album_id, str) and album_id.startswith("a"):

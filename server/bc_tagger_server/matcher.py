@@ -417,6 +417,12 @@ def _decide(entries: list[dict], overrides: dict[str, str], cfg: MatchConfig,
     return {"status": "missing", "best": None, "candidates": []}
 
 
+def _by_track_number(item: dict) -> bool:
+    """Import rows flagged ``match_by_track_num``: untitled tracks and vinyl positions."""
+    return ("match_by_track_num" in (item.get("flags") or []) and isinstance(item.get("track_num"), int)
+            and item["track_num"] > 0 and bool(album_name(item)))
+
+
 def locate_item(item: dict, index: FileIndex, cfg: MatchConfig, overrides: dict[str, str] | None = None) -> dict:
     overrides = overrides or {}
     entries: list[dict] = []
@@ -438,6 +444,14 @@ def locate_item(item: dict, index: FileIndex, cfg: MatchConfig, overrides: dict[
                 scores = {"confidence": 0.0, "method": "manual"}
             if scores is not None:
                 entries.append(_file_entry(f, scores))
+        if _by_track_number(item):  # "Untitled" / "B1": the album's file with that track number
+            va = album_item_variants(item)
+            for rdir, idxs in index.releases.items():
+                files = [index.files[i] for i in idxs]
+                numbered = [f for f in files if f.track == item["track_num"] and f.path not in {e["path"] for e in entries}]
+                scores = score_release(va, files) if numbered else None
+                if scores is not None:
+                    entries += [_file_entry(f, {**scores, "method": "track_num"}) for f in numbered]
         # A confirmed path that has no title overlap at all.
         for path, decision in overrides.items():
             if decision == "confirm" and path in index.by_path and all(e["path"] != path for e in entries):
