@@ -1,0 +1,7 @@
+#!/usr/bin/env bash
+# Run the bc-tagger server CLI with the shared venv: ./bct <command> [...]
+set -euo pipefail
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PY="${BCT_PYTHON:-/Users/alvaroh/Projects/auto-rekordbox/.venv/bin/python}"
+export PYTHONPATH="$HERE${PYTHONPATH:+:$PYTHONPATH}"
+exec "$PY" -m bc_tagger_server "$@"
