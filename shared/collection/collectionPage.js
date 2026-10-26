@@ -77,7 +77,7 @@ export function createCollectionPage(opts) {
   const mount = opts.mount || document.body;
   const colWidthKey = opts.colWidthKey || "bc_collection_col_widths_v3";
   const bc = createBandcampFetcher((url, o) => ds.fetchPage(url, o));
-  const { fetchFreshStream, resolveAlbumDoc, resolveItemArt, resolveTrackTralbum } = bc;
+  const { fetchFreshStream, resolveAlbumDoc, resolveItemArt, resolveTrackTralbum, resolveTrackPlayerData } = bc;
 
   // --- Shell -----------------------------------------------------------------
   const shell = document.createElement("div");
@@ -978,8 +978,10 @@ export function createCollectionPage(opts) {
   // the track's own id as album_id, and tracks tagged from a fan collection
   // page got none (plus an album_url built from the track's slug), so
   // ownership through the album couldn't work. Read the real album from each
-  // track page (current.album_id and album_url; null for a single) and mark
-  // the item checked so it isn't fetched again.
+  // track page (current.album_id and album_url; null for a single) or, when
+  // that page can't be read (custom domains), from Bandcamp's embedded player
+  // data, and mark the item checked so it isn't fetched again. Items whose
+  // track is gone stay as they are (never removed) and are retried next time.
   async function fixAlbumIds(statusEl, button) {
     if (needsPageFetch(statusEl)) return;
     if (button) button.disabled = true;
@@ -990,7 +992,7 @@ export function createCollectionPage(opts) {
         !item.album_checked &&
         (!item.album_id || String(item.album_id) === `a${item.raw_id}`)
     );
-    let done = 0, fixed = 0, singles = 0;
+    let done = 0, fixed = 0, singles = 0, viaPlayer = 0;
     let pending = {};
     const flush = async () => {
       if (Object.keys(pending).length) {
@@ -1008,6 +1010,7 @@ export function createCollectionPage(opts) {
       targets.map(([key, item]) =>
         resolveTrackTralbum(item).then(async (tralbum) => {
           const current = tralbum && tralbum.current;
+          let fields = null;
           if (current && "album_id" in current) {
             const album_id = current.album_id ? `a${current.album_id}` : null;
             let album_url = null;
@@ -1016,9 +1019,19 @@ export function createCollectionPage(opts) {
             } catch (e) {
               /* keep null */
             }
-            Object.assign(item, { album_id, album_url, album_checked: true });
-            pending[key] = { album_id, album_url, album_checked: true };
-            if (album_id) fixed++;
+            fields = { album_id, album_url, album_checked: true };
+          } else {
+            const player = await resolveTrackPlayerData(item);
+            if (player && "album_id" in player) {
+              // No album page URL here: keep the stored one.
+              fields = { album_id: player.album_id ? `a${player.album_id}` : null, album_checked: true };
+              viaPlayer++;
+            }
+          }
+          if (fields) {
+            Object.assign(item, fields);
+            pending[key] = fields;
+            if (fields.album_id) fixed++;
             else singles++;
           }
           done++;
@@ -1031,7 +1044,10 @@ export function createCollectionPage(opts) {
 
     const missed = targets.length - fixed - singles;
     if (statusEl) {
-      statusEl.textContent = `Album IDs: ${fixed} fixed, ${singles} singles` + (missed ? `, ${missed} pages not reachable (try again later).` : ".");
+      statusEl.textContent =
+        `Album IDs: ${fixed} fixed, ${singles} singles` +
+        (viaPlayer ? ` (${viaPlayer} from the embedded player)` : "") +
+        (missed ? `, ${missed} not found on Bandcamp (kept as they are; retried next time).` : ".");
     }
     if (button) button.disabled = false;
   }

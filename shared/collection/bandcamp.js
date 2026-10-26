@@ -323,5 +323,19 @@ export function createBandcampFetcher(fetchFn) {
       });
   }
 
-  return { fetchFreshStream, resolveAlbumDoc, resolveItemArt, resolveTrackTralbum };
+  // Bandcamp's own player data for a track (data-player-data on the
+  // EmbeddedPlayer page). Always on bandcamp.com, so it also works for tracks
+  // whose pages live on a label's custom domain.
+  function resolveTrackPlayerData(item) {
+    if (!/^\d+$/.test(String(item.raw_id || ""))) return Promise.resolve(null);
+    const url = `https://bandcamp.com/EmbeddedPlayer/track=${item.raw_id}/size=large/`;
+    return fetchPageDoc(url, { credentials: "omit" })
+      .then((doc) => {
+        const el = doc && doc.querySelector("[data-player-data]");
+        return el ? JSON.parse(el.getAttribute("data-player-data")) : null;
+      })
+      .catch(() => null);
+  }
+
+  return { fetchFreshStream, resolveAlbumDoc, resolveItemArt, resolveTrackTralbum, resolveTrackPlayerData };
 }
