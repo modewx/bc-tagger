@@ -82,15 +82,20 @@ export function appColumns(ctx) {
   const locate = (key) => itemJob(key, "locating…", "/api/locate", { ids: [key] });
   const exportItem = (key) => itemJob(key, "exporting…", "/api/rekordbox/export", { ids: [key] });
 
+  // Confirm/reject a file; the server re-locates the item right away.
   async function decide(key, path, decision) {
+    closePopover();
+    busy[key] = decision === "confirm" ? "confirming…" : "rejecting…";
+    ctx.page().refreshRow(key);
     try {
       await apiJson(`/api/matches/${encodeURIComponent(key)}/${decision}`, { method: "POST", body: { path } });
+      ctx.statusEl().textContent = `${key}: ${decision}ed ${basename(path)}`;
     } catch (e) {
       ctx.statusEl().textContent = `${decision} failed: ${e.message}`;
-      return;
     }
-    closePopover();
-    await locate(key); // re-run the match so the decision takes effect
+    delete busy[key];
+    await ctx.page().reload();
+    ctx.page().refreshRow(key);
   }
 
   function busyNote(cell, key) {

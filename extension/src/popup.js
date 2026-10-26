@@ -152,9 +152,113 @@ $(function () {
     togglePanel("seeTagsPanel", "seeTags");
   });
 
-  document.getElementById("seeCollection").addEventListener("click", () => {
-    openTabIfNotExists("collection.html");
+  // See Collection: the local app when its server answers, else the bundled page.
+  document.getElementById("seeCollection").addEventListener("click", (e) => {
+    if (e.shiftKey) {
+      openTabIfNotExists("collection.html");
+      return;
+    }
+    chrome.runtime.sendMessage({ type: "serverStatus" }, (res) => {
+      if (res && res.health) openOrFocus(res.url + "/");
+      else openTabIfNotExists("collection.html");
+    });
   });
+
+  function openOrFocus(url) {
+    chrome.tabs.query({ url: url + "*" }, (tabs) => {
+      if (tabs && tabs.length) chrome.tabs.update(tabs[0].id, { active: true });
+      else chrome.tabs.create({ url });
+    });
+  }
+
+  document.getElementById("importLink").addEventListener("click", (e) => {
+    e.preventDefault();
+    openTabIfNotExists("import.html");
+  });
+
+  // Dev builds can reload themselves after a rebuild.
+  const devReload = document.getElementById("devReload");
+  if (__DEV_BUILD__) {
+    devReload.hidden = false;
+    devReload.addEventListener("click", (e) => {
+      e.preventDefault();
+      chrome.runtime.reload();
+    });
+  }
+
+  // --- Local app / server status ----------------------------------------
+  const serverDot = document.getElementById("serverDot");
+  const serverText = document.getElementById("serverText");
+  const serverEditRow = document.getElementById("serverEditRow");
+  const serverUrlInput = document.getElementById("serverUrl");
+
+  function ago(ms) {
+    if (!ms) return "never";
+    const s = Math.round((Date.now() - ms) / 1000);
+    if (s < 60) return "just now";
+    if (s < 3600) return `${Math.round(s / 60)} min ago`;
+    return `${Math.round(s / 3600)} h ago`;
+  }
+
+  function renderServer(res) {
+    const host = res && res.url ? res.url.replace(/^https?:\/\//, "") : "";
+    serverUrlInput.value = (res && res.url) || "";
+    if (res && res.health) {
+      const st = res.status || {};
+      const last = Math.max(st.lastPushAt || 0, st.lastFullAt || 0);
+      serverDot.className = "dot up";
+      serverText.textContent = `Local app: ${host} · synced ${ago(last)}`;
+      const own = st.ownership || {};
+      serverText.title =
+        `${res.health.items} items on the server.` +
+        (own.error ? ` Ownership: ${own.error}.` : own.count != null ? ` ${own.count} owned items.` : "") +
+        (st.lastError ? ` Last error: ${st.lastError}` : "");
+    } else {
+      serverDot.className = "dot down";
+      serverText.textContent = `Local app: offline (${host})`;
+      serverText.title = "The bc-tagger server isn't answering; See Collection opens the built-in page.";
+    }
+  }
+
+  function refreshServer() {
+    chrome.runtime.sendMessage({ type: "serverStatus" }, renderServer);
+  }
+
+  document.getElementById("serverEdit").addEventListener("click", () => {
+    serverEditRow.classList.toggle("open");
+    if (serverEditRow.classList.contains("open")) serverUrlInput.focus();
+  });
+
+  document.getElementById("serverSave").addEventListener("click", () => {
+    const raw = serverUrlInput.value.trim() || "http://127.0.0.1:8765";
+    let url = null;
+    try {
+      const u = new URL(raw);
+      if (u.protocol === "http:" && ["127.0.0.1", "localhost"].includes(u.hostname)) url = `${u.protocol}//${u.host}`;
+    } catch (e) {
+      /* invalid */
+    }
+    if (!url) {
+      showToast("Use http://127.0.0.1:<port> or http://localhost:<port>");
+      return;
+    }
+    chrome.storage.local.set({ bcServer: { url } }, () => {
+      serverEditRow.classList.remove("open");
+      showToast("Server URL saved", "success");
+      setTimeout(refreshServer, 300);
+    });
+  });
+
+  document.getElementById("serverSync").addEventListener("click", () => {
+    serverText.textContent = "Local app: syncing…";
+    chrome.runtime.sendMessage({ type: "syncNow" }, (res) => {
+      if (res && res.ok) showToast("Synced to the local server", "success");
+      else showToast(`Sync failed: ${(res && res.error) || "server offline"}`);
+      refreshServer();
+    });
+  });
+
+  refreshServer();
 
   // Export the full database (saved tracks + tag vocabulary) as a JSON backup.
   const exportLink = document.querySelector(".link-to-download");

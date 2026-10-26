@@ -1,0 +1,48 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>Bc Tagger · Import</title>
+  <style>
+    body { font: 14px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; max-width: 680px; margin: 40px auto; padding: 0 16px; color: #222; background: #fff; }
+    h1 { font-size: 20px; margin-bottom: 4px; }
+    .note { color: #666; margin-top: 0; }
+    .box { background: #f5f5f5; border-radius: 6px; padding: 12px 14px; margin: 16px 0; }
+    #summary { white-space: pre-line; }
+    fieldset { border: 1px solid #ddd; border-radius: 6px; margin: 16px 0; padding: 8px 14px 12px; }
+    legend { font-weight: 600; padding: 0 4px; }
+    label.mode { display: block; margin: 6px 0; cursor: pointer; }
+    label.mode small { display: block; color: #777; margin-left: 22px; }
+    button { font-size: 14px; padding: 8px 16px; cursor: pointer; border: 1px solid #3875d7; border-radius: 5px; background: #3875d7; color: #fff; }
+    button:disabled { cursor: default; opacity: 0.5; }
+    .ok { color: #1a7f37; }
+    .err { color: #b42318; }
+    .warn { color: #8a5a00; }
+    [hidden] { display: none !important; }
+  </style>
+</head>
+<body>
+  <h1 id="title">Import a Bc Tagger export</h1>
+  <p class="note">Load a file made with <b>Export</b> (<code>bc-tagger-export-YYYY-MM-DD.json</code>) into this
+    extension's storage. Nothing changes until you press Import.</p>
+
+  <p><input type="file" id="file" accept=".json,application/json" /></p>
+  <div id="summary" class="box" hidden></div>
+
+  <fieldset id="modes" hidden>
+    <legend>How to combine with what's already here</legend>
+    <label class="mode"><input type="radio" name="mode" value="merge" checked /> Merge, the file wins
+      <small>Adds new items; items in both take the file's copy (tags included).</small></label>
+    <label class="mode"><input type="radio" name="mode" value="keep" /> Merge, keep mine
+      <small>Adds new items only; items already here stay as they are.</small></label>
+    <label class="mode"><input type="radio" name="mode" value="replace" /> Replace everything
+      <small>Storage becomes exactly the file's items. Items only here are deleted.</small></label>
+  </fieldset>
+
+  <button id="import" disabled>Import</button>
+  <div id="result" class="box" hidden></div>
+  <p><a id="openCollection" href="collection.html" hidden>Open See Collection →</a></p>
+
+  <script src="import.js"></script>
+</body>
+</html>

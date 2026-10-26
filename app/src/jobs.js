@@ -62,7 +62,7 @@ export function resultText(job) {
   if (typeof r !== "object") return `done: ${r}`;
   const parts = [];
   Object.entries(r).forEach(([k, v]) => {
-    if (typeof v === "number" || typeof v === "boolean") parts.push(`${k.replace(/_/g, " ")}: ${v}`);
+    if (typeof v === "number") parts.push(`${k.replace(/_/g, " ")}: ${v}`);
     else if (Array.isArray(v) && parts.length < 8) parts.push(`${k.replace(/_/g, " ")}: ${v.length}`);
   });
   if (typeof r.message === "string") parts.push(r.message);

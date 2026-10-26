@@ -5,6 +5,7 @@
 import { apiJson } from "../../shared/datasource/HttpDataSource";
 import { ExtensionBridge } from "../../shared/datasource/extensionBridge";
 import { buildNav } from "./nav";
+import { startDevReload } from "./devReload";
 
 const SECTIONS = [
   ["folders", "Music folders", "Where the indexer looks for your files. Files are referenced in place, never moved."],
@@ -392,6 +393,7 @@ async function refreshHealth() {
     main.appendChild(el("p", { class: "err" }, `Could not load settings: ${e.message}`));
   }
   refreshHealth();
+  startDevReload();
 
   window.addEventListener("beforeunload", (e) => {
     if (changed().length) {

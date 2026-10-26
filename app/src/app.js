@@ -8,6 +8,7 @@ import { ServerEvents } from "../../shared/datasource/serverEvents";
 import { Jobs, progressText, resultText } from "./jobs";
 import { buildNav } from "./nav";
 import { appColumns, localPlayUrl } from "./columns";
+import { startDevReload } from "./devReload";
 
 const bridge = new ExtensionBridge();
 const events = new ServerEvents();
@@ -105,6 +106,7 @@ async function refreshHealth() {
   events.start();
   refreshHealth();
   setInterval(refreshHealth, 30000);
+  startDevReload();
 
   try {
     await page.start();

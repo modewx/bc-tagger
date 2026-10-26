@@ -45,10 +45,12 @@ const config = (env, argv) => {
     entry: {
       popup: PATHS.src + '/popup.js',
       contentScript: PATHS.src + '/contentScript.js',
+      appBridge: PATHS.src + '/appBridge.js',
       background: PATHS.src + '/background.js',
       checkout: PATHS.src + '/checkout.js',
       createTag: PATHS.src + '/createTag.js',
       collection: PATHS.src + '/collection.js',
+      import: PATHS.src + '/import.js',
       popupCss: PATHS.src + '/popup.css',
       collectionCss: PATHS.src + '/collection.css',
     },

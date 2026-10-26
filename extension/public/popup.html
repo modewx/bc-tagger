@@ -142,6 +142,44 @@
       color: #777;
       margin-bottom: 6px;
     }
+    /* Local app / server status */
+    .server-line {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      margin-top: 10px;
+      font-size: 12px;
+      color: #555;
+    }
+    .server-line .dot {
+      flex: none;
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background: #bbb;
+    }
+    .server-line .dot.up { background: #2da44e; }
+    .server-line .dot.down { background: #d9534f; }
+    #serverText { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .link-btn {
+      border: none;
+      background: none;
+      color: #3875d7;
+      cursor: pointer;
+      font-size: 12px;
+      padding: 0;
+    }
+    #serverEditRow { display: none; margin-top: 6px; gap: 4px; }
+    #serverEditRow.open { display: flex; }
+    #serverEditRow input {
+      flex: 1;
+      min-width: 0;
+      padding: 4px 6px;
+      border: 1px solid #aaa;
+      border-radius: 4px;
+      font-size: 12px;
+    }
+    #serverEditRow button { font-size: 12px; padding: 4px 8px; }
     /* toast */
     #toast {
       position: fixed;
@@ -177,9 +215,22 @@
   </div>
 
   <div class="popup-actions">
-    <button id="seeCollection">See Collection</button>
+    <button id="seeCollection" title="Opens the local app when its server is running, otherwise the built-in page. Shift-click: always the built-in page.">See Collection</button>
     <button id="seeTags">See Tags</button>
     <a class="link-to-download" href="#" role="button">Export</a>
+    <a id="importLink" href="#" role="button">Import</a>
+    <a id="devReload" href="#" role="button" hidden title="Reload this dev build">Reload (dev)</a>
+  </div>
+
+  <div class="server-line">
+    <span id="serverDot" class="dot"></span>
+    <span id="serverText">Local app: checking…</span>
+    <button id="serverSync" class="link-btn" title="Push everything to the local server now">sync</button>
+    <button id="serverEdit" class="link-btn" title="Change the local server URL">edit</button>
+  </div>
+  <div id="serverEditRow">
+    <input type="text" id="serverUrl" placeholder="http://127.0.0.1:8765" spellcheck="false" />
+    <button id="serverSave">Save</button>
   </div>
 
   <div id="seeTagsPanel" class="panel">

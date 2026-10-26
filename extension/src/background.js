@@ -1,3 +1,16 @@
+import {
+  fullSync,
+  getServerUrl,
+  getStatus,
+  probeServer,
+  pullTagEdits,
+  queueItemsDiff,
+  queueTags,
+  refreshOwnership,
+  sameServerOrigin,
+  syncTick,
+} from "./serverSync";
+
 // ---------------------------------------------------------------------------
 // Tag vocabulary helpers
 //
@@ -64,6 +77,203 @@ function broadcastTags(tags) {
 }
 
 // ---------------------------------------------------------------------------
+// Item updates (shared by the extension pages and the local app bridge)
+// ---------------------------------------------------------------------------
+
+// Read-modify-write taggedItems; `mutate(items)` returns the response.
+function withItems(mutate) {
+  return new Promise((resolve) => {
+    chrome.storage.local.get("taggedItems", ({ taggedItems }) => {
+      const items = taggedItems || {};
+      const result = mutate(items);
+      if (result && result.ok === false) {
+        resolve(result);
+        return;
+      }
+      chrome.storage.local.set({ taggedItems: items }, () => resolve(result || { ok: true }));
+    });
+  });
+}
+
+// Merge refreshed stream URLs back in: { [id]: { "mp3-128": url } }.
+function updateItemFiles(files) {
+  return withItems((items) => {
+    Object.entries(files || {}).forEach(([id, file]) => {
+      if (items[id]) items[id].file = file;
+    });
+  });
+}
+
+// Merge rebuilt thumbnail URLs back in: { [id]: art_url }.
+function updateItemArt(art) {
+  return withItems((items) => {
+    Object.entries(art || {}).forEach(([id, art_url]) => {
+      if (items[id]) items[id].art_url = art_url;
+    });
+  });
+}
+
+// Merge arbitrary fields into items without reordering: { [id]: {..} }.
+function updateItemFields(updates) {
+  return withItems((items) => {
+    Object.entries(updates || {}).forEach(([id, fields]) => {
+      if (items[id] && fields && typeof fields === "object") {
+        Object.assign(items[id], fields);
+      }
+    });
+  });
+}
+
+// Update one item's tags (inline editing from the collection page / local app).
+function updateItemTags(id, tags) {
+  return withItems((items) => {
+    if (!items[id]) return { ok: false, reason: "not-found" };
+    items[id].tags = Array.isArray(tags) ? tags : [];
+    return { ok: true };
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Import (from an Export file: { taggedItems: {id: item}, tags: [...] })
+//   mode "merge":   add new items, the file's copy wins for items in both
+//   mode "keep":    add new items only, existing items stay as they are
+//   mode "replace": storage becomes exactly the file's items
+// The vocabulary always ends up as tags.json ∪ existing ∪ file ∪ used tags.
+// ---------------------------------------------------------------------------
+
+async function importData(data, mode) {
+  if (!data || typeof data !== "object" || !data.taggedItems || typeof data.taggedItems !== "object") {
+    throw new Error("not a Bc Tagger export (no taggedItems)");
+  }
+  const incoming = {};
+  Object.entries(data.taggedItems).forEach(([id, item]) => {
+    if (item && typeof item === "object" && !Array.isArray(item)) incoming[id] = item;
+  });
+  const { taggedItems: existing = {}, tags: existingTags = [] } = await chrome.storage.local.get([
+    "taggedItems",
+    "tags",
+  ]);
+  let taggedItems;
+  if (mode === "replace") taggedItems = incoming;
+  else if (mode === "keep") taggedItems = { ...incoming, ...existing };
+  else taggedItems = { ...existing, ...incoming };
+  // Keep the existing storage order first (it drives the "#" column), new items after.
+  if (mode !== "replace") {
+    const ordered = {};
+    Object.keys(existing).forEach((id) => (ordered[id] = taggedItems[id]));
+    Object.keys(incoming).forEach((id) => {
+      if (!(id in ordered)) ordered[id] = taggedItems[id];
+    });
+    taggedItems = ordered;
+  }
+  const seed = await fetch(chrome.runtime.getURL("tags.json"))
+    .then((r) => r.json())
+    .catch(() => []);
+  const tags = unionTags(
+    seed,
+    mode === "replace" ? [] : existingTags,
+    Array.isArray(data.tags) ? data.tags : [],
+    [...usedTagsFrom(taggedItems)]
+  );
+  await chrome.storage.local.set({ taggedItems, tags });
+  broadcastTags(tags);
+  return { ok: true, items: Object.keys(taggedItems).length, tags: tags.length };
+}
+
+// ---------------------------------------------------------------------------
+// Local app bridge: ops the local app may ask for. Only accepted from the
+// configured server's pages (the content script checks this too).
+// ---------------------------------------------------------------------------
+
+function isBandcampUrl(url) {
+  try {
+    const u = new URL(url);
+    return u.protocol === "https:" && (u.hostname === "bandcamp.com" || u.hostname.endsWith(".bandcamp.com"));
+  } catch (e) {
+    return false;
+  }
+}
+
+async function handleAppBridge(op, payload, sender) {
+  const origin = sender.origin || (sender.url && new URL(sender.url).origin);
+  if (!sender.tab || !sameServerOrigin(origin, await getServerUrl())) {
+    throw new Error("not the configured local server");
+  }
+  switch (op) {
+    case "setItemTags": {
+      const res = await updateItemTags(payload.id, payload.tags);
+      if (!res.ok) throw new Error(res.reason || "not saved");
+      return res;
+    }
+    case "persistFiles":
+      return updateItemFiles(payload.files);
+    case "persistArt":
+      return updateItemArt(payload.art);
+    case "persistFields":
+      return updateItemFields(payload.updates);
+    case "fetchPage": {
+      // Bandcamp pages only, read-only, with the user's session when asked.
+      if (!isBandcampUrl(payload.url)) throw new Error("only bandcamp.com pages can be fetched");
+      const res = await fetch(payload.url, {
+        credentials: payload.credentials === "include" ? "include" : "omit",
+      });
+      return { status: res.status, text: res.ok ? await res.text() : "" };
+    }
+    case "refreshOwnership":
+      return refreshOwnership();
+    case "syncNow":
+      await fullSync("app");
+      return pullTagEdits();
+    case "status":
+      return { serverUrl: await getServerUrl(), status: await getStatus() };
+    default:
+      throw new Error(`unknown op ${op}`);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Server sync triggers
+// ---------------------------------------------------------------------------
+
+chrome.storage.onChanged.addListener((changes, area) => {
+  if (area !== "local") return;
+  if (changes.taggedItems) queueItemsDiff(changes.taggedItems.oldValue, changes.taggedItems.newValue);
+  if (changes.tags) queueTags();
+  if (changes.bcServer) syncTick("server changed");
+});
+
+// Every 30 s: catch up / pull queued tag edits / refresh ownership (see syncTick).
+chrome.alarms.create("bc-sync", { periodInMinutes: 0.5 });
+chrome.alarms.onAlarm.addListener((alarm) => {
+  if (alarm.name === "bc-sync") syncTick("alarm");
+  if (alarm.name === "bc-sync" && __DEV_BUILD__) checkDevBuild();
+});
+
+// ---------------------------------------------------------------------------
+// Dev builds only: reload the extension when a new build lands in its folder
+// (webpack writes dev-build-id.txt after every compile).
+// ---------------------------------------------------------------------------
+
+let devBuildId = null;
+function checkDevBuild() {
+  fetch(chrome.runtime.getURL("dev-build-id.txt"), { cache: "no-store" })
+    .then((r) => (r.ok ? r.text() : null))
+    .then((id) => {
+      if (!id) return;
+      if (devBuildId && id !== devBuildId) {
+        console.log("[dev] new build, reloading");
+        chrome.runtime.reload();
+      }
+      devBuildId = id;
+    })
+    .catch(() => {});
+}
+if (__DEV_BUILD__) {
+  checkDevBuild();
+  setInterval(checkDevBuild, 2000); // while the worker is awake; the alarm covers the rest
+}
+
+// ---------------------------------------------------------------------------
 // Lifecycle
 // ---------------------------------------------------------------------------
 
@@ -74,11 +284,13 @@ chrome.runtime.onInstalled.addListener(() => {
     }
   });
   ensureTagsComplete();
+  syncTick("installed");
 });
 
 // Also heal on browser startup, in case anything was ever written partially.
 chrome.runtime.onStartup.addListener(() => {
   ensureTagsComplete();
+  syncTick("startup");
 });
 
 // ---------------------------------------------------------------------------
@@ -112,54 +324,53 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
   }
 
   if (request.type === "updateTaggedItemFiles") {
-    // Merge refreshed stream URLs back in: { files: { [id]: { "mp3-128": url } } }.
-    chrome.storage.local.get("taggedItems", ({ taggedItems }) => {
-      const items = taggedItems || {};
-      Object.entries(request.files || {}).forEach(([id, file]) => {
-        if (items[id]) items[id].file = file;
-      });
-      chrome.storage.local.set({ taggedItems: items }, () => sendResponse({ ok: true }));
-    });
+    updateItemFiles(request.files).then(sendResponse);
     return true;
   }
 
   if (request.type === "updateTaggedItemArt") {
-    // Merge rebuilt thumbnail URLs back in: { art: { [id]: art_url } }.
-    chrome.storage.local.get("taggedItems", ({ taggedItems }) => {
-      const items = taggedItems || {};
-      Object.entries(request.art || {}).forEach(([id, art_url]) => {
-        if (items[id]) items[id].art_url = art_url;
-      });
-      chrome.storage.local.set({ taggedItems: items }, () => sendResponse({ ok: true }));
-    });
+    updateItemArt(request.art).then(sendResponse);
     return true;
   }
 
   if (request.type === "updateTaggedItemFields") {
-    // Merge arbitrary fields into items without reordering: { updates: { [id]: {..} } }.
-    chrome.storage.local.get("taggedItems", ({ taggedItems }) => {
-      const items = taggedItems || {};
-      Object.entries(request.updates || {}).forEach(([id, fields]) => {
-        if (items[id] && fields && typeof fields === "object") {
-          Object.assign(items[id], fields);
-        }
-      });
-      chrome.storage.local.set({ taggedItems: items }, () => sendResponse({ ok: true }));
-    });
+    updateItemFields(request.updates).then(sendResponse);
     return true;
   }
 
   if (request.type === "updateTaggedItemTags") {
-    // Update one item's tags (inline editing from the collection page).
-    chrome.storage.local.get("taggedItems", ({ taggedItems }) => {
-      const items = taggedItems || {};
-      if (items[request.id]) {
-        items[request.id].tags = Array.isArray(request.tags) ? request.tags : [];
-        chrome.storage.local.set({ taggedItems: items }, () => sendResponse({ ok: true }));
-      } else {
-        sendResponse({ ok: false, reason: "not-found" });
-      }
-    });
+    updateItemTags(request.id, request.tags).then(sendResponse);
+    return true;
+  }
+
+  if (request.type === "importData") {
+    importData(request.data, request.mode).then(sendResponse, (e) =>
+      sendResponse({ ok: false, error: e.message })
+    );
+    return true;
+  }
+
+  if (request.type === "appBridge") {
+    // Requests from the local app, relayed by the appBridge content script.
+    handleAppBridge(request.op, request.payload || {}, sender).then(
+      (result) => sendResponse({ ok: true, result }),
+      (e) => sendResponse({ ok: false, error: (e && e.message) || String(e) })
+    );
+    return true;
+  }
+
+  if (request.type === "serverStatus") {
+    // For the popup: server URL, whether it answers, last sync/ownership.
+    Promise.all([getServerUrl(), probeServer(), getStatus()]).then(([url, health, status]) =>
+      sendResponse({ url, health, status })
+    );
+    return true;
+  }
+
+  if (request.type === "syncNow") {
+    fullSync("manual")
+      .then(() => pullTagEdits())
+      .then((r) => sendResponse({ ok: true, ...r }), (e) => sendResponse({ ok: false, error: e.message }));
     return true;
   }
 
