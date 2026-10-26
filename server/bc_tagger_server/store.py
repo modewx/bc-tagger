@@ -42,6 +42,7 @@ CREATE TABLE IF NOT EXISTS files (
     duration REAL, bitrate INTEGER, sample_rate INTEGER, bits INTEGER, codec TEXT,
     year INTEGER, genre TEXT, label TEXT,
     release_dir TEXT NOT NULL,
+    created REAL,
     parsed TEXT,
     scanned_at TEXT NOT NULL,
     error TEXT
@@ -137,6 +138,12 @@ class Store:
         self._conn.execute("PRAGMA journal_mode=WAL")
         self._conn.execute("PRAGMA foreign_keys=ON")
         self._conn.executescript(SCHEMA)
+        self._migrate()
+
+    def _migrate(self) -> None:
+        cols = {r[1] for r in self._conn.execute("PRAGMA table_info(files)")}
+        if "created" not in cols:  # file creation time (st_birthtime), added for date matching
+            self._conn.execute("ALTER TABLE files ADD COLUMN created REAL")
 
     def close(self) -> None:
         with self._lock:
