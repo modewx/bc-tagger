@@ -1914,6 +1914,8 @@ function browserAnswers({ challenge = false } = {}) {
   const seen = [];
   const handler = (route) => {
     const req = route.request();
+    // The extension's own ownership checks aren't lookups: the fixtures answer them.
+    if (/\/api\/(fan|fancollection)\//.test(req.url())) return route.fallback();
     let body = null;
     try {
       body = req.postData() ? JSON.parse(req.postData()) : null;
@@ -1986,8 +1988,18 @@ test("import, Look up in my browser: Bandcamp's bot check in the browser stops t
   let batchId = null;
   try {
     await startBrowserImport(page, file);
+    // The Import tab says it stopped, then carries on to the mapping step (unknown
+    // tags) or the preview, whose banner says why: either place shows it.
+    const stopShown = () => {
+      const progress = document.getElementById("importProgress");
+      const banner = document.querySelector(".import-unavailable:not([hidden])");
+      return (
+        (progress && !progress.hidden && /Stopped: .*bot check|lookup unavailable .*bot check/.test(progress.textContent)) ||
+        (banner && /bot check .* to your browser/.test(banner.textContent))
+      );
+    };
     try {
-      await page.waitForFunction(() => /Stopped: .*bot check/.test((document.getElementById("importProgress") || {}).textContent || ""), null, { timeout: 60000 });
+      await page.waitForFunction(stopShown, null, { timeout: 60000 });
     } catch (e) {
       throw new Error(`no stop message: at ${page.url()}, progress "${await page.textContent("#importProgress").catch(() => "-")}", ${answers.seen.length} requests`);
     }

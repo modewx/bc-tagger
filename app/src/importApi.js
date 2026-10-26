@@ -115,6 +115,7 @@ export function normBatch(b) {
     defaultTagsAll: !!b.default_tags_all, // default tags on every row, not only untagged ones
     pendingReleases: Array.isArray(b.pending_releases) ? b.pending_releases : [],
     lookups: b.bandcamp_lookups || null, // {state: "on" | "off" | "stopped" | "paused", reason, error, at}
+    lookupVia: b.lookup === "browser" ? "browser" : "server", // who makes the Bandcamp requests
     estimate: b.estimate || null, // {lookups, cached, requests, seconds, interval_s, text}
     rows,
   };

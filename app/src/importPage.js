@@ -154,7 +154,7 @@ function renderInfo() {
   const why = paused
     ? "Bandcamp is rate-limiting, so the lookup paused. Resume it later, or"
     : lookups.reason === "challenge" || blockedRows.some((r) => r.lookupReason === "challenge")
-      ? `Bandcamp showed its bot check (“Client Challenge”) to the server${lookups.at ? ` at ${new Date(lookups.at).toLocaleTimeString()}` : ""}, so it stopped looking rows up`
+      ? `Bandcamp showed its bot check (“Client Challenge”) to ${lookedUpBy()}${lookups.at ? ` at ${new Date(lookups.at).toLocaleTimeString()}` : ""}, so it stopped looking rows up`
       : lookups.state === "off" || blockedRows.some((r) => r.lookupReason === "off")
       ? "Bandcamp lookups are turned off on this server"
       : "the lookup failed";
@@ -308,8 +308,10 @@ const SOURCES = {
   pending: ["not looked up", "match-none", "Not looked up yet."],
   none: ["unmatched", "match-none", "No Bandcamp match yet: Open on Bandcamp, then link the page with the tagger's button on it, or paste its URL here."],
 };
+// Who made this batch's Bandcamp requests: the server, or the user's browser (the extension).
+const lookedUpBy = () => (batch && batch.lookupVia === "browser" ? "your browser" : "the server");
 const UNAVAILABLE_WHY = {
-  challenge: "Bandcamp showed its bot check (“Client Challenge”) to the server, which stopped looking rows up.",
+  challenge: () => `Bandcamp showed its bot check (“Client Challenge”) to ${lookedUpBy()}, which stopped looking rows up.`,
   rate_limited: "Bandcamp is rate-limiting, so the lookup paused (Resume lookups at the top, later).",
   off: "Bandcamp lookups are turned off on this server.",
   error: "The lookup failed (no answer from Bandcamp).",
@@ -318,7 +320,8 @@ function sourceInfo(row) {
   const src = matchSource(row);
   const info = SOURCES[src] || [src, "match-bc", `Match source: ${src}.`];
   if (src !== "unavailable") return info;
-  const why = UNAVAILABLE_WHY[row.lookupReason] || UNAVAILABLE_WHY.error;
+  const reason = UNAVAILABLE_WHY[row.lookupReason] || UNAVAILABLE_WHY.error;
+  const why = typeof reason === "function" ? reason() : reason;
   return [info[0], info[1], `Bandcamp lookup unavailable: ${why} Open on Bandcamp, then link the page with the tagger's button on it, or paste its URL here.`];
 }
 
