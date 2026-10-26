@@ -34,16 +34,29 @@ export function diffView(d, target) {
     wrap.appendChild(el("div", "This writes to your MAIN rekordbox library. Quit rekordbox first.", "warn-box"));
   }
   wrap.appendChild(el("p", d.db_path || "", "muted"));
+  if (Array.isArray(d.errors) && d.errors.length) {
+    const box = el("div", null, "warn-box");
+    box.appendChild(el("strong", "Nothing will be written until these are fixed:"));
+    const ul = el("ul");
+    d.errors.forEach((e) => ul.appendChild(el("li", e)));
+    box.appendChild(ul);
+    wrap.appendChild(box);
+  }
+  (Array.isArray(d.warnings) ? d.warnings : []).forEach((w) => wrap.appendChild(el("p", "⚠ " + w, "muted")));
   const ul = el("ul");
   [
     `${count(d.content_added)} tracks added to the collection (${count(d.content_existing)} already there)`,
-    `${count(d.playlists_created)} new playlists` + (d.folder && d.folder.created ? ` and the folder "${d.folder.name}"` : ""),
+    `${count(d.playlists_created)} new playlists` +
+      (count(d.folders_created) ? `, ${count(d.folders_created)} new folders` : d.folder && d.folder.created ? ` and the folder "${d.folder.name}"` : ""),
     `${count(d.entries_added)} playlist entries added, ${count(d.entries_removed)} removed`,
   ].forEach((t) => ul.appendChild(el("li", t)));
   if (count(d.skipped_items)) ul.appendChild(el("li", `${count(d.skipped_items)} items skipped (not located)`));
   if (count(d.failed_files)) ul.appendChild(el("li", `${count(d.failed_files)} files rekordbox can't take`));
   wrap.appendChild(ul);
 
+  if (Array.isArray(d.folders_created) && d.folders_created.length) {
+    wrap.appendChild(listBlock("Folders to create", d.folders_created, (p) => p));
+  }
   if (Array.isArray(d.playlists_created) && d.playlists_created.length) {
     wrap.appendChild(listBlock("Playlists to create", d.playlists_created, (p) => (typeof p === "string" ? p : p.path || p.name)));
   }
@@ -52,7 +65,18 @@ export function diffView(d, target) {
       listBlock("Tracks to add", d.content_added, (c) => (typeof c === "string" ? base(c) : base(c.path) || c.title || JSON.stringify(c)))
     );
   }
-  // Entries per playlist (+added / −removed).
+  // Entries per playlist (+added / −removed); the server's per_playlist when present.
+  if (Array.isArray(d.per_playlist) && d.per_playlist.length) {
+    wrap.appendChild(
+      listBlock(
+        "Entries per playlist",
+        d.per_playlist,
+        (p) => `${p.playlist}: +${count(p.add)}${count(p.remove) ? ` / −${count(p.remove)}` : ""}${p.exists === false ? " (new)" : ""}`,
+        200
+      )
+    );
+    return wrap;
+  }
   const per = {};
   const key = (e) => e.playlist || e.playlist_path || e.tag || "?";
   (Array.isArray(d.entries_added) ? d.entries_added : []).forEach((e) => ((per[key(e)] = per[key(e)] || { add: [], rem: [] }).add.push(e)));
@@ -103,6 +127,10 @@ export async function runExport(jobs, selection, onProgress, { ask = false } = {
     return { status: "done", result: { message: none ? "none of these items are located" : "rekordbox is already up to date" } };
   }
   const n = count(d.selected_items) || (selection.ids ? selection.ids.length : selection.latest);
+  if (Array.isArray(d.errors) && d.errors.length) {
+    await confirmDialog({ id: "exportConfirm", infoOnly: true, title: "This export can't run yet", body: diffView(d, target) });
+    return { status: "error", error: d.errors.join("; ") };
+  }
   const ok = await confirmDialog({
     id: "exportConfirm",
     danger: target === "main",

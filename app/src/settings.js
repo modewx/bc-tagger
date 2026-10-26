@@ -523,6 +523,7 @@ async function save() {
   try {
     const saved = await apiJson("/api/settings", { method: "PUT", body });
     delete saved.presets;
+    delete saved.derived; // read-only, computed by the server
     loaded = saved;
     fill(saved);
     state.className = "ok";
@@ -573,6 +574,7 @@ async function refreshHealth() {
     const data = await apiJson("/api/settings");
     presets = data.presets || {};
     delete data.presets;
+    delete data.derived; // read-only, computed by the server
     loaded = data;
     render(main, data);
     fill(data);

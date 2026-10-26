@@ -478,3 +478,181 @@ test("local app: a loaded album embed survives an unrelated update of its row", 
   assert.equal(await app.locator(`tr[data-key="${album}"] td.player-cell iframe`).count(), 1);
   await app.close();
 });
+
+// --- Phase 2: Rekordbox settings, main-library opt-in, dry run before writes ----
+// The main library path is always pointed at a sandbox path under .e2e/ first;
+// nothing here opens or writes ~/Library/Pioneer/rekordbox.
+
+const SANDBOX_MAIN = path.join(E2E, "main-sandbox", "master.db");
+const put = (body) =>
+  api("/api/settings", { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+
+test("Settings has General and Rekordbox tabs", async () => {
+  const page = await context.newPage();
+  await page.goto(SERVER + "/settings/");
+  await page.waitForSelector("#tabs");
+  assert.equal(await page.isVisible("#sec_folders"), true);
+  assert.equal(await page.isVisible("#sec_rb_target"), false);
+  await page.click("#tab_rekordbox");
+  assert.equal(await page.isVisible("#sec_rb_target"), true);
+  assert.equal(await page.isVisible("#sec_folders"), false);
+  assert.match(page.url(), /#rekordbox$/);
+  await page.goto(SERVER + "/settings/#rekordbox"); // deep link
+  await page.waitForSelector("#sec_rb_playlists:not([hidden])");
+  assert.equal(await page.isVisible("#mappingAuto"), true);
+  await page.close();
+});
+
+test("Settings: the tag → playlists mapping round-trips through the server", async () => {
+  const page = await context.newPage();
+  await page.goto(SERVER + "/settings/#rekordbox");
+  await page.waitForSelector("#mappingAuto");
+  assert.equal(await page.isChecked("#mappingAuto"), true);
+  assert.equal(await page.isVisible(".mapping-panel"), false);
+  await page.uncheck("#mappingAuto");
+  assert.equal(await page.isVisible(".mapping-warning"), true, "warns while no tag is mapped");
+  const row = (tag) => page.locator(`.map-row[data-tag="${tag}"]`);
+  assert.equal(await row("must").locator("input").first().getAttribute("placeholder"), "must");
+  await row("must").locator("input").first().fill("/DJ/Status/Must");
+  await row("must").locator(".map-add").click();
+  await row("must").locator("input").nth(1).fill("Favourites");
+  await row("pool").locator("input").first().fill("Sub/Pool");
+  assert.equal(await page.isVisible(".mapping-warning"), false);
+  await page.click("#saveBtn");
+  await page.waitForFunction(() => /Saved/.test(document.getElementById("saveState").textContent));
+  let s = await api("/api/settings");
+  assert.equal(s.tag_playlist_mode, "custom");
+  assert.deepEqual(s.tag_playlist_map, { must: ["/DJ/Status/Must", "Favourites"], pool: ["Sub/Pool"] });
+
+  await page.reload();
+  await page.waitForSelector(".map-row");
+  assert.equal(await row("must").locator("input").nth(1).inputValue(), "Favourites");
+  await row("pool").locator("input").first().fill("a//b"); // invalid: refused by the server
+  assert.match(await row("pool").locator(".map-status").textContent(), /empty folder name/);
+  await page.click("#saveBtn");
+  await page.waitForFunction(() => /Not saved/.test(document.getElementById("saveState").textContent));
+  await page.click("#revertBtn");
+  await page.check("#mappingAuto"); // back to auto; the map is kept for later
+  await page.click("#saveBtn");
+  await page.waitForFunction(() => /Saved/.test(document.getElementById("saveState").textContent));
+  s = await api("/api/settings");
+  assert.equal(s.tag_playlist_mode, "auto");
+  assert.deepEqual(s.tag_playlist_map.must, ["/DJ/Status/Must", "Favourites"]);
+  await page.close();
+});
+
+test("Settings: the main-collection opt-in asks first, and the header shows MAIN LIBRARY", async () => {
+  await put({ rekordbox_main_db_path: SANDBOX_MAIN });
+  const page = await context.newPage();
+  await page.goto(SERVER + "/settings/#rekordbox");
+  await page.waitForSelector("#f_allow_main_writes");
+  assert.equal(await page.isVisible("#mainLibraryBanner"), false);
+
+  await page.check("#f_allow_main_writes").catch(() => {}); // the dialog opens and un-ticks it
+  await page.waitForSelector("#mainLibraryConfirm");
+  assert.match(await page.textContent("#mainLibraryConfirm"), /Backup Library/);
+  assert.equal(await page.isDisabled("#mainLibraryConfirm .dialog-confirm"), true, "needs the backup acknowledgement");
+  await page.click("#mainLibraryConfirm .dialog-cancel");
+  assert.equal(await page.isChecked("#f_allow_main_writes"), false, "cancel keeps the test library");
+
+  await page.check("#f_allow_main_writes").catch(() => {});
+  await page.waitForSelector("#mainLibraryConfirm");
+  await page.check("#mainLibraryConfirm .dialog-ack input");
+  await page.click("#mainLibraryConfirm .dialog-confirm");
+  assert.equal(await page.isChecked("#f_allow_main_writes"), true);
+  await page.click("#saveBtn");
+  await page.waitForFunction(() => /Saved/.test(document.getElementById("saveState").textContent));
+  let s = await api("/api/settings");
+  assert.equal(s.rekordbox_target, "main");
+  assert.equal(s.allow_main_writes, true);
+  assert.equal(s.rekordbox_main_db_path, SANDBOX_MAIN);
+  assert.equal(await page.isVisible("#mainLibraryBanner"), true);
+
+  const app = await context.newPage();
+  await app.goto(SERVER + "/");
+  await app.waitForSelector("#mainLibraryBanner:not([hidden])");
+  await app.close();
+
+  await page.uncheck("#f_allow_main_writes");
+  await page.click("#saveBtn");
+  await page.waitForFunction(() => /Saved/.test(document.getElementById("saveState").textContent));
+  s = await api("/api/settings");
+  assert.equal(s.rekordbox_target, "test");
+  assert.equal(s.allow_main_writes, false);
+  assert.equal(await page.isVisible("#mainLibraryBanner"), false);
+  await page.close();
+});
+
+test("Main target: every export runs a dry run and writes only after confirming", async () => {
+  await put({ rekordbox_main_db_path: SANDBOX_MAIN, allow_main_writes: true, rekordbox_target: "main" });
+  const app = await context.newPage();
+  // Only the export + job endpoints are stubbed for this page: no database is touched.
+  const calls = [];
+  const jobs = {};
+  let n = 0;
+  await app.route("**/api/rekordbox/export", async (route) => {
+    const body = JSON.parse(route.request().postData() || "{}");
+    calls.push(body);
+    const id = `export-e2e-${++n}`;
+    jobs[id] = body.dry_run
+      ? {
+          id, kind: "export", status: "done", progress: {},
+          result: {
+            dry_run: true, target: "main", db_path: SANDBOX_MAIN, changed: true, confirm_token: `tok-${n}`,
+            content_added: ["/music/a.aiff"], content_existing: 1, playlists_created: ["/DJ/New"], folders_created: [],
+            entries_added: [{ playlist: "/DJ/New", path: "/music/a.aiff" }], entries_removed: [],
+            per_playlist: [{ playlist: "/DJ/New", exists: false, add: 1, remove: 0 }], selected_items: [{}], errors: [], warnings: [],
+          },
+        }
+      : { id, kind: "export", status: "done", progress: {}, result: { dry_run: false, changed: true } };
+    await route.fulfill({ json: { job_id: id } });
+  });
+  await app.route("**/api/jobs/export-e2e-*", (route) => route.fulfill({ json: jobs[route.request().url().split("/").pop()] }));
+  await app.goto(SERVER + "/");
+  await app.waitForSelector("#mainLibraryBanner:not([hidden])");
+  await app.waitForFunction(() => document.querySelectorAll("#collectionTable tbody tr").length > 0);
+
+  // Export latest 10: dry run, then the dialog; Cancel writes nothing.
+  await app.click("#exportLatest");
+  await app.waitForSelector("#exportConfirm");
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].dry_run, true);
+  assert.match(await app.textContent("#exportConfirm"), /MAIN rekordbox library/);
+  assert.match(await app.textContent("#exportConfirm"), /\/DJ\/New/);
+  await app.click("#exportConfirm .dialog-cancel");
+  await app.waitForFunction(() => /cancelled/.test(document.getElementById("refreshStatus").textContent));
+  assert.equal(calls.length, 1, "cancel: no write request");
+
+  // Confirm: the write carries the dry run's token.
+  await app.click("#exportLatest");
+  await app.waitForSelector("#exportConfirm");
+  await app.click("#exportConfirm .dialog-confirm");
+  await app.waitForFunction(() => /Export latest 10.*done/.test(document.getElementById("refreshStatus").textContent));
+  assert.equal(calls.length, 3);
+  assert.deepEqual(calls[2], { latest: 10, confirm_token: "tok-2" });
+
+  // The per-row button and "Export shown…" go through the same dry run + confirm.
+  await app.evaluate(() => {
+    const s = document.getElementById("searchInput");
+    s.value = "System Works";
+    s.dispatchEvent(new Event("input"));
+  });
+  await app.waitForFunction(() => document.querySelectorAll("#collectionTable tbody tr").length === 1);
+  await app.click("#exportShown");
+  await app.waitForSelector("#exportConfirm");
+  assert.equal(calls[3].dry_run, true);
+  await app.click("#exportConfirm .dialog-cancel");
+  await app.evaluate(() => {
+    // The per-row Export is enabled only for located rows; enable it for this check.
+    const b = document.querySelector("#collectionTable tbody tr .col-rekordbox .mini-btn");
+    b.disabled = false;
+    b.click();
+  });
+  await app.waitForSelector("#exportConfirm");
+  assert.equal(calls[4].dry_run, true);
+  assert.equal(calls[4].ids.length, 1);
+  await app.click("#exportConfirm .dialog-cancel");
+  assert.equal(calls.filter((c) => !c.dry_run).length, 1, "only the one confirmed write");
+  await app.close();
+  await put({ allow_main_writes: false });
+});

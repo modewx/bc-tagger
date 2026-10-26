@@ -78,12 +78,15 @@ export function buildNav(active) {
           : "";
       setPill(server, `${health.items} items`, src.kind === "extension" ? "ok" : "warn", `Server ${health.version}. Items ${from}.`);
       const dbInfo = health.db || {};
-      setPill(
-        db,
-        dbInfo.is_test ? "rekordbox: test library" : "rekordbox: NOT the test library",
-        dbInfo.is_test ? "ok" : "bad",
-        dbInfo.path || ""
-      );
+      if (dbInfo.target === "main") setPill(db, "rekordbox: MAIN library", "bad", dbInfo.path || "");
+      else {
+        setPill(
+          db,
+          dbInfo.is_test ? "rekordbox: test library" : "rekordbox: NOT the test library",
+          dbInfo.is_test ? "ok" : "bad",
+          dbInfo.path || ""
+        );
+      }
     },
     setExtension(info) {
       if (info) {
