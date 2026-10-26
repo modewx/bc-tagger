@@ -97,7 +97,10 @@ def _diff_text(diff: dict[str, Any]) -> str:
         lines.append(f"  - {it['id']:12} {it['title']}  {it.get('tags') or ''}")
     f = diff["folder"]
     lines.append(f"folder '{f['name']}': {'created' if f['created'] else 'exists'}")
-    lines.append(f"content: {len(diff['content_added'])} added, {diff['content_existing']} already present")
+    lines.append(f"content: {len(diff['content_added'])} added, {diff['content_existing']} already present"
+                 + (f", {len(diff['content_updated'])} filled in" if diff.get("content_updated") else ""))
+    for u in diff.get("content_updated", []):
+        lines.append(f"  ~ filled {', '.join(u['fields'])}: {_short(u['path'])}")
     if diff["playlists_created"]:
         lines.append(f"playlists created: {', '.join(diff['playlists_created'])}")
     lines.append(
@@ -111,7 +114,7 @@ def _diff_text(diff: dict[str, Any]) -> str:
     for f in diff.get("failed_files", []):
         lines.append(f"  ! not added ({f['error']}): {_short(f['path'])}")
     if diff["skipped_items"]:
-        lines.append(f"skipped (not located): {', '.join(s['id'] for s in diff['skipped_items'])}")
+        lines.append("skipped: " + ", ".join(f"{s['id']} ({s['status']})" for s in diff["skipped_items"]))
     lines.append("changed: " + ("yes" if diff.get("changed") else "no (nothing to do)"))
     return "\n".join(lines)
 
