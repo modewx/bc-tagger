@@ -1,0 +1,31 @@
+/* Local-app header (collection + settings pages). */
+#appNav {
+  flex: 1 0 100%;
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px 14px;
+  font-size: 13px;
+  font-family: -apple-system, system-ui, sans-serif;
+}
+#appNav .brand { font-weight: 700; font-size: 15px; margin-right: 4px; }
+#appNav a { color: #3875d7; text-decoration: none; padding: 2px 0; border-bottom: 2px solid transparent; }
+#appNav a.active { color: #222; border-bottom-color: #3875d7; }
+#appNav .pill:first-of-type { margin-left: auto; }
+.pill {
+  display: inline-block;
+  padding: 2px 9px;
+  border-radius: 10px;
+  font-size: 12px;
+  background: #f0f0f0;
+  color: #555;
+  white-space: nowrap;
+  cursor: default;
+}
+.pill:empty { display: none; }
+.pill.ok { background: #e3f4e6; color: #1a7f37; }
+.pill.warn { background: #fff4d6; color: #8a5a00; }
+.pill.bad { background: #fdecea; color: #b42318; }
+@media (max-width: 640px) {
+  #appNav .pill:first-of-type { margin-left: 0; }
+}

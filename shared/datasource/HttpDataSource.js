@@ -18,8 +18,11 @@ export async function apiJson(path, { method = "GET", body } = {}) {
     data = text;
   }
   if (!res.ok) {
-    const detail = data && data.detail ? JSON.stringify(data.detail) : String(text).slice(0, 200);
-    const err = new Error(`${method} ${path}: HTTP ${res.status} ${detail}`);
+    const detail =
+      data && data.detail
+        ? typeof data.detail === "string" ? data.detail : JSON.stringify(data.detail)
+        : String(text).slice(0, 200);
+    const err = new Error(detail || `HTTP ${res.status}`);
     err.status = res.status;
     err.data = data;
     throw err;
@@ -28,10 +31,15 @@ export async function apiJson(path, { method = "GET", body } = {}) {
 }
 
 export class HttpDataSource {
-  /** @param {{bridge: import("./extensionBridge").ExtensionBridge}} opts */
-  constructor({ bridge }) {
+  /**
+   * @param {object} opts
+   * @param {import("./extensionBridge").ExtensionBridge} opts.bridge
+   * @param {import("./serverEvents").ServerEvents} opts.events
+   */
+  constructor({ bridge, events }) {
     this.name = "http";
     this.bridge = bridge;
+    this.events = events;
     this.pageFetchUnavailableReason =
       "Bandcamp fetches need the Bc Tagger extension (not connected to this page).";
   }
@@ -44,16 +52,18 @@ export class HttpDataSource {
   }
 
   async getItems() {
-    const data = await apiJson("/api/items");
+    const [data, pending] = await Promise.all([
+      apiJson("/api/items"),
+      apiJson("/api/tag-edits/pending").catch(() => []),
+    ]);
+    // Items with a queued edit the extension hasn't applied yet (the server
+    // already shows the queued tags in the mirror).
+    const pendingIds = new Set((pending || []).map((e) => e.item_id || e.id));
     const list = Array.isArray(data) ? data : (data && data.items) || [];
     const items = {};
     list.forEach((it) => {
       if (!it || it.id == null) return;
-      // A queued (not yet applied) edit is what the user last chose: show it.
-      if (Array.isArray(it.pending_tags)) {
-        it.tags = it.pending_tags;
-        it._tagsPending = true;
-      }
+      if (pendingIds.has(it.id)) it._tagsPending = true;
       items[it.id] = it;
     });
     return items;
@@ -110,20 +120,24 @@ export class HttpDataSource {
     return { ok: r.status >= 200 && r.status < 300, status: r.status, text: async () => r.text };
   }
 
+  // Vocabulary changes arrive from the extension (instantly) and from the
+  // server (after a sync).
   onTagsChanged(cb) {
     this.bridge.on("event", (event, data) => {
       if (event === "tagsChanged") cb(Array.isArray(data) ? data : []);
     });
+    this.events.on("tags", () => this.getTags().then(cb).catch(() => {}));
   }
 
-  // The extension tells us when its storage changed; give its sync push a
-  // moment to reach the server before re-reading the mirror.
+  // The server announces changed items (sync pushes, jobs); bursts (a full
+  // sync announces every item) collapse into one reload.
   onItemsChanged(cb) {
     let t = null;
-    this.bridge.on("event", (event) => {
-      if (event !== "itemsChanged" && event !== "synced") return;
+    const later = () => {
       clearTimeout(t);
-      t = setTimeout(cb, event === "synced" ? 100 : 2500);
-    });
+      t = setTimeout(cb, 400);
+    };
+    this.events.on("item", later);
+    this.events.on("ownership", later);
   }
 }

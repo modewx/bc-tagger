@@ -1108,6 +1108,7 @@ export function createCollectionPage(opts) {
   return {
     start,
     reload,
+    refreshRow,
     render: () => renderCollectionTable(currentView),
     getItems: () => allItems,
     statusEl,

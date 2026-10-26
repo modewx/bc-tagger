@@ -20,3 +20,6 @@ npm-debug.log*
 /db-backups
 taggedItems.json
 *.zip
+
+# local dev server data (BC_TAGGER_DATA_DIR for test servers)
+/.dev-data
