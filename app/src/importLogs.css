@@ -1,0 +1,36 @@
+/* Import logs (app/src/importLogs.js): the note after Import selected, the viewer, Past imports. */
+.import-log-note {
+  margin: 6px 0;
+  padding: 6px 10px;
+  background: #eef6ee;
+  border: 1px solid #b7d8b9;
+  border-radius: 6px;
+  font-size: 13px;
+}
+.import-log-note code, .import-logs-dir code { font-size: 12px; background: #f4f4f4; padding: 1px 4px; border-radius: 3px; }
+.import-log-note button, .log-row button, .import-logs-dir button {
+  font: inherit;
+  font-size: 12px;
+  padding: 2px 8px;
+  margin-left: 6px;
+  border: 1px solid #3875d7;
+  border-radius: 4px;
+  background: #fff;
+  color: #3875d7;
+  cursor: pointer;
+}
+.log-err { color: #b42318; font-size: 12px; margin-left: 6px; }
+.log-row { display: flex; flex-wrap: wrap; gap: 4px 10px; align-items: baseline; }
+.log-row .log-when { color: #555; font-size: 12px; min-width: 150px; }
+.log-row .log-counts { flex: 1 1 260px; }
+.log-row button { margin-left: 0; }
+.log-partial { background: #fdf3d8; color: #8a5a00; border: 1px solid #e9c46a; border-radius: 9px; padding: 0 7px; font-size: 11px; }
+dialog.confirm-dialog.wide { max-width: min(1100px, calc(100vw - 32px)); }
+.md-log h4 { margin: 0 0 8px; font-size: 15px; }
+.md-log h5 { margin: 12px 0 6px; font-size: 13px; }
+.md-log p { margin: 0 0 4px; }
+.md-log pre, pre.md-log { white-space: pre-wrap; font-size: 12px; }
+.md-table-wrap { overflow-x: auto; margin: 8px 0; }
+.md-table { border-collapse: collapse; font-size: 12px; }
+.md-table th, .md-table td { border: 1px solid #ddd; padding: 3px 6px; text-align: left; vertical-align: top; }
+.md-table th { background: #f6f6f6; }

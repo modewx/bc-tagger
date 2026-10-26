@@ -160,7 +160,7 @@ const FIELDS = {
     section: "lookups",
     type: "path",
     label: "Import log folder",
-    placeholder: "default: the server's data folder / import-logs",
+    placeholder: "default: import-logs in the server's data folder",
     help: "Import selected saves a log of everything it imported here, named by date and time.",
   },
   downloads_dir: {

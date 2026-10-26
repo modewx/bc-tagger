@@ -33,10 +33,13 @@ reachable, edits are queued on the server and applied by the extension on its ne
   - map unknown tags, then review the preview: tints, match sources, Notes, Locate again / Set file (search or
     Browse), Download, Open on Bandcamp, or **Link to import** on the Bandcamp page itself.
   - **Import selected** opens the collection with exactly the imported and merged items selected, newest
-    Modified first, ready for **Export Selected to RB**.
+    Modified first, ready for **Export Selected to RB**. It also saves an import log (JSON plus a Markdown summary,
+    named by date and time): **View** shows it, and **Show in Finder** shows the file.
+  - **Past imports** on the Import tab lists the logs, newest first, with their counts.
   - An open import survives leaving the page; the header shows where it is.
 - **Settings → General:** music folders, matching, downloads (folder and format), Bandcamp request pacing, the
-  lookup source (Bandcamp / MusicBrainz / both); **Rekordbox:** the target library and tag → playlist mapping.
+  lookup source (Bandcamp / MusicBrainz / both), the import log folder (not inside a music folder or on the music
+  drive); **Rekordbox:** the target library and tag → playlist mapping.
 
 Bandcamp is only reached by the server's paced lookups (if enabled) and by the extension in your own Chrome. The
 first "Client Challenge" (bot check) stops it and says so.

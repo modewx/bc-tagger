@@ -107,6 +107,11 @@ npm run test:e2e                         # Playwright e2e: own profile, server :
     shows only for owned items (the server's `owned`). **Download Full Release** shows when a track's album or EP is
     owned (`full_release`), and a **Download Full Releases** box makes Download owned missing do the same. Rows show
     the server's plain progress ("downloading 42 %", "retrying 1/3 after: …").
+  - **Import logs** (user request; the server writes them): after Import selected, the collection shows "Import
+    log saved: <file>" with View (the Markdown, rendered in a dialog) and Show in Finder. The Import tab lists
+    **Past imports**, and Settings has the folder (`import_log_dir`). A commit that stops part way still shows its
+    partial log. The e2e harness answers every Show in Finder itself, so tests never open Finder, and the test
+    server's logs stay in its own data folder.
 - **e2e:** no live Bandcamp (fixtures, recordings, the stub downloader); the app is built into its own folder so
   runs never reload the user's tab.
 - **Checked on copies** (`.e2e/phase5-e2e.mjs`, a sandbox `rekordbox_test`):

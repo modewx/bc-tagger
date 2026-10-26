@@ -13,6 +13,7 @@ import { startDevReload } from "./devReload";
 import { createStatusFilter, createSourceFilter, sourceOf, playableItem } from "./statusFilter";
 import { runExport } from "./exportFlow";
 import { createIndexStatus } from "./indexStatus";
+import { logNote } from "./importLogs";
 
 const bridge = new ExtensionBridge();
 const events = new ServerEvents();
@@ -335,5 +336,7 @@ async function refreshHealth() {
     page.statusEl.textContent =
       `${imported.summary ? `${imported.summary} ` : ""}The ${imported.ids.length} imported and merged items are selected, ` +
       "newest Modified first: Export Selected to RB adds them to rekordbox.";
+    const note = logNote(imported.log);
+    if (note) scroller.before(note);
   }
 })();

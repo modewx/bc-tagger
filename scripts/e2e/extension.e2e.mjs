@@ -85,6 +85,7 @@ const NO_BANDCAMP_DNS = "MAP bandcamp.com ~NOTFOUND, MAP *.bandcamp.com ~NOTFOUN
 const PIXEL = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII=", "base64");
 const escapedRequests = []; // Bandcamp requests with no fixture
 const standInPages = []; // release pages answered with the no-data stand-in
+const reveals = []; // Show in Finder calls (answered here: a test never opens Finder)
 
 // One second of 8 kHz 8-bit silence.
 function silentWav(rate = 8000) {
@@ -197,6 +198,13 @@ before(async () => {
     ],
   });
   await context.route(BANDCAMP_URL, routeBandcamp);
+  // Show in Finder never opens Finder from a test: the calls are recorded and answered here.
+  await context.route("**/api/import/logs/reveal", (route) => {
+    const body = route.request().postDataJSON() || {};
+    reveals.push(body);
+    const where = path.join(SERVER_DATA, "import-logs", body.name || "");
+    route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ revealed: where }) });
+  });
   const sw = context.serviceWorkers()[0] || (await context.waitForEvent("serviceworker"));
   extId = new URL(sw.url()).host;
   probe = await context.newPage();
@@ -1245,6 +1253,30 @@ test("import: lookups paused by Bandcamp's rate limiting resume from the preview
   await page.close();
 });
 
+test("Settings → Import: import_log_dir round-trips; a folder inside a music folder is refused", async () => {
+  const page = await context.newPage();
+  const custom = path.join(E2E, "import-logs-custom");
+  try {
+    await page.goto(SERVER + "/settings/");
+    await page.waitForSelector("#f_import_log_dir");
+    assert.equal(await page.inputValue("#f_import_log_dir"), "");
+    assert.match(await page.getAttribute("#f_import_log_dir", "placeholder"), /import-logs/);
+    await page.fill("#f_import_log_dir", custom);
+    await page.click("#saveBtn");
+    await page.waitForFunction(() => /Saved/.test(document.getElementById("saveState").textContent));
+    assert.equal((await api("/api/settings").then((d) => d.settings || d)).import_log_dir, custom);
+    const owned = (await api("/api/settings").then((d) => d.settings || d)).owned_root;
+    assert.ok(owned, "the test server has an owned folder");
+    await page.fill("#f_import_log_dir", path.join(owned, "logs"));
+    await page.click("#saveBtn");
+    await page.waitForFunction(() => /Not saved: .*music root/.test(document.getElementById("saveState").textContent));
+    assert.equal((await api("/api/settings").then((d) => d.settings || d)).import_log_dir, custom, "unchanged");
+  } finally {
+    await put({ import_log_dir: "" });
+    await page.close();
+  }
+});
+
 test("Settings → Import lookups: lookup_source (bandcamp by default) round-trips", async () => {
   const page = await context.newPage();
   try {
@@ -2289,6 +2321,38 @@ test("import end to end (real server): resolve, map tags, paste a URL, link from
   await page.waitForFunction(() => document.querySelector(".confirm-dialog .dialog-cancel") || !document.getElementById("exportShown").disabled, null, { timeout: 60000 });
   if (await page.$(".confirm-dialog .dialog-cancel")) await page.click(".confirm-dialog .dialog-cancel");
   assert.equal(exportPosts.length, 1, "only the dry run");
+
+  // The import log: saved in the test server's own data folder (never the user's), shown with
+  // View and Show in Finder (answered by the harness: no Finder from a test).
+  assert.match(res.log || "", /^\d{4}-\d{2}-\d{2}_\d{6}_.+\.json$/, JSON.stringify(res));
+  assert.equal(path.resolve(res.log_dir), path.resolve(SERVER_DATA, "import-logs"));
+  assert.ok(fs.existsSync(path.join(SERVER_DATA, "import-logs", res.log)) && fs.existsSync(path.join(SERVER_DATA, "import-logs", res.log_md)));
+  assert.ok((await page.textContent("#importLogNote")).includes(`Import log saved: ${res.log}`));
+  await page.click("#importLogNote .log-view");
+  await page.waitForSelector("#importLogDialog .md-table");
+  assert.match(await page.textContent("#importLogDialog h4"), /^Import: /);
+  assert.ok((await page.textContent("#importLogDialog .dialog-body")).includes("Holo Law"), "the rows are in it");
+  const revealsBefore = reveals.length;
+  await page.click("#importLogDialog .dialog-confirm"); // Show in Finder
+  await waitFor(async () => reveals.length > revealsBefore, { what: "Show in Finder from the viewer" });
+  assert.deepEqual(reveals[reveals.length - 1], { name: res.log });
+  await page.click("#importLogNote .log-reveal");
+  await waitFor(async () => reveals.length > revealsBefore + 1, { what: "Show in Finder from the note" });
+
+  // Past imports on the Import tab: newest first, its counts, View, and the folder.
+  const tab = await context.newPage();
+  await tab.goto(SERVER + "/settings/#import");
+  await tab.waitForSelector(`#importLogs .log-row[data-log="${res.log}"]`);
+  assert.equal(await tab.$eval("#importLogs .log-row", (r) => r.dataset.log), res.log, "newest first");
+  assert.match(await tab.textContent(`#importLogs .log-row[data-log="${res.log}"] .log-counts`), /^\d+ added · 2 merged · \d+ to Other · .*\d+ located/);
+  assert.ok((await tab.textContent(".import-logs-dir")).includes(path.join(SERVER_DATA, "import-logs")));
+  await tab.click(`#importLogs .log-row[data-log="${res.log}"] .log-view`);
+  await tab.waitForSelector("#importLogDialog .md-table");
+  await tab.click("#importLogDialog .dialog-cancel");
+  await tab.click("#importLogsFolder");
+  await waitFor(async () => reveals.length > revealsBefore + 2, { what: "Open folder" });
+  assert.deepEqual(reveals[reveals.length - 1], {});
+  await tab.close();
 
   // The collection: Other only.
   await page.click("#clearSelection");

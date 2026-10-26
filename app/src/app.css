@@ -1,6 +1,7 @@
 @import "../../shared/collection/collection.css";
 @import "./nav.css";
 @import "./dialog.css";
+@import "./importLogs.css";
 
 html { background: #fff; color: #222; color-scheme: light; }
 #collectionTable th { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }

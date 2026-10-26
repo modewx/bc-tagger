@@ -119,6 +119,7 @@ export function normBatch(b) {
     lookups: b.bandcamp_lookups || null, // {state: "on" | "off" | "stopped" | "paused", reason, error, at}
     lookupVia: b.lookup === "browser" ? "browser" : "server", // who makes the Bandcamp requests
     estimate: b.estimate || null, // {lookups, cached, requests, seconds, interval_s, text}
+    logs: Array.isArray(b.logs) ? b.logs : [], // its import logs (JSON file names), oldest first
     rows,
   };
 }

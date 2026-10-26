@@ -10,6 +10,7 @@ import { Jobs, progressText, resultText } from "./jobs";
 import { listBatches, getBatch, startImport, applyTagMap, discardBatch, resumeLookups } from "./importApi";
 import { rememberImport, rememberedImport, stepLabel, stepOf, stepUrl } from "./openImport";
 import { runBrowserLookups, lookupsText } from "./browserLookups";
+import { renderPastImports } from "./importLogs";
 
 const STAT_LABELS = [
   ["total", "rows"],
@@ -79,6 +80,7 @@ export function createImportTab(container, { bridge } = {}) {
   const openCard = el("div", { class: "import-open", id: "importOpen", hidden: true });
   const mapping = el("div", { class: "import-mapping", id: "importMapping", hidden: true });
   const batches = el("div", { id: "importBatches" });
+  const pastImports = el("div", { id: "importLogs" });
 
   container.append(
     el(
@@ -123,6 +125,13 @@ export function createImportTab(container, { bridge } = {}) {
       el("h2", {}, "Imports"),
       el("p", { class: "help" }, "Imports are kept until you discard them, so you can come back to a preview later."),
       batches
+    ),
+    el(
+      "section",
+      { id: "sec_import_logs", "data-tab": "import" },
+      el("h2", {}, "Past imports"),
+      el("p", { class: "help" }, "Each Import selected saves a log of what it imported (newest first)."),
+      pastImports
     )
   );
 
@@ -468,6 +477,7 @@ export function createImportTab(container, { bridge } = {}) {
         defaultTags.init();
       }
       const list = await loadBatches();
+      renderPastImports(pastImports);
       const legacy = new URLSearchParams(location.search).get("map"); // older links
       const open = list.filter((b) => !b.committed);
       const target = id || legacy || (open[0] && open[0].id);

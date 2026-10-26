@@ -13,12 +13,13 @@
  * @param {string} [o.id]            element id (tests)
  * @param {boolean} [o.infoOnly]     no confirm button (just Close); resolves false
  * @param {boolean} [o.confirmDisabled] show the confirm button but keep it disabled
+ * @param {boolean} [o.wide]         a wider dialog (tables)
  * @returns {Promise<boolean>}
  */
 export function confirmDialog(o) {
   return new Promise((resolve) => {
     const dlg = document.createElement("dialog");
-    dlg.className = "confirm-dialog" + (o.danger ? " danger" : "");
+    dlg.className = "confirm-dialog" + (o.danger ? " danger" : "") + (o.wide ? " wide" : "");
     if (o.id) dlg.id = o.id;
 
     const title = document.createElement("h3");

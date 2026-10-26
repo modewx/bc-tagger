@@ -18,6 +18,7 @@ import { statsLine } from "./importTab";
 import { rememberImport } from "./openImport";
 import { downloadFileTitle, downloadFlow, fullReleaseOf, fullReleasesToggle, stateLabel, trackDownloads } from "./downloads";
 import { playableItem } from "./statusFilter";
+import { logNote } from "./importLogs";
 
 const batchId = new URLSearchParams(location.search).get("batch");
 document.body.classList.add("import-page");
@@ -864,6 +865,14 @@ function notesColumn() {
 
 // --- actions ----------------------------------------------------------------------
 
+// The commit's log: "Import log saved: …" with View and Show in Finder.
+function showLogNote(r) {
+  const old = document.getElementById("importLogNote");
+  if (old) old.remove();
+  const note = logNote(r);
+  if (note) info.appendChild(note);
+}
+
 async function importSelected(statusEl, button) {
   const n = batch.rows.filter((r) => r.checked).length;
   if (!confirm(`Import ${n} selected rows? Rows found on Bandcamp go to the tagger (the extension adds them), the rest to Other. Duplicates merge tags.`)) return;
@@ -873,7 +882,16 @@ async function importSelected(statusEl, button) {
     const res = await commitBatch(batchId);
     rememberImport(null);
     const job = res && res.job_id ? await jobs.watch(res.job_id, (j) => (statusEl.textContent = `Importing: ${progressText(j)}`)) : null;
+    if (job && job.status === "error") {
+      // Stopped part way: the server still logs what it imported (the batch's last log).
+      statusEl.textContent = `Import stopped: ${job.error || "error"}. Import selected again carries on (rows already imported are skipped).`;
+      const logs = (await getBatch(batchId).catch(() => null) || {}).logs || [];
+      showLogNote(logs.length ? { log: logs[logs.length - 1], log_md: logs[logs.length - 1].replace(/\.json$/, ".md") } : null);
+      button.disabled = false;
+      return;
+    }
     const r = (job && job.result) || res || {};
+    const log = ["log", "log_md", "log_dir", "log_warning", "log_error"].reduce((o, k) => (r[k] ? { ...o, [k]: r[k] } : o), {});
     // Let the extension pick up the new Bandcamp items right away.
     if (bridge.connected) await bridge.call("syncNow", {}).catch(() => {});
     statusEl.textContent =
@@ -887,7 +905,7 @@ async function importSelected(statusEl, button) {
     // selected, newest Modified first, ready for "Export Selected to RB".
     if (Array.isArray(r.selected)) {
       try {
-        localStorage.setItem("bc_after_import", JSON.stringify({ ids: r.selected, at: Date.now(), batch: batchId, summary: statusEl.textContent }));
+        localStorage.setItem("bc_after_import", JSON.stringify({ ids: r.selected, at: Date.now(), batch: batchId, summary: statusEl.textContent, log }));
       } catch (e) {
         /* no handoff: the link below still opens the collection */
       }
@@ -897,6 +915,7 @@ async function importSelected(statusEl, button) {
     const link = el("a", "", "Open the collection →");
     link.href = "/";
     statusEl.append(" ", link);
+    showLogNote(log);
   } catch (e) {
     statusEl.textContent = `Import failed: ${e.message}`;
     button.disabled = false;
