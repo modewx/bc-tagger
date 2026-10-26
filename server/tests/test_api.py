@@ -116,3 +116,12 @@ def test_foreign_origins_and_hosts_blocked(client):
 def test_download_refuses_unfiltered(client):
     assert client.post("/api/download", json={"filter": "*"}).status_code == 400
     assert client.post("/api/download", json={"filter": "x", "number": 99}).status_code == 400
+
+
+def test_match_report(client):
+    from bc_tagger_server.report import build
+
+    wait(client, client.post("/api/locate", json={}).json()["job_id"])
+    text = build(client.svc)
+    assert "| located | 1 |" in text and "| missing | 1 |" in text
+    assert "Celebrate Death" in text

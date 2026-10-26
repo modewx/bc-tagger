@@ -260,6 +260,9 @@ def build_parser() -> argparse.ArgumentParser:
     from .downloader import add_cli as add_downloader_cli
 
     add_downloader_cli(sub)
+    from .report import add_cli as add_report_cli
+
+    add_report_cli(sub)
     return p
 
 
