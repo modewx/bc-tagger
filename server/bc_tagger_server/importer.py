@@ -358,7 +358,14 @@ def _lookup(fetcher, row: dict) -> None:
 # -- create ---------------------------------------------------------------------------------------
 
 
-def create_batch(svc, file_obj: dict, default_tags: list[str], name: str | None = None) -> dict:
+def _with_defaults(own: list[str], defaults: list[str], to_all: bool) -> tuple[list[str], list[str]]:
+    """(tags, default_added): defaults go to untagged rows, or with ``to_all`` are added to every row."""
+    added = [t for t in defaults if t not in own] if (to_all or not own) else []
+    return own + added, added
+
+
+def create_batch(svc, file_obj: dict, default_tags: list[str], name: str | None = None,
+                 default_tags_all: bool = False) -> dict:
     if not isinstance(file_obj, dict) or file_obj.get("format") != FORMAT:
         raise ImportError_(f"not a {FORMAT} file")
     items = file_obj.get("items")
@@ -374,9 +381,9 @@ def create_batch(svc, file_obj: dict, default_tags: list[str], name: str | None 
         row = {k: it.get(k) for k in ROW_FIELDS}
         row["kind"] = "album" if it.get("kind") == "album" else "track"
         row["flags"] = list(it.get("flags") or [])
-        tags = _clean_tags(it.get("tags"))
+        tags, added = _with_defaults(_clean_tags(it.get("tags")), default_tags, default_tags_all)
         row.update(
-            n=n, tags=tags or list(default_tags), default_tags_applied=not tags and bool(default_tags),
+            n=n, tags=tags, default_added=added, default_tags_applied=bool(added),
             checked=True, source="other", match=_empty_match(), bandcamp=None, duplicate=None,
             located={"status": "unknown", "best": None, "candidates": []}, committed=None,
         )
@@ -390,6 +397,7 @@ def create_batch(svc, file_obj: dict, default_tags: list[str], name: str | None 
     batch = {
         "batch_id": "imp-" + secrets.token_hex(4), "name": name or file_obj.get("source") or "import",
         "created_at": now_iso(), "status": "resolving", "error": None, "default_tags": default_tags,
+        "default_tags_all": bool(default_tags_all),
         "unknown_tags": unknown, "new_tags": [], "tag_mapping": None, "source_file": file_obj.get("source"),
         "revision": file_obj.get("revision"), "pending_releases": list(file_obj.get("pending_releases") or []),
         "job_id": None, "job_kind": None, "job_boot": svc.boot_id, "phase": "resolving", "stats": {},
@@ -588,7 +596,7 @@ def _live(svc, batch: dict) -> dict:
 
 
 LIST_FIELDS = ("batch_id", "name", "created_at", "status", "error", "stats", "estimate", "bandcamp_lookups",
-               "default_tags", "committed_at")
+               "default_tags", "default_tags_all", "committed_at")
 
 
 def get_batch(svc, batch_id: str) -> dict:
@@ -599,7 +607,7 @@ def get_batch(svc, batch_id: str) -> dict:
 
 def list_batches(svc) -> list[dict]:
     """``[{batch_id, name, created_at, status, step, progress, job, resumable, error, stats, estimate,
-    bandcamp_lookups, default_tags, committed_at, unknown_tags}]``, newest first."""
+    bandcamp_lookups, default_tags, default_tags_all, committed_at, unknown_tags}]``, newest first."""
     out = []
     for r in svc.store.query("SELECT data FROM import_batches ORDER BY created_at DESC"):
         b = json.loads(r["data"])
@@ -624,6 +632,7 @@ def update_row(svc, batch_id: str, n: int, changes: dict) -> dict:
     batch, rows, row = _editable(store, batch_id, n)
     if "tags" in changes:
         row["tags"] = _clean_tags(changes["tags"])
+        row["default_added"] = []  # the user's own list now: switching defaults never removes from it
     if "checked" in changes:
         row["checked"] = bool(changes["checked"])
     identity = False
@@ -775,6 +784,41 @@ def link_candidates(svc, payload: dict, limit: int = 5) -> list[dict]:
                             "bandcamp_id": (bc.get("item") or {}).get("id"), "via": bc.get("via")})
     out.sort(key=lambda r: (-r["score"], not r["hint_match"]))
     return out[:limit]
+
+
+def _default_added(batch: dict, row: dict) -> list[str]:
+    if "default_added" in row:
+        return [t for t in row["default_added"] if t in row["tags"]]
+    # batches from before default_added: defaults only ever went to untagged rows
+    return [t for t in batch.get("default_tags") or [] if t in row["tags"]] if row.get("default_tags_applied") else []
+
+
+def set_default_tags(svc, batch_id: str, tags: list[str], to_all: bool) -> dict:
+    """Re-apply the default tags to a batch's rows (not imported yet): first take off what earlier
+    defaults added, then add the new ones (to untagged rows, or with ``to_all`` to every row). Tags from
+    the file or the user's own edits are never removed. No lookups."""
+    store = svc.store
+    batch = load_batch(store, batch_id)
+    if batch["status"] == "committed":
+        raise ImportError_("the batch was already imported")
+    tags = _clean_tags(tags)
+    rows = load_rows(store, batch_id)
+    changed = 0
+    for row in rows:
+        if row.get("committed"):
+            continue
+        previous = _default_added(batch, row)
+        own = [t for t in row["tags"] if t not in previous]
+        new, added = _with_defaults(own, tags, to_all)
+        if new != row["tags"] or added != row.get("default_added"):
+            changed += new != row["tags"]
+            row.update(tags=new, default_added=added, default_tags_applied=bool(added))
+    batch.update(default_tags=tags, default_tags_all=bool(to_all))
+    _save_rows(store, batch_id, rows)
+    _refresh_stats(store, batch, rows)
+    svc.jobs.bus.publish("import", {"batch_id": batch_id, "phase": "tags", "current": changed, "total": len(rows)})
+    return {"default_tags": tags, "default_tags_all": bool(to_all), "rows_changed": changed,
+            "stats": batch["stats"], "rows": rows}
 
 
 def apply_tag_mapping(svc, batch_id: str, mapping: dict[str, list[str]], unmapped: str) -> dict:

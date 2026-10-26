@@ -69,6 +69,7 @@ class NamesBody(BaseModel):
 class ImportBody(BaseModel):
     file: dict
     default_tags: list[str] = Field(default_factory=list)
+    default_tags_all: bool = False  # add the default tags to every row, not only untagged ones
     name: Optional[str] = None
 
 
@@ -93,6 +94,11 @@ class LinkBody(BaseModel):
     tralbum: Optional[dict] = None
     embed: Optional[dict] = None
     page_url: Optional[str] = None
+
+
+class DefaultTagsBody(BaseModel):
+    tags: list[str] = Field(default_factory=list)
+    all: bool = False
 
 
 class TagMappingBody(BaseModel):
@@ -205,7 +211,7 @@ def create_app(service: Service | None = None) -> FastAPI:
     @app.post("/api/import")
     def import_create(body: ImportBody) -> dict:
         try:
-            batch, job = svc.start_import(body.file, body.default_tags, body.name)
+            batch, job = svc.start_import(body.file, body.default_tags, body.name, body.default_tags_all)
         except imp.ImportError_ as e:
             raise HTTPException(400, str(e)) from e
         return {"batch_id": batch["batch_id"], "job_id": job.id, "estimate": batch["estimate"]}
@@ -246,6 +252,10 @@ def create_app(service: Service | None = None) -> FastAPI:
     @app.post("/api/import/link-candidates")
     def import_link_candidates(body: LinkBody) -> list[dict]:
         return _import_call(imp.link_candidates, svc, body.model_dump(exclude_unset=True))
+
+    @app.put("/api/import/{batch_id}/default-tags")
+    def import_default_tags(batch_id: str, body: DefaultTagsBody) -> dict:
+        return _import_call(imp.set_default_tags, svc, batch_id, body.tags, body.all)
 
     @app.post("/api/import/{batch_id}/tags")
     def import_tags(batch_id: str, body: TagMappingBody) -> dict:

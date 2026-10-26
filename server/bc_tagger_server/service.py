@@ -642,10 +642,11 @@ class Service:
 
         return make_fetcher(self.store, min_interval=lambda: float(self.settings.get("bandcamp_request_interval_s")))
 
-    def start_import(self, file_obj: dict, default_tags: list[str], name: str | None = None):
+    def start_import(self, file_obj: dict, default_tags: list[str], name: str | None = None,
+                     default_tags_all: bool = False):
         from . import importer
 
-        batch = importer.create_batch(self, file_obj, default_tags, name)
+        batch = importer.create_batch(self, file_obj, default_tags, name, default_tags_all)
         job = self.jobs.submit("import", lambda ctx: importer.run_batch(self, batch["batch_id"], ctx))
         importer.set_job(self, batch["batch_id"], job)
         batch["job_id"] = job.id
