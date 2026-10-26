@@ -2,12 +2,16 @@
 //
 // "Auto" (default): every tag exports to a playlist named like the tag inside
 // the target folder. Unticking it opens one row per tag with a list of
-// playlist names (+ to add, × to remove). Name forms:
+// playlist names (+ to add, × to remove), each tag that has no saved mapping
+// starting with its own name (tags added to the vocabulary later too). A tag
+// whose names are all removed is kept as [] (not exported), so it isn't
+// prefilled again. Name forms:
 //   name        a playlist inside the target folder
 //   a/b         a path inside the target folder
 //   /a/b        a path from the library root
-// Missing playlists/folders are created by the export; a folder or a smart
-// playlist can't take songs. Tags with no names aren't exported.
+// Missing playlists/folders are created by the export (shown in yellow); a
+// folder or a smart playlist can't take songs (red). Tags with no names
+// aren't exported.
 
 const norm = (p) => String(p || "").replace(/^\/+|\/+$/g, "");
 
@@ -74,11 +78,12 @@ export function createMappingEditor({ onChange }) {
     if (!hit) {
       const parent = r.path.split("/").slice(0, -1).join("/");
       const parentKnown = !parent || playlists.some((p) => norm(p.path) === parent && p.kind === "folder");
-      return { cls: "new", text: parentKnown ? "will be created" : "will be created (with its folders)", title: r.path };
+      const text = `does not exist: will be created on export${parentKnown ? "" : " (with its folders)"}`;
+      return { cls: "new", text, title: `${r.path}\n${text}` };
     }
     if (hit.kind === "folder") return { cls: "bad", text: "is a folder", title: r.path };
     if (hit.kind === "smart") return { cls: "bad", text: "is a smart playlist", title: r.path };
-    return { cls: "ok", text: `exists${hit.count != null ? ` · ${hit.count}` : ""}`, title: r.path };
+    return { cls: "ok", text: `exists${hit.count != null ? ` · ${hit.count} track${hit.count === 1 ? "" : "s"}` : ""}`, title: r.path };
   }
 
   // --- rendering ------------------------------------------------------------------
@@ -100,12 +105,7 @@ export function createMappingEditor({ onChange }) {
     const del = el("button", "icon", "×");
     del.type = "button";
     del.title = "Remove this playlist";
-    const paint = () => {
-      const st = statusOf(input.value);
-      status.className = "map-status" + (st && st.cls ? " " + st.cls : "");
-      status.textContent = st ? st.text : "";
-      status.title = st && st.title ? st.title : "";
-    };
+    const paint = () => paintEntry(row, input, status);
     input.addEventListener("input", () => {
       paint();
       collect();
@@ -162,15 +162,26 @@ export function createMappingEditor({ onChange }) {
       : "Can't list the target library's playlists right now; names are still saved and created on export.";
   }
 
+  // An entry's status next to it; a playlist that will be created gets a
+  // light-yellow highlight, one that can't work stays red.
+  function paintEntry(row, input, status) {
+    const st = statusOf(input.value);
+    status.className = "map-status" + (st && st.cls ? " " + st.cls : "");
+    status.textContent = st ? st.text : "";
+    status.title = st && st.title ? st.title : "";
+    row.classList.toggle("missing", !!st && st.cls === "new");
+    row.classList.toggle("invalid", !!st && st.cls === "bad");
+  }
+
   function repaint() {
-    rows.querySelectorAll(".map-entry").forEach((row) => {
-      const input = row.querySelector("input");
-      const status = row.querySelector(".map-status");
-      const st = statusOf(input.value);
-      status.className = "map-status" + (st && st.cls ? " " + st.cls : "");
-      status.textContent = st ? st.text : "";
-      status.title = st && st.title ? st.title : "";
-    });
+    rows.querySelectorAll(".map-entry").forEach((row) => paintEntry(row, row.querySelector("input"), row.querySelector(".map-status")));
+  }
+
+  // Tags with no saved mapping start with their own name (custom mode only).
+  function prefill() {
+    const missing = tagsToShow().filter((t) => !(t in map));
+    missing.forEach((t) => (map[t] = [t]));
+    return missing.length > 0;
   }
 
   function applyFilter() {
@@ -179,19 +190,19 @@ export function createMappingEditor({ onChange }) {
   }
 
   function refreshMeta() {
-    const mapped = Object.keys(map).length;
+    const mapped = Object.values(map).filter((names) => names.length).length;
     summary.textContent = `${mapped} of ${tagsToShow().length} tags mapped`;
     warning.hidden = mode !== "custom" || mapped > 0;
     panel.hidden = mode !== "custom";
     autoBox.checked = mode !== "custom";
   }
 
-  // Read the inputs back into `map` (only tags with at least one name).
+  // Read the inputs back into `map` (a tag with every name removed: [], not exported).
   function collect() {
     const next = {};
     rows.querySelectorAll(".map-row").forEach((r) => {
       const names = [...r.querySelectorAll(".map-entry input")].map((i) => i.value.trim()).filter(Boolean);
-      if (names.length) next[r.dataset.tag] = [...new Set(names)];
+      next[r.dataset.tag] = [...new Set(names)];
     });
     map = next;
     refreshMeta();
@@ -200,6 +211,7 @@ export function createMappingEditor({ onChange }) {
 
   autoBox.addEventListener("change", () => {
     mode = autoBox.checked ? "auto" : "custom";
+    if (mode === "custom" && prefill()) render();
     refreshMeta();
     onChange();
   });
@@ -225,7 +237,9 @@ export function createMappingEditor({ onChange }) {
     },
     setVocabulary(tags) {
       vocab = Array.isArray(tags) ? tags : [];
+      const added = mode === "custom" && prefill(); // new tags start with their own name
       render();
+      if (added) onChange();
     },
     setTargetFolder(name) {
       folder = name || "";

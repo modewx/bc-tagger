@@ -182,3 +182,7 @@ section[hidden] { display: none; }
 .import-open[hidden] { display: none; }
 .import-open .button-link, .batch-row .button-link { margin-left: 6px; font-weight: 600; }
 .check-label { display: block; margin: 6px 0 2px; font-size: 14px; }
+/* Mapping entries: a playlist the export will create (light yellow), one that can't work (red). */
+.map-entry.missing input { background: #fff8dc; border-color: #e8d48a; }
+.map-entry.missing .map-status.new { color: #8a5a00; }
+.map-entry.invalid input { border-color: #e5a5a0; }

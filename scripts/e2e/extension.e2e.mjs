@@ -584,9 +584,10 @@ test("Settings: the tag → playlists mapping round-trips through the server", a
   assert.equal(await page.isChecked("#mappingAuto"), true);
   assert.equal(await page.isVisible(".mapping-panel"), false);
   await page.uncheck("#mappingAuto");
-  assert.equal(await page.isVisible(".mapping-warning"), true, "warns while no tag is mapped");
   const row = (tag) => page.locator(`.map-row[data-tag="${tag}"]`);
-  assert.equal(await row("must").locator("input").first().getAttribute("placeholder"), "must");
+  // Every tag starts with its own name, so nothing warns.
+  assert.equal(await row("must").locator("input").first().inputValue(), "must");
+  assert.equal(await page.isVisible(".mapping-warning"), false);
   await row("must").locator("input").first().fill("/DJ/Status/Must");
   await row("must").locator(".map-add").click();
   await row("must").locator("input").nth(1).fill("Favourites");
@@ -596,10 +597,12 @@ test("Settings: the tag → playlists mapping round-trips through the server", a
   await page.waitForFunction(() => /Saved/.test(document.getElementById("saveState").textContent));
   let s = await api("/api/settings");
   assert.equal(s.tag_playlist_mode, "custom");
-  assert.deepEqual(s.tag_playlist_map, { must: ["/DJ/Status/Must", "Favourites"], pool: ["Sub/Pool"] });
+  assert.deepEqual(s.tag_playlist_map.must, ["/DJ/Status/Must", "Favourites"]);
+  assert.deepEqual(s.tag_playlist_map.pool, ["Sub/Pool"]);
+  assert.deepEqual(s.tag_playlist_map.build, ["build"], "the others: their own name");
 
   await page.reload();
-  await page.waitForSelector(".map-row");
+  await page.waitForSelector('.map-row[data-tag="build"]'); // the vocabulary is in (it re-renders the rows)
   assert.equal(await row("must").locator("input").nth(1).inputValue(), "Favourites");
   await row("pool").locator("input").first().fill("a//b"); // invalid: refused by the server
   assert.match(await row("pool").locator(".map-status").textContent(), /empty folder name/);
@@ -613,6 +616,44 @@ test("Settings: the tag → playlists mapping round-trips through the server", a
   assert.equal(s.tag_playlist_mode, "auto");
   assert.deepEqual(s.tag_playlist_map.must, ["/DJ/Status/Must", "Favourites"]);
   await page.close();
+});
+
+test("Settings: unticking Auto prefills unmapped tags (saved ones untouched); a playlist to be created is yellow", async () => {
+  await put({ tag_playlist_mode: "auto", tag_playlist_map: { pool: ["Pool Party"], ritual: [] } });
+  const page = await context.newPage();
+  try {
+    await page.goto(SERVER + "/settings/#rekordbox");
+    await page.waitForSelector('.map-row[data-tag="build"]', { state: "attached" }); // the vocabulary is in
+    await page.uncheck("#mappingAuto");
+    const row = (tag) => page.locator(`.map-row[data-tag="${tag}"]`);
+    const entry = (tag) => row(tag).locator(".map-entry").first();
+    await page.waitForFunction(() => /exists/.test(document.querySelector('.map-row[data-tag="must"] .map-status').textContent));
+    // must: prefilled, and exists in the test library.
+    assert.equal(await entry("must").locator("input").inputValue(), "must");
+    assert.match(await entry("must").locator(".map-status").textContent(), /^exists · \d+ tracks?$/);
+    assert.equal(await entry("must").evaluate((e) => e.classList.contains("missing")), false);
+    // pool: the saved mapping is kept, and that playlist doesn't exist yet: yellow.
+    assert.equal(await entry("pool").locator("input").inputValue(), "Pool Party");
+    assert.equal(await entry("pool").locator(".map-status").textContent(), "does not exist: will be created on export");
+    assert.equal(await entry("pool").evaluate((e) => e.classList.contains("missing")), true);
+    assert.equal(await entry("pool").locator("input").evaluate((i) => getComputedStyle(i).backgroundColor), "rgb(255, 248, 220)");
+    // ritual: deliberately not exported (saved as []): stays empty.
+    assert.equal(await entry("ritual").locator("input").inputValue(), "");
+    // A bad name stays red, not yellow.
+    await entry("must").locator("input").fill("a//b");
+    assert.equal(await entry("must").evaluate((e) => e.classList.contains("missing")), false);
+    assert.equal(await entry("must").locator(".map-status").evaluate((s) => s.classList.contains("bad")), true);
+    await entry("must").locator("input").fill("must");
+    await page.click("#saveBtn");
+    await page.waitForFunction(() => /Saved/.test(document.getElementById("saveState").textContent));
+    const s = await api("/api/settings");
+    assert.deepEqual(s.tag_playlist_map.must, ["must"]);
+    assert.deepEqual(s.tag_playlist_map.pool, ["Pool Party"]);
+    assert.deepEqual(s.tag_playlist_map.ritual, []);
+  } finally {
+    await put({ tag_playlist_mode: "auto", tag_playlist_map: {} });
+    await page.close();
+  }
 });
 
 test("Settings: the main-collection opt-in asks first, and the header shows MAIN LIBRARY", async () => {
