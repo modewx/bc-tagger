@@ -39,6 +39,7 @@ class Service:
         if seed:
             self.seed_items()
         self._migrate_playlist_keys()
+        __import__("bc_tagger_server.collection", fromlist=["x"]).number_other_items(self.store)
 
     def _migrate_playlist_keys(self) -> None:
         """Export tracking used to be keyed by tag name; it is keyed by playlist path now."""
@@ -109,13 +110,17 @@ class Service:
         ids: Iterable[str] | None = None,
         sources: Iterable[str] | None = None,
         sort: str | None = None,
-        order: str = "desc",
+        order: str | None = None,
     ) -> tuple[int, list[dict]]:
-        from .collection import SOURCES, all_items, by_date
+        """``sort``: "order" ("#", the default; ascending unless ``order="desc"``; items without one last,
+        newest first) or "modified_at"/"date_added" (newest first unless ``order="asc"``; undated earliest)."""
+        from .collection import SOURCES, all_items, by_date, by_order
 
         items = all_items(self.store, sources or SOURCES)
         if sort in ("modified_at", "date_added"):  # undated items count as earlier than any date
             items = by_date(items, sort, newest_first=order != "asc")
+        else:
+            items = by_order(items, ascending=order != "desc")
         if ids is not None:
             wanted = set(ids)
             items = [it for it in items if it["id"] in wanted]
@@ -749,6 +754,7 @@ class Service:
             "version": __version__,
             "db": {"path": db_path, "is_test": is_test_library(db_path), "target": self.target().kind},
             "items": self.store.count_items(),
+            "max_order": __import__("bc_tagger_server.collection", fromlist=["x"]).max_order(self.store),
             "items_source": self.store.get_meta("items_source"),
             "build_id": self.build_id(),
         }

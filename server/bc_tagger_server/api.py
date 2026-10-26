@@ -178,8 +178,9 @@ def create_app(service: Service | None = None) -> FastAPI:
         offset: int = Query(0, ge=0),
         ids: Optional[str] = Query(None, description="comma-separated item ids"),
         source: Optional[str] = Query(None, description="bandcamp,other (default both)"),
-        sort: Optional[Literal["modified_at", "date_added"]] = Query(None, description="undated items sort earliest"),
-        order: Literal["desc", "asc"] = "desc",
+        sort: Optional[Literal["order", "modified_at", "date_added"]] = Query(
+            None, description='"order" ("#", default; ascending) or a date (newest first; undated earliest)'),
+        order: Optional[Literal["desc", "asc"]] = None,
     ) -> list[dict]:
         id_list = [i for i in ids.split(",") if i] if ids else None
         sources = [x for x in source.split(",") if x in ("bandcamp", "other")] if source else None

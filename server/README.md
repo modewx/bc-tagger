@@ -122,7 +122,17 @@ root (downloads and the downloader's folders, XML output, rekordbox backups and 
 first requires the volume to be mounted and the root to exist; folders are only created below an existing
 root. The refusal reads "music drive not mounted: /Volumes/<name> (plug it in; nothing was written)".
 
-## Items: dates and sorting
+## Items: "#", dates and sorting
+
+`order` is an item's "#": an integer from 1, one sequence across both collections, kept where the item lives.
+The extension numbers Bandcamp items and syncs them, and the server stores and returns what it sends. Import
+commits number every new item (pending adds and new `other` items), in row order, after `max_order`. Merges
+keep their number, and a retry after a partial commit carries on from there. `other` items from before this
+change are numbered once at startup, oldest first. `max_order` (also in `GET /api/health`) is the highest
+number in use across the mirror, unacked pending adds and `other` items. It's never less than the number of
+mirror items, so the extension can number its own items 1..N without clashing. `GET /api/items` sorts by
+"#" by default (`sort=order`, ascending; `order=desc` reverses; ties by id). Items without a number come
+last, newest first.
 
 `GET /api/items?sort=modified_at|date_added&order=desc|asc` sorts both collections by that date; items
 without it count as earlier than any date (last when newest first). `modified_at` (ISO, the extension's

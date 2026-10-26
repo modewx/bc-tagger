@@ -152,6 +152,45 @@ def merge_pending_item_tags(store: Store, item_id: str, tags: list[str], replace
 # -- both collections ------------------------------------------------------------------------
 
 
+def item_order(item: dict) -> int | None:
+    """The item's "#" (``order``, an integer ≥ 1), or None."""
+    value = item.get("order")
+    return value if isinstance(value, int) and not isinstance(value, bool) and value >= 1 else None
+
+
+def max_order(store: Store) -> int:
+    """The highest "#" in use (mirror items, unacked pending adds, Other items), and never less than the number
+    of Bandcamp items in the mirror, so numbers the extension gives its own items (1..N) stay free."""
+    valid = "json_type({col}, '{path}') = 'integer' AND json_extract({col}, '{path}') >= 1"
+    queries = (
+        f"SELECT MAX(json_extract(data, '$.order')) AS n FROM items WHERE {valid.format(col='data', path='$.order')}",
+        f"SELECT MAX(json_extract(payload, '$.item.order')) AS n FROM pending_adds WHERE acked_at IS NULL "
+        f"AND {valid.format(col='payload', path='$.item.order')}",
+        f"SELECT MAX(json_extract(data, '$.order')) AS n FROM other_items WHERE {valid.format(col='data', path='$.order')}",
+    )
+    return max([store.count_items()] + [store.query_one(q)["n"] or 0 for q in queries])
+
+
+def by_order(items: list[dict], ascending: bool = True) -> list[dict]:
+    """By "#" (ties by id); items without one last, in the order given."""
+    numbered = sorted((it for it in items if item_order(it)), key=lambda it: (item_order(it), it["id"]),
+                      reverse=not ascending)
+    return numbered + [it for it in items if not item_order(it)]
+
+
+def number_other_items(store: Store) -> int:
+    """Other items from before "#" existed get numbers after ``max_order``, oldest first (only those
+    without one, so running it again does nothing)."""
+    todo = [it for it in other_all(store) if not item_order(it)]
+    todo.sort(key=lambda it: (it.get("date_added") or "", it["line"] if isinstance(it.get("line"), int) else 0,
+                              it["id"]))
+    n = max_order(store)
+    for it in todo:
+        n += 1
+        other_put(store, {**it, "order": n})
+    return len(todo)
+
+
 def _newest_first(items: list[dict]) -> list[dict]:
     dated = [it for it in items if isinstance(it.get("date_added"), str)]
     undated = [it for it in items if not isinstance(it.get("date_added"), str)]
