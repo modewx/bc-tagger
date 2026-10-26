@@ -48,6 +48,8 @@ button.chip:hover { filter: brightness(0.95); border-color: #bbb; }
 .busy-note { font-size: 11px; color: #8a5a00; white-space: normal; }
 
 .toolbar-btn.job-btn { background: #1f7a4d; border-color: #1f7a4d; }
+/* Let the controls shrink so the toolbar wraps instead of widening the page. */
+#topControls { flex: 1 1 520px; max-width: 100%; }
 #toolbar { flex-wrap: wrap; }
 #refreshStatus { max-width: 520px; }
 
