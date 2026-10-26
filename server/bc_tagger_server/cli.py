@@ -108,6 +108,8 @@ def _diff_text(diff: dict[str, Any]) -> str:
         lines.append(f"  - removed [{e['tag']}] {_short(e['path'])}")
     if diff["missing_files"]:
         lines.append(f"missing files: {len(diff['missing_files'])}")
+    for f in diff.get("failed_files", []):
+        lines.append(f"  ! not added ({f['error']}): {_short(f['path'])}")
     if diff["skipped_items"]:
         lines.append(f"skipped (not located): {', '.join(s['id'] for s in diff['skipped_items'])}")
     lines.append("changed: " + ("yes" if diff.get("changed") else "no (nothing to do)"))

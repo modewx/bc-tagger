@@ -78,12 +78,26 @@ def rekordbox_status(store: Store, item: dict, local: dict, db_path: str) -> dic
     return {"status": status, "content_ids": content_ids, "playlists": playlists}
 
 
+def local_hints(local: dict, owned: dict) -> list[str]:
+    """Mismatches worth showing, e.g. owned on Bandcamp but only found in the Soulseek folder."""
+    best = local.get("best") or {}
+    if local.get("status") != "located":
+        return ["owned_not_located"] if owned["status"] == "owned" else []
+    if owned["status"] == "owned" and best.get("root_kind") == "not_owned":
+        return ["owned_but_only_in_not_owned_root"]
+    if owned["status"] == "not_owned" and best.get("root_kind") == "owned":
+        return ["in_owned_root_but_not_owned"]
+    return []
+
+
 def item_view(store: Store, item: dict, db_path: str) -> dict[str, Any]:
     local = local_status(store, item["id"])
+    owned = ownership_status(store, item)
+    local["hints"] = local_hints(local, owned)
     return {
         **item,
         "is_album": is_album(item),
         "local": local,
-        "owned": ownership_status(store, item),
+        "owned": owned,
         "rekordbox": rekordbox_status(store, item, local, db_path),
     }

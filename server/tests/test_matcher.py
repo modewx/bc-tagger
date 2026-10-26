@@ -2,11 +2,10 @@
 
 from __future__ import annotations
 
-import json
 
 import pytest
 
-from bc_tagger_server.items import load_export_json, select_items
+from bc_tagger_server.items import load_export_json
 from bc_tagger_server.matcher import FileIndex, MatchConfig, format_rank, locate_item, title_similarity
 from bc_tagger_server.normalize import parse_filename, parse_release_dir
 

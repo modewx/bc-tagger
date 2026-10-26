@@ -6,7 +6,6 @@ import asyncio
 import json
 import logging
 import re
-from pathlib import Path
 from typing import Any, Optional
 
 from fastapi import Body, FastAPI, HTTPException, Query, Request
@@ -58,6 +57,13 @@ class SelectionBody(BaseModel):
 
 class PathBody(BaseModel):
     path: str
+
+
+class DownloadBody(BaseModel):
+    filter: str
+    number: int = 1
+    format: str = "aiff-lossless"
+    dry_run: bool = False
 
 
 def create_app(service: Service | None = None) -> FastAPI:
@@ -174,6 +180,16 @@ def create_app(service: Service | None = None) -> FastAPI:
     @app.post("/api/rekordbox/xml")
     def rb_xml(body: SelectionBody = Body(default_factory=SelectionBody)) -> dict:
         return svc.write_xml(ids=body.ids, latest=body.latest)
+
+    @app.post("/api/download")
+    def download(body: DownloadBody) -> dict:
+        from .downloader import DownloadRefused, build_command
+
+        try:
+            build_command(svc.settings, body.filter, body.number, body.format)
+        except DownloadRefused as e:
+            raise HTTPException(400, str(e)) from e
+        return {"job_id": svc.start_download(body.filter, body.number, body.format, body.dry_run).id}
 
     # -- jobs & events -----------------------------------------------------------------
 

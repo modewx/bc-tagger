@@ -144,7 +144,9 @@ class Service:
         return self.jobs.submit(kind, run)
 
     def start_ownership_refresh(self):
-        return self._not_yet("ownership-refresh")
+        from .ownership import refresh
+
+        return self.jobs.submit("ownership-refresh", lambda ctx: refresh(self, ctx))
 
     # -- index & locate ---------------------------------------------------------------
 
@@ -299,10 +301,24 @@ class Service:
         self.jobs.bus.publish("item", {"id": item_id})
         return {"item_id": item_id, "path": path, "decision": decision, "item": self.get_item_view(item_id)}
 
-    def stream_file(self, request, path: str):
-        from fastapi import HTTPException
+    def start_download(self, string_filter: str, number: int = 1, audio_format: str = "aiff-lossless", dry_run: bool = False):
+        from .downloader import run
 
-        raise HTTPException(501, "file streaming is not implemented yet")
+        def job(ctx):
+            result = run(self.settings, string_filter, number, audio_format, dry_run=dry_run,
+                         progress=lambda n, t, line: ctx.progress(n, t, line))
+            if not dry_run and result.get("new_files"):
+                result["scan"] = {k: v for k, v in self.scan(ctx).items() if k != "roots"}
+            if not dry_run and not result["ok"]:
+                raise RuntimeError("downloader failed: " + "; ".join(result["errors"] or [f"exit {result['exit_code']}"]))
+            return result
+
+        return self.jobs.submit("download", job)
+
+    def stream_file(self, request, path: str):
+        from .stream import stream_response
+
+        return stream_response(self.store, path)
 
     # -- health -----------------------------------------------------------------------
 
@@ -312,6 +328,7 @@ class Service:
         db_path = self.db_path()
         return {
             "ok": True,
+            "name": "bc-tagger",
             "version": __version__,
             "db": {"path": db_path, "is_test": is_test_library(db_path)},
             "items": self.store.count_items(),

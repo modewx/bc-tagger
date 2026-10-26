@@ -73,6 +73,8 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     "xml_output_dir": "",
     "downloads_dir": str(TEST_OWNED_ROOT),
     "downloader_dir": str(DEFAULT_DOWNLOADER_DIR),
+    # Empty: <downloader_dir>/build/libs/bandcamp-collection-downloader.jar, then ~/Scripts/bc-download/...
+    "downloader_jar": "",
     "dev_extension_build_dir": str(DEV_EXTENSION_BUILD_DIR),
 }
 

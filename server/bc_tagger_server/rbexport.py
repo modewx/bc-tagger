@@ -26,6 +26,9 @@ from .views import located_tracks
 
 log = logging.getLogger(__name__)
 
+# Extensions pyrekordbox's add_content accepts (its FileType enum names).
+_FILE_TYPES = {"MP3", "MP4", "M4A", "AAC", "FLAC", "ALAC", "WAV", "AIFF", "AIF"}
+
 
 @dataclass
 class TrackPlan:
@@ -86,6 +89,17 @@ def find_content(db: Any, path: str):
         if row is not None:
             return row
     return None
+
+
+def content_path_index(db: Any) -> dict[str, str]:
+    """FolderPath -> Content ID for the whole DB (one query instead of a scan per track)."""
+    from pyrekordbox.masterdb.models import DjmdContent
+
+    index: dict[str, str] = {}
+    for cid, folder_path in db.query(DjmdContent.ID, DjmdContent.FolderPath):
+        if folder_path:
+            index.setdefault(unicodedata.normalize("NFC", folder_path), str(cid))
+    return index
 
 
 def _get_or_add(db: Any, model: Any, adder: str, name: str | None, **kw: Any):
@@ -255,6 +269,7 @@ def _export(
         "entries_kept_user": 0,
         "skipped_items": selection.skipped,
         "missing_files": [],
+        "failed_files": [],
         "items": len(selection.items),
         "tracks": len(selection.tracks),
         "backup": None,
@@ -285,15 +300,18 @@ def _export(
         diff["folder"]["id"] = folder.ID if folder is not None else None
 
         # 2. Content rows (looked up by path first)
+        known = content_path_index(db)
         total = len(selection.tracks)
         for n, path in enumerate(selection.tracks, 1):
             if not Path(path).is_file():
                 diff["missing_files"].append(path)
                 continue
-            row = find_content(db, path)
-            if row is not None:
-                content_ids[path] = str(row.ID)
+            existing = known.get(unicodedata.normalize("NFC", path))
+            if existing is not None:
+                content_ids[path] = existing
                 diff["content_existing"] += 1
+            elif Path(path).suffix.lstrip(".").upper() not in _FILE_TYPES:
+                diff["failed_files"].append({"path": path, "error": "file type not supported by rekordbox"})
             else:
                 diff["content_added"].append(path)
                 if not dry_run:
@@ -337,6 +355,17 @@ def _export(
 
         # 4. Playlists and entries
         playlists: dict[str, Any] = {}
+        songs_by_pl: dict[str, dict[str, list]] = {}
+
+        def songs_for(pl) -> dict[str, list]:
+            if pl is None:
+                return {}
+            if pl.ID not in songs_by_pl:
+                by_cid: dict[str, list] = {}
+                for song in playlist_songs(db, pl.ID):
+                    by_cid.setdefault(str(song.ContentID), []).append(song)
+                songs_by_pl[pl.ID] = by_cid
+            return songs_by_pl[pl.ID]
 
         def get_playlist(tag: str, create: bool):
             if tag in playlists:
@@ -360,8 +389,7 @@ def _export(
             )
             wanted = bool(new_claims.get((tag, cid))) or bool(others)
             pl = get_playlist(tag, create=wanted)
-            songs = playlist_songs(db, pl.ID) if pl is not None else []
-            present = [s for s in songs if str(s.ContentID) == cid]
+            present = list(songs_for(pl).get(cid, []))
             ours = store.query_one(
                 "SELECT song_id FROM rb_entries WHERE db_path = ? AND tag = ? AND content_id = ?",
                 (db_key, tag, cid),
@@ -377,12 +405,14 @@ def _export(
                 diff["entries_added"].append({"tag": tag, "content_id": cid, "path": _path_of(content_ids, cid)})
                 if not dry_run:
                     song = db.add_to_playlist(pl, cid)
+                    songs_for(pl).setdefault(cid, []).append(song)
                     new_entries.append((tag, cid, str(song.ID), str(pl.ID)))
             elif ours_song is not None:
                 diff["entries_removed"].append({"tag": tag, "content_id": cid, "path": _path_of(content_ids, cid)})
                 removed_entries.append((tag, cid))
                 if not dry_run:
                     remove_song(db, ours_song)
+                    songs_for(pl)[cid].remove(ours_song)
 
         changed = bool(
             diff["folder"]["created"]
