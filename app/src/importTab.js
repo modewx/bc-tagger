@@ -1,11 +1,14 @@
 // Settings → Import: pick a bc-tagger-import/1 file, choose default tags,
 // start the import (the server resolves rows on Bandcamp and locates them),
 // then map unknown tags and continue to the preview page.
+// An import stays open on the server until it's imported or discarded:
+// coming back here (or reloading) picks it up at its step (#import/<id>).
 
 import { apiJson } from "../../shared/datasource/HttpDataSource";
 import { ServerEvents } from "../../shared/datasource/serverEvents";
 import { Jobs, progressText, resultText } from "./jobs";
 import { listBatches, getBatch, startImport, applyTagMap, discardBatch } from "./importApi";
+import { rememberImport, rememberedImport, stepLabel, stepOf, stepUrl } from "./openImport";
 
 const STAT_LABELS = [
   ["total", "rows"],
@@ -68,6 +71,7 @@ export function createImportTab(container) {
   const tagsHolder = el("div", { id: "importDefaultTagsHolder" });
   const start = el("button", { type: "button", id: "importStart", disabled: true }, "Start import");
   const progress = el("div", { class: "import-progress", id: "importProgress", hidden: true });
+  const openCard = el("div", { class: "import-open", id: "importOpen", hidden: true });
   const mapping = el("div", { class: "import-mapping", id: "importMapping", hidden: true });
   const batches = el("div", { id: "importBatches" });
 
@@ -75,6 +79,7 @@ export function createImportTab(container) {
     el(
       "section",
       { id: "sec_import", "data-tab": "import" },
+      openCard,
       el("h2", {}, "Import a track list"),
       el(
         "p",
@@ -140,30 +145,117 @@ export function createImportTab(container) {
 
   // --- start + progress ---------------------------------------------------------
 
+  const setHash = (id) => history.replaceState(null, "", `${location.search}#import/${encodeURIComponent(id)}`);
+
   start.addEventListener("click", async () => {
     if (!fileData) return;
     start.disabled = true;
     progress.hidden = false;
     progress.className = "import-progress";
     progress.textContent = "Starting…";
-    let batchId;
+    let res;
     try {
-      const res = await startImport(fileData, fileName, defaultTags ? defaultTags.get() : []);
-      batchId = res.batch_id;
-      const est = res.estimate && res.estimate.text ? ` (${res.estimate.text})` : "";
-      progress.textContent = `Looking up rows on Bandcamp${est}…`;
-      const job = await jobs.watch(res.job_id, (j) => (progress.textContent = `Looking up rows on Bandcamp and locating files${est}: ${progressText(j)}`));
-      if (job.status === "error") throw new Error(job.error || "import failed");
-      progress.textContent = `Done: ${resultText(job)}`;
+      res = await startImport(fileData, fileName, defaultTags ? defaultTags.get() : []);
     } catch (e) {
       progress.className = "import-progress err";
       progress.textContent = `Import failed: ${e.message}`;
       start.disabled = false;
       return;
     }
-    await afterResolve(batchId);
+    rememberImport(res.batch_id);
+    setHash(res.batch_id);
+    const est = res.estimate && res.estimate.text ? ` (${res.estimate.text})` : "";
+    if (await follow(res.batch_id, res.job_id, est)) await afterResolve(res.batch_id);
+    start.disabled = false;
     loadBatches();
   });
+
+  // Follow a batch's lookups (its job) until they're done; also after a
+  // reload or coming back from another page: nothing was cancelled meanwhile.
+  let following = null;
+  async function follow(batchId, jobId, est = "") {
+    following = batchId;
+    progress.hidden = false;
+    progress.className = "import-progress";
+    progress.textContent = `Looking up rows on Bandcamp${est}…`;
+    const known = await fetch(`/api/jobs/${encodeURIComponent(jobId)}`).then((r) => r.ok, () => false);
+    if (!known) {
+      following = null;
+      progress.className = "import-progress err";
+      progress.textContent = "The lookups of this import stopped (the server restarted?). Discard it and start again.";
+      return false;
+    }
+    const job = await jobs.watch(jobId, (j) => {
+      if (following === batchId) progress.textContent = `Looking up rows on Bandcamp and locating files${est}: ${progressText(j)}`;
+    });
+    following = null;
+    if (job.status === "error") {
+      progress.className = "import-progress err";
+      progress.textContent = `Import failed: ${job.error || "error"}`;
+      return false;
+    }
+    progress.textContent = `Done: ${resultText(job)}`;
+    return true;
+  }
+
+  // Back to an open import's step: its progress, the mapping step, or (when
+  // asked for it by id) the preview.
+  async function resume(id, explicit) {
+    let batch;
+    try {
+      batch = await getBatch(id);
+    } catch (e) {
+      if (rememberedImport() === id) rememberImport(null); // discarded meanwhile
+      return;
+    }
+    if (batch.committed) {
+      if (rememberedImport() === id) rememberImport(null);
+      if (explicit) location.href = previewUrl(id);
+      return;
+    }
+    rememberImport(id);
+    showOpen(batch);
+    const step = stepOf(batch);
+    if (step === "progress") {
+      setHash(id);
+      if (following !== id && batch.job_id && (await follow(id, batch.job_id))) await afterResolve(id);
+    } else if (step === "mapping") {
+      setHash(id);
+      progress.hidden = false;
+      progress.className = "import-progress";
+      progress.textContent = statsLine(batch.stats);
+      if (mapping.hidden || mapping.dataset.batch !== id) showMapping(batch);
+    } else if (step === "review" && explicit) {
+      location.href = previewUrl(id);
+    }
+  }
+
+  // The open import, at the top of the tab.
+  function showOpen(batch) {
+    openCard.hidden = false;
+    openCard.innerHTML = "";
+    const go = el("a", { class: "button-link", id: "importContinue", href: stepUrl(batch) }, stepOf(batch) === "review" ? "Continue review →" : "Continue →");
+    const del = el("button", { type: "button", class: "secondary", id: "importDiscardOpen" }, "Discard");
+    del.addEventListener("click", () => discard(batch.id));
+    openCard.append(
+      el("strong", {}, "Open import: "),
+      `${batch.source || batch.id} · ${stepLabel(batch).replace(/^Import:? ?/, "")} `,
+      go,
+      " ",
+      del
+    );
+  }
+
+  async function discard(id) {
+    if (!confirm("Discard this import? Nothing is added to your collection; rows already imported stay.")) return;
+    await discardBatch(id).catch(() => {});
+    if (rememberedImport() === id) rememberImport(null);
+    openCard.hidden = true;
+    mapping.hidden = true;
+    progress.hidden = true;
+    history.replaceState(null, "", `${location.search}#import`);
+    loadBatches();
+  }
 
   async function afterResolve(batchId) {
     const batch = await getBatch(batchId);
@@ -179,6 +271,7 @@ export function createImportTab(container) {
 
   function showMapping(batch) {
     mapping.hidden = false;
+    mapping.dataset.batch = batch.id;
     mapping.innerHTML = "";
     const counts = {};
     batch.rows.forEach((r) => r.tags.forEach((t) => (counts[t] = (counts[t] || 0) + 1)));
@@ -239,44 +332,45 @@ export function createImportTab(container) {
       list = await listBatches();
     } catch (e) {
       batches.appendChild(el("p", { class: "help" }, e.status === 404 ? "This server can't import yet." : `Can't list imports: ${e.message}`));
-      return;
+      return [];
     }
     if (!list.length) {
       batches.appendChild(el("p", { class: "help" }, "No imports yet."));
-      return;
+      return list;
     }
     list.forEach((b) => {
       const when = b.created_at ? new Date(b.created_at).toLocaleString() : "";
       const del = el("button", { type: "button", class: "icon", title: "Discard this import" }, "×");
-      del.addEventListener("click", async () => {
-        if (!confirm("Discard this import? Rows already imported stay in your collection.")) return;
-        await discardBatch(b.id).catch(() => {});
-        loadBatches();
-      });
+      del.addEventListener("click", () => discard(b.id));
       batches.appendChild(
         el(
           "div",
-          { class: "batch-row" },
-          el("a", { href: previewUrl(b.id) }, b.source || b.id),
-          el("span", { class: "muted" }, [when, b.committed ? "imported" : b.status || "", statsLine(b.stats)].filter(Boolean).join(" · ")),
+          { class: "batch-row", "data-batch": b.id },
+          el("a", { href: b.committed ? previewUrl(b.id) : stepUrl(b) }, b.source || b.id),
+          el("span", { class: "muted" }, [when, b.committed ? "imported" : stepLabel(b).replace(/^Import:? ?/, ""), statsLine(b.stats)].filter(Boolean).join(" · ")),
+          b.committed ? "" : el("a", { class: "button-link", href: stepUrl(b) }, "Resume"),
           del
         )
       );
     });
+    return list;
   }
 
   return {
-    async show() {
+    // `id`: the import asked for (#import/<id>); otherwise the newest open one.
+    async show(id) {
       if (!defaultTags) {
         vocab = await apiJson("/api/tags").catch(() => []);
         defaultTags = tagSelect("importDefaultTags", vocab, vocab.includes("must") ? ["must"] : [], "420px");
         tagsHolder.appendChild(defaultTags.node);
         defaultTags.init();
       }
-      loadBatches();
-      // Coming back to an import that still needs its tags mapped.
-      const resume = new URLSearchParams(location.search).get("map");
-      if (resume) afterResolve(resume);
+      const list = await loadBatches();
+      const legacy = new URLSearchParams(location.search).get("map"); // older links
+      const open = list.filter((b) => !b.committed);
+      const target = id || legacy || (open[0] && open[0].id);
+      if (target) resume(target, !!(id || legacy));
+      else openCard.hidden = true;
     },
   };
 }

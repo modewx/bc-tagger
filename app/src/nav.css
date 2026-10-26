@@ -46,3 +46,9 @@
   text-decoration: none;
 }
 #mainLibraryBanner[hidden] { display: none; }
+
+/* The open import, on every page: where it is, linked back to its step. */
+#navImport { text-decoration: none; background: #e6f4ea; color: #1f7a4d; border: 1px solid #b7dfc4; }
+#navImport.step-progress { background: #fff4d6; color: #8a5a00; border-color: #f0d9a0; }
+#navImport.step-error { background: #fdecec; color: #b42318; border-color: #f2b8b5; }
+#navImport:hover { filter: brightness(0.96); }

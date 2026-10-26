@@ -17,6 +17,13 @@ const TABS = [
 ];
 let importTab = null;
 
+// "#import/<batch id>" → {tab: "import", arg: "<batch id>"}; unknown tabs → null.
+function fromHash() {
+  const [tab, ...rest] = location.hash.replace(/^#/, "").split("/");
+  if (!TABS.some(([id]) => id === tab)) return null;
+  return { tab, arg: rest.length ? decodeURIComponent(rest.join("/")) : null };
+}
+
 // [id, tab, title, help]
 const SECTIONS = [
   ["folders", "general", "Music folders", "Where the indexer looks for your files. Files are referenced in place, never moved."],
@@ -144,6 +151,7 @@ const FIELDS = {
 };
 
 const nav = buildNav("settings");
+nav.trackImports();
 const bridge = new ExtensionBridge();
 
 let loaded = {}; // last saved values (without presets)
@@ -538,21 +546,22 @@ function render(main, data) {
     folderInput.addEventListener("input", () => mapping.setTargetFolder(folderInput.value));
   }
   importTab = createImportTab(main);
-  const fromHash = TABS.map(([id]) => id).find((id) => location.hash === `#${id}`);
-  showTab(fromHash || "general");
+  const start = fromHash();
+  showTab(start ? start.tab : "general", start && start.arg);
 }
 
-function showTab(id) {
+function showTab(id, arg) {
   document.querySelectorAll("#tabs [data-tab]").forEach((b) => {
     b.classList.toggle("active", b.dataset.tab === id);
     b.setAttribute("aria-selected", b.dataset.tab === id ? "true" : "false");
   });
   document.querySelectorAll("main section[data-tab]").forEach((sec) => (sec.hidden = sec.dataset.tab !== id));
-  if (location.hash !== `#${id}`) history.replaceState(null, "", `${location.search}#${id}`);
+  const hash = arg ? `#${id}/${encodeURIComponent(arg)}` : `#${id}`;
+  if (location.hash !== hash) history.replaceState(null, "", `${location.search}${hash}`);
   // The Import tab isn't settings: no save bar there.
   const bar = document.getElementById("saveBar");
   if (bar) bar.hidden = id === "import";
-  if (id === "import" && importTab) importTab.show();
+  if (id === "import" && importTab) importTab.show(arg);
 }
 
 function fill(data) {
@@ -637,8 +646,8 @@ async function refreshHealth() {
   refreshHealth();
   startDevReload();
   window.addEventListener("hashchange", () => {
-    const id = TABS.map(([t]) => t).find((t) => location.hash === `#${t}`);
-    if (id) showTab(id);
+    const h = fromHash();
+    if (h) showTab(h.tab, h.arg);
   });
 
   window.addEventListener("beforeunload", (e) => {

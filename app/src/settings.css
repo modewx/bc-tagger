@@ -176,3 +176,8 @@ section[hidden] { display: none; }
 .import-actions { display: flex; gap: 10px; align-items: center; margin-top: 12px; flex-wrap: wrap; }
 .batch-row { display: grid; grid-template-columns: auto 1fr auto; gap: 10px; align-items: center; padding: 6px 0; border-bottom: 1px solid #f2f2f2; }
 .batch-row .muted, .muted { color: #888; font-size: 12px; }
+
+/* Settings → Import: the open import, at the top. */
+.import-open { margin: 0 0 14px; padding: 10px 12px; border: 1px solid #b7dfc4; border-radius: 6px; background: #f0faf4; font-size: 14px; }
+.import-open[hidden] { display: none; }
+.import-open .button-link, .batch-row .button-link { margin-left: 6px; font-weight: 600; }

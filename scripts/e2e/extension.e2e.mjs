@@ -1210,6 +1210,88 @@ test("Settings → Bandcamp requests: the three values round-trip, and both coll
   await page.close();
 });
 
+// --- An open import survives navigation and reloads ---------------------------------
+
+test("import: a reload during lookups follows the same job on to the mapping step (stubbed API)", async () => {
+  const stub = importStub(JSON.parse(fs.readFileSync(IMPORT_SAMPLE, "utf8")), { slowJob: 6 });
+  const page = await context.newPage();
+  await stub.install(page);
+  await page.goto(SERVER + "/settings/#import");
+  // The open batch is still looking up: the tab follows it (nothing is started).
+  await page.waitForFunction(() => /Looking up rows on Bandcamp/.test(document.getElementById("importProgress").textContent));
+  assert.match(page.url(), /#import\/e2e-b1$/);
+  assert.match(await page.textContent("#navImport"), /^Import: /);
+  await page.reload();
+  await page.waitForFunction(() => /Looking up rows on Bandcamp/.test(document.getElementById("importProgress").textContent));
+  await page.waitForSelector("#importMapping:not([hidden])", { timeout: 30000 });
+  assert.equal(await page.$eval("#importMapping", (m) => m.dataset.batch), "e2e-b1");
+  assert.equal(stub.calls.filter((c) => c.method === "POST" && c.path === "/api/import").length, 0, "nothing restarted");
+  assert.ok(!stub.calls.some((c) => c.method === "DELETE"), "nothing cancelled");
+  await page.close();
+});
+
+test("import: leaving for Collection and Settings returns to the same batch and step, and preview edits stay (real server)", async () => {
+  const items = JSON.parse(fs.readFileSync(path.join(ROOT, "server/tests/fixtures/import_rows.json"), "utf8")).slice(0, 6);
+  items[0].tags = [...(items[0].tags || []), "mourn"];
+  const file = path.join(E2E, "import-nav.json");
+  fs.writeFileSync(file, JSON.stringify({ format: "bc-tagger-import/1", source: "e2e-nav.txt", revision: 3, unknown_tags: { mourn: ["melancholic"] }, pending_releases: [], items }));
+  const page = await context.newPage();
+  page.on("dialog", (d) => d.accept());
+  let batchId = null;
+  try {
+    await page.goto(SERVER + "/settings/#import");
+    await page.setInputFiles("#importFile", file);
+    await page.waitForFunction(() => /6 rows from/.test(document.getElementById("importFileInfo").textContent));
+    await page.click("#importStart");
+    await page.waitForSelector("#importMapping:not([hidden])", { timeout: 60000 });
+    batchId = decodeURIComponent(page.url().split("#import/")[1]);
+    assert.match(batchId, /^imp-/);
+
+    // Away to the Collection: the header says where the import is and links back.
+    await page.click("#navLink_collection");
+    await page.waitForSelector("#navImport:not([hidden])");
+    assert.match(await page.textContent("#navImport"), /^Import: 1 tag to map/);
+    assert.equal(await page.getAttribute("#navImport", "href"), `/settings/#import/${batchId}`);
+    await page.click("#navLink_import");
+    await page.waitForSelector("#importMapping:not([hidden])");
+    assert.equal(await page.$eval("#importMapping", (m) => m.dataset.batch), batchId);
+    assert.deepEqual(await page.$$eval("#importMapping .map-row", (r) => r.map((x) => x.dataset.tag)), ["mourn"]);
+    await page.click("#mapCreate");
+    await page.waitForURL(new RegExp(`/import/\\?batch=${batchId}$`));
+
+    // Preview edits are saved as they're made: uncheck a row, change a row's tags.
+    await page.waitForFunction(() => document.querySelectorAll("#collectionTable tbody tr").length === 6);
+    await page.click("tr[data-key='r1'] .row-check");
+    await page.waitForFunction(() => /\(5\)/.test(document.getElementById("importSelected").textContent));
+    await page.locator("tr[data-key='r2']").scrollIntoViewIfNeeded();
+    await page.waitForSelector("tr[data-key='r2'] select.tag-editor", { state: "attached" });
+    await page.evaluate(() => $("tr[data-key='r2'] select.tag-editor").val(["must", "pool"]).trigger("change"));
+    await waitFor(() => api(`/api/import/${batchId}`).then((b) => !b.rows[1].checked && JSON.stringify(b.rows[2].tags) === JSON.stringify(["must", "pool"])), {
+      what: "the edits on the server",
+    });
+
+    // Away to Settings and back through the header: the same preview, edits there.
+    await page.click("#navLink_settings");
+    await page.waitForSelector("#navImport:not([hidden])");
+    assert.match(await page.textContent("#navImport"), /^Import ready to review \(6 rows\)/);
+    await page.click("#navLink_import");
+    await page.waitForURL(new RegExp(`/import/\\?batch=${batchId}$`));
+    await page.waitForFunction(() => document.querySelectorAll("#collectionTable tbody tr").length === 6);
+    assert.equal(await page.isChecked("tr[data-key='r1'] .row-check"), false);
+    assert.match(await page.textContent("#importSelected"), /\(5\)/);
+    assert.deepEqual(await page.$eval("tr[data-key='r2']", (tr) => [...tr.querySelectorAll("select.tag-editor option:checked")].map((o) => o.value)), ["must", "pool"]);
+
+    // The Import tab offers it too.
+    await page.goto(SERVER + "/settings/#import");
+    await page.waitForSelector("#importOpen:not([hidden])");
+    assert.match(await page.textContent("#importOpen"), /import-nav\.json · ready to review/);
+    assert.equal(await page.getAttribute("#importContinue", "href"), `/import/?batch=${batchId}`);
+  } finally {
+    if (batchId) await api(`/api/import/${batchId}`, { method: "DELETE" });
+    await page.close();
+  }
+});
+
 // --- Bandcamp's bot check ("Client Challenge") ---------------------------------------
 // Whatever gets it stops fetching from Bandcamp and says so; nothing retries it.
 

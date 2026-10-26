@@ -8,10 +8,12 @@
 // `unavailable`, which get the bot-check error A's resolver reports; "Maybe
 // Track" gets candidates; the rest are unmatched.
 
-export function importStub(file, { located = [], unavailable = [], paused = [] } = {}) {
+export function importStub(file, { located = [], unavailable = [], paused = [], slowJob = 0 } = {}) {
   const calls = [];
   let unknown = { ...file.unknown_tags };
-  let status = "ready";
+  // slowJob: the lookups job reports "running" for that many polls first.
+  let status = slowJob ? "resolving" : "ready";
+  let jobPolls = 0;
   const UNAVAILABLE = "Unavailable: Bandcamp search unavailable (the HTML search returns a bot-check page)";
   const itemFor = (c, it) => ({ id: c.id, raw_id: Number(c.id.slice(1)), tralbum_type: c.id[0], title: c.title, artist: c.artist, item_url: c.url });
   // A's row shape: row.bandcamp = {item, via} when the row has a Bandcamp item.
@@ -86,6 +88,7 @@ export function importStub(file, { located = [], unavailable = [], paused = [] }
     name: file.source,
     created_at: "2026-10-26T08:00:00Z",
     status,
+    job_id: "e2e-import-1",
     error: null,
     default_tags: ["must"],
     stats: stats(),
@@ -154,9 +157,14 @@ export function importStub(file, { located = [], unavailable = [], paused = [] }
       }
       return json(route, { detail: "not in the stub" }, 404);
     });
-    await page.route(/\/api\/jobs\/e2e-import-1$/, (route) =>
-      json(route, { id: "e2e-import-1", kind: "import", status: "done", progress: { current: rows.length, total: rows.length }, result: { batch_id: "e2e-b1", stats: stats() } })
-    );
+    await page.route(/\/api\/jobs\/e2e-import-1$/, (route) => {
+      jobPolls++;
+      if (status === "resolving" && jobPolls < slowJob) {
+        return json(route, { id: "e2e-import-1", kind: "import", status: "running", progress: { current: jobPolls, total: rows.length, message: `resolving ${jobPolls}/${rows.length}` } });
+      }
+      if (status === "resolving") status = "ready";
+      return json(route, { id: "e2e-import-1", kind: "import", status: "done", progress: { current: rows.length, total: rows.length }, result: { batch_id: "e2e-b1", stats: stats() } });
+    });
   }
 
   return { install, calls, rows };

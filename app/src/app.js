@@ -18,6 +18,7 @@ const events = new ServerEvents();
 const ds = new HttpDataSource({ bridge, events });
 const jobs = new Jobs(events);
 const nav = buildNav("collection");
+nav.trackImports(events);
 const statusFilter = createStatusFilter();
 const sourceFilter = createSourceFilter();
 

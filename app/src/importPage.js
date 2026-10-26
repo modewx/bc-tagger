@@ -15,6 +15,7 @@ import { sourceColumn, localPlayUrl } from "./columns";
 import { openPopover, closePopover } from "./popover";
 import { getBatch, updateRow, commitBatch, discardBatch, resumeLookups, rowToItem, matchSource, bandcampSearchUrl, openOnBandcampUrl, cleanBandcampUrl } from "./importApi";
 import { statsLine } from "./importTab";
+import { rememberImport } from "./openImport";
 import { playableItem } from "./statusFilter";
 
 const batchId = new URLSearchParams(location.search).get("batch");
@@ -23,6 +24,7 @@ const bridge = new ExtensionBridge();
 const events = new ServerEvents();
 const jobs = new Jobs(events);
 const nav = buildNav("import");
+nav.trackImports(events);
 
 let batch = null;
 let page = null;
@@ -525,6 +527,7 @@ async function importSelected(statusEl, button) {
   statusEl.textContent = "Importing…";
   try {
     const res = await commitBatch(batchId);
+    rememberImport(null);
     const job = res && res.job_id ? await jobs.watch(res.job_id, (j) => (statusEl.textContent = `Importing: ${progressText(j)}`)) : null;
     const r = (job && job.result) || res || {};
     // Let the extension pick up the new Bandcamp items right away.
@@ -550,6 +553,7 @@ async function importSelected(statusEl, button) {
 async function discard(statusEl) {
   if (!confirm("Discard this import? Nothing is added to your collection.")) return;
   await discardBatch(batchId).catch((e) => (statusEl.textContent = e.message));
+  rememberImport(null);
   location.href = "/settings/#import";
 }
 
@@ -560,6 +564,7 @@ async function discard(statusEl) {
     document.body.textContent = "No import selected. Start one in Settings → Import.";
     return;
   }
+  rememberImport(batchId); // edits are saved as they're made; this page can be left and reopened
   await bridge.connect(1000);
   nav.setExtension(bridge.info);
   const top = el("div", "import-top");

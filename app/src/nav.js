@@ -1,4 +1,9 @@
-// The local app's header: page links + server / extension / rekordbox status.
+// The local app's header: page links + server / extension / rekordbox status,
+// and the open import (if any), linked to its step.
+
+import { ServerEvents } from "../../shared/datasource/serverEvents";
+import { getBatch } from "./importApi";
+import { openImports, rememberImport, stepLabel, stepOf, stepUrl } from "./openImport";
 
 function pill(id) {
   const s = document.createElement("span");
@@ -30,6 +35,7 @@ export function buildNav(active) {
   brand.className = "brand";
   brand.textContent = "bc-tagger";
   nav.appendChild(brand);
+  const links = {};
   [
     ["collection", "/", "Collection"],
     ["settings", "/settings/", "Settings"],
@@ -38,13 +44,20 @@ export function buildNav(active) {
     const a = document.createElement("a");
     a.href = href;
     a.textContent = label;
+    a.id = `navLink_${id}`;
     if (id === active) a.className = "active";
+    links[id] = a;
     nav.appendChild(a);
   });
+  // The open import: where it is, linked back to its step.
+  const importPill = document.createElement("a");
+  importPill.id = "navImport";
+  importPill.className = "pill import-pill";
+  importPill.hidden = true;
   const server = pill("navServer");
   const ext = pill("navExt");
   const db = pill("navDb");
-  nav.append(server, ext, db);
+  nav.append(importPill, server, ext, db);
 
   function setPill(p, text, kind, title) {
     p.textContent = text;
@@ -52,8 +65,60 @@ export function buildNav(active) {
     p.title = title || "";
   }
 
+  // Keep the Import link and the pill on the open import; live progress from
+  // the server's import events and the job, never cancelling anything.
+  let tracking = null;
+  async function refreshImport(live) {
+    let open = [];
+    try {
+      open = await openImports();
+    } catch (e) {
+      return; // server offline: keep what's shown
+    }
+    const b = open[0];
+    if (!b) {
+      importPill.hidden = true;
+      links.import.href = "/settings/#import";
+      return;
+    }
+    rememberImport(b.id);
+    const href = stepUrl(b);
+    links.import.href = href;
+    importPill.href = href;
+    importPill.hidden = false;
+    importPill.textContent = stepLabel(b, live);
+    importPill.title = `${b.source || b.id}${open.length > 1 ? ` (+${open.length - 1} more open)` : ""}: click to continue`;
+    importPill.className = `pill import-pill step-${stepOf(b)}`;
+    if (stepOf(b) === "progress" && !live && tracking !== b.id) pollJob(b);
+  }
+  // A reload or a new page during lookups: follow the batch's job.
+  async function pollJob(b) {
+    tracking = b.id;
+    const full = await getBatch(b.id).catch(() => null);
+    const jobId = full && full.job_id;
+    while (jobId && tracking === b.id) {
+      const job = await fetch(`/api/jobs/${encodeURIComponent(jobId)}`).then((r) => (r.ok ? r.json() : null), () => null);
+      if (!job || job.status === "done" || job.status === "error") break;
+      importPill.textContent = stepLabel(b, job.progress);
+      await new Promise((r) => setTimeout(r, 2000));
+    }
+    tracking = null;
+    refreshImport();
+  }
+
   return {
     el: nav,
+    // Show the open import (call once per page; `events` is the page's ServerEvents, if any).
+    trackImports(events) {
+      const ev = events || new ServerEvents().start();
+      let t = null;
+      ev.on("import", (d) => {
+        clearTimeout(t);
+        const live = d && d.phase && !["done", "error", "linked", "row", "tags"].includes(d.phase) ? d : null;
+        t = setTimeout(() => refreshImport(live), live ? 0 : 300);
+      });
+      refreshImport();
+    },
     // settings: the server's settings (rekordbox_target, rekordbox_main_db_path)
     setTarget(settings) {
       const main = !!settings && settings.rekordbox_target === "main";
