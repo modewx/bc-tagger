@@ -48,6 +48,7 @@ export function importStub(file, { located = [], unavailable = [], paused = [], 
       catalog: null,
       year: null,
       tags: it.tags.length ? it.tags : ["must"],
+      file_tags: it.tags.slice(), // (stub only) the row's own tags from the file
       flags: it.flags || [],
       note: it.note || null,
       checked: true,
@@ -90,6 +91,8 @@ export function importStub(file, { located = [], unavailable = [], paused = [], 
     checked: rows.filter((r) => r.checked).length,
     needs_pick: rows.filter((r) => r.match.status === "candidates").length,
   });
+  let defaultTags = ["must"];
+  let defaultAll = false;
   let lookups = paused.length ? { state: "paused", reason: "rate_limited", error: "Bandcamp is rate-limiting; try again later" } : { state: "on" };
   const batch = () => ({
     ...live(),
@@ -100,7 +103,8 @@ export function importStub(file, { located = [], unavailable = [], paused = [], 
     status,
     job_id: "e2e-import-1",
     error: status === "interrupted" ? "The server restarted during the lookups. Resume to continue (answers already fetched come from the cache)." : null,
-    default_tags: ["must"],
+    default_tags: defaultTags,
+    default_tags_all: defaultAll,
     stats: stats(),
     unknown_tags: unknown,
     new_tags: [],
@@ -132,6 +136,13 @@ export function importStub(file, { located = [], unavailable = [], paused = [], 
         lookups = { state: "on" };
         rows.forEach((r) => r.match.reason === "rate_limited" && Object.assign(r.match, { status: "none", reason: null, error: null }));
         return json(route, { job_id: "e2e-import-1", estimate: { lookups: 1, text: "~1 lookup ≈ 3 s" } });
+      }
+      if (p === "/api/import/e2e-b1/default-tags") {
+        ({ tags: defaultTags, all: defaultAll } = body);
+        rows.forEach((r) => {
+          r.tags = defaultAll || !r.file_tags.length ? [...new Set([...r.file_tags, ...defaultTags])] : r.file_tags.slice();
+        });
+        return json(route, batch());
       }
       if (p === "/api/import/e2e-b1/tags") {
         rows.forEach((r) => {

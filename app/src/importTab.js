@@ -69,6 +69,7 @@ export function createImportTab(container) {
   const fileInput = el("input", { type: "file", id: "importFile", accept: ".json,application/json" });
   const fileInfo = el("div", { class: "help", id: "importFileInfo" });
   const tagsHolder = el("div", { id: "importDefaultTagsHolder" });
+  const allBox = el("input", { type: "checkbox", id: "importDefaultAll" });
   const start = el("button", { type: "button", id: "importStart", disabled: true }, "Start import");
   const progress = el("div", { class: "import-progress", id: "importProgress", hidden: true });
   const openCard = el("div", { class: "import-open", id: "importOpen", hidden: true });
@@ -94,7 +95,8 @@ export function createImportTab(container) {
         { class: "field" },
         el("label", { class: "field-label" }, "Default tags"),
         tagsHolder,
-        el("div", { class: "help" }, "Added to rows that have no tags. Tags already in the file are kept.")
+        el("label", { class: "check-label" }, allBox, " Add default tags to all tracks"),
+        el("div", { class: "help" }, "Off: only tracks with no tags get them. On: every track gets them on top of its own tags.")
       ),
       el("div", { class: "field" }, start, progress),
       mapping
@@ -155,7 +157,7 @@ export function createImportTab(container) {
     progress.textContent = "Starting…";
     let res;
     try {
-      res = await startImport(fileData, fileName, defaultTags ? defaultTags.get() : []);
+      res = await startImport(fileData, fileName, defaultTags ? defaultTags.get() : [], allBox.checked);
     } catch (e) {
       progress.className = "import-progress err";
       progress.textContent = `Import failed: ${e.message}`;

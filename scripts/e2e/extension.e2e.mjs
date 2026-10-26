@@ -27,6 +27,7 @@ const E2E = path.join(ROOT, ".e2e");
 const EXT_DIR = path.join(E2E, "extension");
 const PROFILE = path.join(E2E, "profile");
 const SERVER_DATA = path.join(E2E, "server-data");
+const APP_DIST = path.join(E2E, "app-dist"); // the app under test (not app/dist)
 const PORT = Number(process.env.E2E_PORT || 8767);
 const SERVER = `http://127.0.0.1:${PORT}`;
 const EXPORT_JSON =
@@ -156,7 +157,11 @@ before(async () => {
     env: { ...process.env, BC_DEFAULT_SERVER_URL: SERVER },
     stdio: "ignore",
   });
-  execFileSync("npm", ["run", "build:app"], { cwd: ROOT, stdio: "ignore" }); // test the current source
+  // Test the current source, built into its own folder: app/dist is what the
+  // user's server serves (rebuilding it reloads their open tabs).
+  fs.rmSync(APP_DIST, { recursive: true, force: true });
+  execFileSync("npm", ["run", "build:app"], { cwd: ROOT, env: { ...process.env, BC_APP_OUT: APP_DIST }, stdio: "ignore" });
+  fs.writeFileSync(path.join(SERVER_DATA, "settings.json"), JSON.stringify({ app_dist_dir: APP_DIST }));
 
   // The import resolver answers only from Session A's recorded responses
   // (BC_TAGGER_BANDCAMP_FIXTURES); as a backstop, the server's own requests
@@ -1207,6 +1212,39 @@ test("Settings → Bandcamp requests: the three values round-trip, and both coll
   await page.waitForTimeout(800);
   assert.equal((await api("/api/settings").then((d) => d.settings || d)).bandcamp_browser_concurrency, 1);
   await put({ bandcamp_request_interval_s: 1, bandcamp_browser_concurrency: 2, bandcamp_browser_spacing_ms: 400 });
+  await page.close();
+});
+
+test("import: Add default tags to all tracks, at the start and on an open batch's preview (stubbed API)", async () => {
+  const stub = importStub(JSON.parse(fs.readFileSync(IMPORT_SAMPLE, "utf8")));
+  const page = await context.newPage();
+  await stub.install(page);
+  await page.goto(SERVER + "/settings/#import");
+  await page.setInputFiles("#importFile", IMPORT_SAMPLE);
+  await page.waitForFunction(() => /rows from/.test(document.getElementById("importFileInfo").textContent));
+  assert.equal(await page.isChecked("#importDefaultAll"), false, "off by default");
+  await page.check("#importDefaultAll");
+  await page.click("#importStart");
+  await waitFor(() => stub.calls.some((c) => c.method === "POST" && c.path === "/api/import"), { what: "the create call" });
+  const create = stub.calls.find((c) => c.method === "POST" && c.path === "/api/import");
+  assert.equal(create.body.default_tags_all, true);
+  assert.deepEqual(create.body.default_tags, ["must"]);
+
+  // On the preview of an open batch: shown with the default tags, off; on → every track gets them.
+  await page.goto(SERVER + "/import/?batch=e2e-b1");
+  await page.waitForFunction(() => document.querySelectorAll("#collectionTable tbody tr").length === 7);
+  assert.match(await page.textContent(".import-defaults"), /Default tags: must · Add default tags to all tracks/);
+  assert.equal(await page.isChecked("#previewDefaultAll"), false);
+  const tagsOf = (key) => page.$eval(`tr[data-key='${key}']`, (tr) => [...tr.querySelectorAll("select.tag-editor option:checked")].map((o) => o.value));
+  await page.locator("tr[data-key='r0']").scrollIntoViewIfNeeded();
+  await page.waitForSelector("tr[data-key='r0'] select.tag-editor", { state: "attached" });
+  assert.deepEqual(await tagsOf("r0"), ["drums"]);
+  await page.check("#previewDefaultAll");
+  await waitFor(() => stub.calls.some((c) => c.path.endsWith("/default-tags")), { what: "the default-tags call" });
+  assert.deepEqual(stub.calls.find((c) => c.path.endsWith("/default-tags")).body, { tags: ["must"], all: true });
+  await page.waitForFunction(() => [...document.querySelectorAll("tr[data-key='r0'] select.tag-editor option:checked")].some((o) => o.value === "must"));
+  assert.deepEqual((await tagsOf("r0")).sort(), ["drums", "must"]);
+  assert.equal(await page.isChecked("#previewDefaultAll"), true);
   await page.close();
 });
 

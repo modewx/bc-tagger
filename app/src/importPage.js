@@ -13,7 +13,7 @@ import { Jobs, progressText } from "./jobs";
 import { buildNav } from "./nav";
 import { sourceColumn, localPlayUrl } from "./columns";
 import { openPopover, closePopover } from "./popover";
-import { getBatch, updateRow, commitBatch, discardBatch, resumeLookups, rowToItem, matchSource, bandcampSearchUrl, openOnBandcampUrl, cleanBandcampUrl } from "./importApi";
+import { getBatch, updateRow, commitBatch, discardBatch, resumeLookups, setDefaultTags, rowToItem, matchSource, bandcampSearchUrl, openOnBandcampUrl, cleanBandcampUrl } from "./importApi";
 import { statsLine } from "./importTab";
 import { rememberImport } from "./openImport";
 import { playableItem } from "./statusFilter";
@@ -94,6 +94,28 @@ const info = el("div", "import-info");
 const title = el("h1", "import-title", "Import preview");
 const stats = el("div", "import-stats");
 const pending = el("div", "import-pending");
+// The batch's default tags, and whether they go on every track.
+const defaults = el("label", "import-defaults");
+const defaultsAll = document.createElement("input");
+defaultsAll.type = "checkbox";
+defaultsAll.id = "previewDefaultAll";
+const defaultsText = el("span", "import-defaults-tags");
+defaults.append(defaultsText, defaultsAll, "Add default tags to all tracks");
+defaultsAll.addEventListener("change", async () => {
+  const want = defaultsAll.checked;
+  defaultsAll.disabled = true;
+  page.statusEl.textContent = want ? "Adding the default tags to all tracks…" : "Default tags only on untagged tracks…";
+  try {
+    await setDefaultTags(batchId, batch.defaultTags, want);
+    page.statusEl.textContent = "";
+  } catch (e) {
+    defaultsAll.checked = !want;
+    page.statusEl.textContent = e.status === 404 || e.status === 405 ? "This server can't change the default tags yet." : `Not changed: ${e.message}`;
+  }
+  defaultsAll.disabled = false;
+  await page.reload();
+  renderInfo();
+});
 const unavailable = el("div", "import-unavailable");
 unavailable.id = "lookupUnavailable";
 const proc = el("div", "import-process");
@@ -113,12 +135,15 @@ showSel.id = "importShow";
 SHOW.forEach(([v, label]) => showSel.appendChild(new Option(label, v)));
 const showLabel = el("label", "import-show-label", "Show ");
 showLabel.appendChild(showSel);
-info.append(title, stats, showLabel, unavailable, pending, proc);
+info.append(title, stats, showLabel, defaults, unavailable, pending, proc);
 const showFilter = (item) => (SHOW.find(([v]) => v === showSel.value) || SHOW[0])[2](rowNow(item));
 
 function renderInfo() {
   if (!batch) return;
   title.textContent = `Import preview · ${batch.source || batch.id}`;
+  defaultsText.textContent = `Default tags: ${batch.defaultTags.join(", ") || "none"} · `;
+  defaults.hidden = !batch.defaultTags.length || batch.committed;
+  if (!defaultsAll.disabled) defaultsAll.checked = batch.defaultTagsAll;
   const confirmN = batch.rows.filter((r) => r.needsConfirmation).length;
   stats.textContent = [statsLine(batch.stats), confirmN ? `${confirmN} to confirm` : ""].filter(Boolean).join(" · ");
   const blockedRows = batch.rows.filter((r) => r.lookupUnavailable && r.source !== "bandcamp");

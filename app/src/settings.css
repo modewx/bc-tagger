@@ -181,3 +181,4 @@ section[hidden] { display: none; }
 .import-open { margin: 0 0 14px; padding: 10px 12px; border: 1px solid #b7dfc4; border-radius: 6px; background: #f0faf4; font-size: 14px; }
 .import-open[hidden] { display: none; }
 .import-open .button-link, .batch-row .button-link { margin-left: 6px; font-weight: 600; }
+.check-label { display: block; margin: 6px 0 2px; font-size: 14px; }

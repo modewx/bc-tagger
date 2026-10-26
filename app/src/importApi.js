@@ -112,6 +112,7 @@ export function normBatch(b) {
         : null, // older servers' lists: from stats
     newTags: b.new_tags || [],
     defaultTags: b.default_tags || [],
+    defaultTagsAll: !!b.default_tags_all, // default tags on every row, not only untagged ones
     pendingReleases: Array.isArray(b.pending_releases) ? b.pending_releases : [],
     lookups: b.bandcamp_lookups || null, // {state: "on" | "off" | "stopped" | "paused", reason, error, at}
     estimate: b.estimate || null, // {lookups, cached, requests, seconds, interval_s, text}
@@ -121,8 +122,11 @@ export function normBatch(b) {
 
 export const listBatches = () => apiJson("/api/import").then((l) => (Array.isArray(l) ? l : (l && l.batches) || []).map(normBatch));
 export const getBatch = (id) => apiJson(`/api/import/${enc(id)}`).then(normBatch);
-export const startImport = (file, name, defaultTags) =>
-  apiJson("/api/import", { method: "POST", body: { file, name, default_tags: defaultTags } });
+export const startImport = (file, name, defaultTags, defaultTagsAll = false) =>
+  apiJson("/api/import", { method: "POST", body: { file, name, default_tags: defaultTags, default_tags_all: defaultTagsAll } });
+// Change an open batch's default tags: `all` puts them on every row, else only on untagged rows.
+export const setDefaultTags = (id, tags, all) =>
+  apiJson(`/api/import/${enc(id)}/default-tags`, { method: "PUT", body: { tags, all } });
 // patch: any of {tags, checked, choose: <candidate id> | null, artist, title, album, re_resolve,
 //        match_url (a Bandcamp page the user found; stored, not fetched), link_item}
 export const updateRow = (id, n, patch) =>
