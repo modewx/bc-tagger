@@ -1,0 +1,37 @@
+{
+ "fan_id": 1000001,
+ "collection_summary": {
+  "fan_id": 1000001,
+  "username": "e2e-fan",
+  "url": "https://bandcamp.com/e2e-fan",
+  "tralbum_lookup": {
+   "a563830364": {
+    "item_type": "a",
+    "item_id": 563830364,
+    "band_id": 64923519,
+    "purchased": true
+   },
+   "t1004723757": {
+    "item_type": "t",
+    "item_id": 1004723757,
+    "band_id": 2303857521,
+    "purchased": true
+   },
+   "t1011914860": {
+    "item_type": "t",
+    "item_id": 1011914860,
+    "band_id": 3025827559,
+    "purchased": true
+   },
+   "a1000000001": {
+    "item_type": "a",
+    "item_id": 1000000001,
+    "band_id": 1,
+    "purchased": true
+   }
+  },
+  "follows": {
+   "following": {}
+  }
+ }
+}

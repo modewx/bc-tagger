@@ -1,0 +1,28 @@
+{
+  "_about": "Recorded Bandcamp answers for the e2e suite, reduced to what the extension reads. URL (no query) -> fixture file, or a status for pages that are gone. Values come from the user's repaired data (live checks on 2026-10-25). Anything not here and not a generic stand-in (stream, image, other embeds) fails the test that asked for it.",
+  "https://bandcamp.com/api/fan/2/collection_summary": {
+    "file": "collection_summary.json",
+    "type": "application/json"
+  },
+  "https://infiniteexpanse.bandcamp.com/album/synergy-trilogy": {
+    "file": "album-synergy-trilogy.html"
+  },
+  "https://joaquincornejomusic.bandcamp.com/track/buma-ii": {
+    "file": "track-buma-ii.html"
+  },
+  "https://hhythemacumbas.bandcamp.com/track/ergot-glitter": {
+    "file": "track-ergot-glitter.html"
+  },
+  "https://cosmicbridge.bandcamp.com/album/om-unit-presents-cosmology-dark-matter": {
+    "file": "album-om-unit-presents-cosmology-dark-matter.html"
+  },
+  "https://bandcamp.com/EmbeddedPlayer/track=1110893101/size=large/": {
+    "file": "embed-track-1110893101.html"
+  },
+  "https://joaquincornejomusic.bandcamp.com/track/this-track-does-not-exist-e2e": {
+    "status": 404
+  },
+  "https://bandcamp.com/EmbeddedPlayer/track=999000404/size=large/": {
+    "status": 404
+  }
+}

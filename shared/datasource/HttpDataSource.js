@@ -72,10 +72,11 @@ export class HttpDataSource {
   }
 
   async setItemTags(id, tags) {
-    // `other` items belong to the server, not the extension.
-    if (this.sources && this.sources[id] === "other") {
+    // `other` items belong to the server, not the extension: the server
+    // applies their edits right away.
+    if ((this.sources && this.sources[id] === "other") || /^o[0-9a-f]+$/.test(id)) {
       try {
-        await apiJson(`/api/items/${encodeURIComponent(id)}`, { method: "PUT", body: { tags } });
+        await apiJson("/api/tag-edits", { method: "POST", body: { id, tags } });
         return { ok: true };
       } catch (e) {
         return { ok: false, error: e.message };

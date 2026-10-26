@@ -1,7 +1,8 @@
 // Import preview (/import/?batch=<id>): the batch's rows in the shared
-// collection table, with a checkbox per row, the Bandcamp match and its
-// alternatives, located state, flags/notes, editable tags (kept in the batch),
-// tints (not located: light red; duplicate: cream yellow) and "Import selected".
+// collection table, with a checkbox per row, the Bandcamp match (where it came
+// from, its alternatives, Find on Bandcamp, a pasted URL), located state,
+// flags/notes, editable tags (kept in the batch), tints (not located: light
+// red; duplicate: cream yellow) and "Import selected".
 
 import { createCollectionPage } from "../../shared/collection/collectionPage";
 import { HttpDataSource, apiJson } from "../../shared/datasource/HttpDataSource";
@@ -11,7 +12,7 @@ import { Jobs, progressText } from "./jobs";
 import { buildNav } from "./nav";
 import { sourceColumn, localPlayUrl } from "./columns";
 import { openPopover, closePopover } from "./popover";
-import { getBatch, updateRow, commitBatch, discardBatch, rowToItem } from "./importApi";
+import { getBatch, updateRow, commitBatch, discardBatch, rowToItem, matchSource, bandcampSearchUrl, cleanBandcampUrl } from "./importApi";
 import { statsLine } from "./importTab";
 import { playableItem } from "./statusFilter";
 
@@ -31,6 +32,9 @@ function el(tag, cls, text) {
   return e;
 }
 const rowOf = (item) => item._row;
+// The batch's current row for an item (a reload replaces the row objects that
+// event handlers of other rows captured).
+const rowNow = (item) => (batch && batch.rows.find((r) => r.n === item._row.n)) || item._row;
 const pct = (c) => (typeof c === "number" ? `${Math.round(c <= 1 ? c * 100 : c)}%` : "");
 
 // Rows of the batch as table items. Edits go to the batch, not the collection.
@@ -52,6 +56,12 @@ class ImportDataSource extends HttpDataSource {
     } catch (e) {
       return { ok: false, error: e.message };
     }
+  }
+  // No Bandcamp page fetches from the preview (no lazy thumbnails or stream
+  // lookups for rows matched by URL): Bandcamp lookup is paused, and a long
+  // list would mean a fetch per row.
+  canFetchPages() {
+    return false;
   }
   // Refreshed stream links belong to the preview only.
   persistFiles() {
@@ -90,13 +100,16 @@ function renderInfo() {
   const btn = document.getElementById("importSelected");
   if (btn) {
     btn.textContent = `Import selected (${checked})`;
-    btn.disabled = !checked || !!batch.committed_at;
+    btn.disabled = !checked || batch.committed;
   }
-  proc.textContent = batch.committed_at
-    ? `Imported ${new Date(batch.committed_at).toLocaleString()}.`
+  proc.textContent = batch.committed
+    ? `Imported${batch.committed_at ? " " + new Date(batch.committed_at).toLocaleString() : ""}.`
+    : batch.status === "error"
+    ? `Import failed: ${batch.error || "unknown error"}`
     : batch.status && !/done|ready|resolved|complete/.test(batch.status)
     ? `Processing: ${batch.status}`
-    : "Review the rows, fix matches and tags, then Import selected. Rows found on Bandcamp are added to the tagger; the rest to Other.";
+    : "Review the rows, fix matches and tags, then Import selected. Rows matched on Bandcamp are added to the tagger; " +
+      "the rest to Other. To match a row, open its Match: Find on Bandcamp, then paste the page's URL.";
 }
 
 // --- columns ---------------------------------------------------------------------
@@ -125,7 +138,7 @@ function selectColumn() {
       box.type = "checkbox";
       box.className = "row-check";
       box.checked = rowOf(item).checked;
-      box.addEventListener("change", () => setChecked([rowOf(item)], box.checked));
+      box.addEventListener("change", () => setChecked([rowNow(item)], box.checked));
       cell.appendChild(box);
     },
   };
@@ -161,50 +174,114 @@ function syncSelectAll() {
 async function patchRow(row, patch, note) {
   closePopover();
   page.statusEl.textContent = note || "Saving…";
+  let saved = null;
   try {
-    await updateRow(batchId, row.n, patch);
+    saved = await updateRow(batchId, row.n, patch);
     page.statusEl.textContent = "";
   } catch (e) {
     page.statusEl.textContent = `Not saved: ${e.message}`;
   }
   await page.reload();
   page.refreshRow(`r${row.n}`);
+  return saved;
 }
 
 function candidateLabel(c) {
   return [c.title, c.artist || c.band_name].filter(Boolean).join(" — ") || c.url || "?";
 }
 
+// Match source → chip label, class and the sentence in the popover.
+const SOURCES = {
+  collection: ["in collection", "match-bc", "Already in your collection: its tags are merged on import."],
+  search: ["search", "match-bc", "Found by the Bandcamp search."],
+  picked: ["picked", "match-bc", "Picked by you from the search results."],
+  url: ["URL", "match-bc", "Set by you from a pasted Bandcamp URL."],
+  file: ["from file", "match-bc", "The Bandcamp URL given in the import file."],
+  candidates: ["options", "match-cand", "The search found possible matches: pick one."],
+  error: ["lookup failed", "match-none", "The Bandcamp lookup failed for this row."],
+  none: ["unmatched", "match-none", "No Bandcamp match yet: Find on Bandcamp, then paste the page's URL."],
+};
+const sourceInfo = (row) => SOURCES[matchSource(row)] || [matchSource(row), "match-bc", `Match source: ${matchSource(row)}.`];
+
+function findLink(row, text) {
+  const a = el("a", "pop-link find-bc", text || "Find on Bandcamp ↗");
+  a.href = bandcampSearchUrl(row);
+  a.target = "_blank";
+  a.rel = "noopener";
+  a.title = `Search Bandcamp for “${[row.artist, row.title].filter(Boolean).join(" ")}” in a new tab`;
+  return a;
+}
+
+// Paste a Bandcamp page URL to set the match by hand.
+function urlForm(row) {
+  const wrap = el("div", "pop-url");
+  const input = document.createElement("input");
+  input.className = "pop-input match-url";
+  input.placeholder = "Paste a Bandcamp track or album URL";
+  input.value = row.match.url || "";
+  const err = el("div", "pop-meta pop-err");
+  const use = el("button", "primary", "Use URL");
+  const submit = async () => {
+    const url = cleanBandcampUrl(input.value);
+    if (!url) {
+      err.textContent = "That isn't a Bandcamp track or album page (…/track/… or …/album/…).";
+      return;
+    }
+    const saved = await patchRow(row, { match_url: url }, "Saving the URL…");
+    const took = saved && (saved.match.url === url || (saved.match.chosen && saved.match.chosen.url === url));
+    if (saved && !took) page.statusEl.textContent = "The server didn't keep the URL (it doesn't take pasted URLs yet).";
+  };
+  use.addEventListener("click", submit);
+  input.addEventListener("keydown", (e) => e.key === "Enter" && submit());
+  const actions = el("div", "pop-actions");
+  actions.appendChild(use);
+  wrap.append(el("div", "pop-label", "Bandcamp URL"), input, err, actions);
+  return wrap;
+}
+
 function matchPopover(anchor, row) {
   openPopover(anchor, (pop) => {
-    pop.appendChild(el("div", "pop-head", row.source === "bandcamp" ? "Bandcamp match" : "Not on Bandcamp"));
+    const [, , sentence] = sourceInfo(row);
+    pop.appendChild(el("div", "pop-head", row.source === "bandcamp" ? "Bandcamp match" : "No Bandcamp match"));
+    pop.appendChild(el("div", "pop-meta match-source", sentence));
+    if (row.duplicate) {
+      const d = row.duplicate;
+      pop.appendChild(
+        el("div", "pop-meta", `In your collection as ${[d.title, d.artist].filter(Boolean).join(" — ") || d.of}${d.tags.length ? ` (tags: ${d.tags.join(", ")})` : ""}.`)
+      );
+    }
     pop.appendChild(el("div", "pop-meta", `From the file (line ${row.line ?? "?"}): ${row.raw || ""}`));
-    const cands = row.match.candidates.length ? row.match.candidates : row.match.candidate ? [row.match.candidate] : [];
-    cands.forEach((c, i) => {
+    const chosenId = row.match.chosen && (row.match.chosen.id ?? row.match.chosen.url);
+    const cands = row.match.candidates.length ? row.match.candidates : row.match.chosen ? [row.match.chosen] : [];
+    cands.forEach((c) => {
       const r = el("div", "pop-file");
       const name = el("a", "pop-file-name", candidateLabel(c));
       if (c.url) {
         name.href = c.url;
         name.target = "_blank";
+        name.rel = "noopener";
       }
-      r.append(name, el("div", "pop-file-meta", [c.kind || c.type, pct(c.confidence ?? c.score)].filter(Boolean).join(" · ")));
-      const chosen = row.match.candidate && (row.match.candidate.id ?? row.match.candidate.url) === (c.id ?? c.url);
+      r.append(name, el("div", "pop-file-meta", [c.type || c.kind, pct(c.confidence ?? c.score)].filter(Boolean).join(" · ")));
+      const chosen = chosenId != null && (c.id ?? c.url) === chosenId;
       const btns = el("div", "pop-actions");
       const use = el("button", chosen ? "" : "primary", chosen ? "Chosen" : "Use this");
-      use.disabled = chosen;
-      use.addEventListener("click", () => patchRow(row, { candidate: c.id ?? c.url ?? i }, "Fetching the Bandcamp page…"));
+      use.disabled = chosen || !c.id;
+      use.addEventListener("click", () => patchRow(row, { choose: c.id }));
       btns.appendChild(use);
       r.appendChild(btns);
       pop.appendChild(r);
     });
+    pop.appendChild(urlForm(row));
     const foot = el("div", "pop-actions");
+    foot.appendChild(findLink(row));
     if (row.source === "bandcamp") {
       const none = el("button", "danger", "Not on Bandcamp");
-      none.addEventListener("click", () => patchRow(row, { candidate: null }));
+      none.title = "Import this row into Other instead";
+      none.addEventListener("click", () => patchRow(row, { choose: null }));
       foot.appendChild(none);
     }
-    const manual = el("button", "", "Set manually…");
-    manual.addEventListener("click", () => {
+    const edit = el("button", "", "Edit artist/title…");
+    edit.addEventListener("click", () => {
       pop.innerHTML = "";
       pop.appendChild(el("div", "pop-head", "Artist and title"));
       const a = document.createElement("input");
@@ -214,19 +291,14 @@ function matchPopover(anchor, row) {
       t.placeholder = "Title";
       t.value = row.title || "";
       [a, t].forEach((i) => (i.className = "pop-input"));
-      const save = el("button", "primary", "Look up again");
-      save.addEventListener("click", () => patchRow(row, { artist: a.value.trim() || null, title: t.value.trim() }, "Looking up on Bandcamp…"));
+      const save = el("button", "primary", "Save");
+      save.addEventListener("click", () => patchRow(row, { artist: a.value.trim() || null, title: t.value.trim() }));
       const actions = el("div", "pop-actions");
       actions.appendChild(save);
-      pop.append(a, t, actions);
+      pop.append(a, t, el("div", "pop-meta", "Used for the row and for Find on Bandcamp."), actions);
       t.focus();
     });
-    foot.appendChild(manual);
-    const q = encodeURIComponent([row.artist, row.title].filter(Boolean).join(" "));
-    const search = el("a", "pop-link", "Search Bandcamp");
-    search.href = `https://bandcamp.com/search?q=${q}`;
-    search.target = "_blank";
-    foot.appendChild(search);
+    foot.appendChild(edit);
     pop.appendChild(foot);
   });
 }
@@ -237,18 +309,20 @@ function matchColumn() {
     label: "Match",
     after: "artist",
     sortKey: "match",
-    compare: (a, b) => (rowOf(a).match.confidence ?? -1) - (rowOf(b).match.confidence ?? -1),
+    compare: (a, b) => matchSource(rowOf(a)).localeCompare(matchSource(rowOf(b))) || (rowOf(a).match.confidence ?? -1) - (rowOf(b).match.confidence ?? -1),
     render(cell, key, item) {
       cell.classList.add("no-row-play", "match-cell");
       const row = rowOf(item);
-      const c = row.match.candidate;
-      const chip = el("button", "chip " + (row.source === "bandcamp" ? "match-bc" : "match-none"));
-      chip.textContent = row.source === "bandcamp" && c ? `${pct(c.confidence ?? row.match.confidence) || "match"}` : "none";
-      chip.title = c ? candidateLabel(c) : "Not found on Bandcamp: click to pick a candidate or set it manually";
-      chip.addEventListener("click", () => matchPopover(chip, row));
+      const [label, cls] = sourceInfo(row);
+      const src = matchSource(row);
+      const chip = el("button", `chip ${cls}`);
+      chip.dataset.source = src;
+      const conf = src === "search" ? pct(row.match.confidence) : "";
+      chip.textContent = src === "candidates" ? `${row.match.candidates.length} ${label}` : [label, conf].filter(Boolean).join(" ");
+      chip.title = (row.match.chosen ? candidateLabel(row.match.chosen) + "\n" : "") + sourceInfo(row)[2];
+      chip.addEventListener("click", () => matchPopover(chip, rowNow(item)));
       cell.appendChild(chip);
-      const alts = row.match.candidates.length;
-      if (alts > 1) cell.appendChild(el("span", "muted", ` ${alts} options`));
+      if (row.source !== "bandcamp") cell.appendChild(findLink(row, "Find ↗"));
     },
   };
 }
@@ -282,8 +356,9 @@ function notesColumn() {
       cell.classList.add("status-cell", "notes-cell");
       const row = rowOf(item);
       if (row.duplicate) {
+        const dup = row.duplicate;
         const d = el("span", "note-icon dup-icon", "⧉");
-        d.title = `Already in your collection (${row.duplicate}): its tags will be merged.`;
+        d.title = `Already in your collection (${[dup.title, dup.artist].filter(Boolean).join(" — ") || dup.of}): its tags will be merged.`;
         cell.appendChild(d);
       }
       if (row.flags.length || row.note) {
@@ -314,6 +389,7 @@ async function importSelected(statusEl, button) {
     statusEl.textContent =
       "Imported: " +
       Object.entries(r)
+        .map(([k, v]) => [k, Array.isArray(v) ? v.length : v])
         .filter(([, v]) => typeof v === "number")
         .map(([k, v]) => `${k.replace(/_/g, " ")} ${v}`)
         .join(", ");

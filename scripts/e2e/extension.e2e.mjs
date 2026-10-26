@@ -7,17 +7,20 @@
 // It builds "Bc Tagger (e2e)" into .e2e/extension (default server
 // http://127.0.0.1:8767), starts server/bct on :8767 with a fresh data dir in
 // .e2e/server-data (seeded from the export JSON), and loads the export through
-// the extension's Import page. With the Bandcamp cookie file present, it also
-// checks ownership via the extension (cookie values are never printed).
-// Nothing here writes rekordbox or touches :8765 / :8766.
+// the extension's Import page.
+// Nothing here writes rekordbox or touches :8765 / :8766, and nothing reaches
+// Bandcamp: its hosts don't resolve in this browser, and the pages the tests
+// need are recorded fixtures (scripts/e2e/fixtures/bandcamp). A Bandcamp
+// request with no fixture fails the test that made it.
 
-import { test, before, after } from "node:test";
+import { test, before, after, afterEach } from "node:test";
 import assert from "node:assert/strict";
 import { spawn, execFileSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { chromium } from "playwright";
+import { importStub } from "./importStub.mjs";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
 const E2E = path.join(ROOT, ".e2e");
@@ -29,8 +32,6 @@ const SERVER = `http://127.0.0.1:${PORT}`;
 const EXPORT_JSON =
   process.env.E2E_EXPORT_JSON ||
   "/Users/alvaroh/Projects/auto-rekordbox/tagger-test-db/bc-tagger-export-2026-10-26.json";
-const COOKIES =
-  process.env.E2E_COOKIES || "/Users/alvaroh/Projects/auto-rekordbox/cookies/bandcamp.com_cookies_10:2026.txt";
 const ITEM = "t283914533"; // "The System Works", in the export
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -65,31 +66,80 @@ function extPage(name) {
   return `chrome-extension://${extId}/${name}`;
 }
 
-// Netscape cookies.txt → Playwright cookies (bandcamp only). Values are never logged.
-function loadCookies(file) {
-  if (!fs.existsSync(file)) return [];
-  return fs
-    .readFileSync(file, "utf8")
-    .split("\n")
-    .map((line) => {
-      const httpOnly = line.startsWith("#HttpOnly_");
-      if (httpOnly) line = line.slice("#HttpOnly_".length);
-      if (!line || line.startsWith("#")) return null;
-      const [domain, , cpath, secure, expires, name, value] = line.split("\t");
-      if (!name || !/bandcamp\.com$/.test(domain)) return null;
-      return {
-        name,
-        value: (value || "").trim(),
-        domain,
-        path: cpath || "/",
-        secure: secure === "TRUE",
-        httpOnly,
-        expires: Number(expires) > 0 ? Number(expires) : -1,
-        sameSite: "Lax",
-      };
-    })
-    .filter(Boolean);
+// --- Recorded Bandcamp ------------------------------------------------------------
+// Bandcamp answers automated browsers with a bot check, so the tests never go
+// there. Pages and API answers come from FIXTURES/index.json (URL → file or
+// status); streams, images and other embedded players get stand-ins, and so do
+// other release pages (the collection pages fetch one for a row with no art as
+// it scrolls into view): a page with no data, recorded in standInPages so a
+// test can assert it fetched none. Anything else is blocked and fails the test
+// that asked for it.
+
+const FIXTURES = path.join(ROOT, "scripts/e2e/fixtures/bandcamp");
+const fixtureIndex = JSON.parse(fs.readFileSync(path.join(FIXTURES, "index.json"), "utf8"));
+const BANDCAMP_URL = /^https?:\/\/([a-z0-9-]+\.)*(bandcamp\.com|bcbits\.com)(:\d+)?\//i;
+const NO_BANDCAMP_DNS = "MAP bandcamp.com ~NOTFOUND, MAP *.bandcamp.com ~NOTFOUND, MAP *.bcbits.com ~NOTFOUND";
+const PIXEL = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII=", "base64");
+const escapedRequests = []; // Bandcamp requests with no fixture
+const standInPages = []; // release pages answered with the no-data stand-in
+
+// One second of 8 kHz 8-bit silence.
+function silentWav(rate = 8000) {
+  const b = Buffer.alloc(44 + rate, 128);
+  b.write("RIFF", 0);
+  b.writeUInt32LE(36 + rate, 4);
+  b.write("WAVEfmt ", 8);
+  b.writeUInt32LE(16, 16);
+  b.writeUInt16LE(1, 20); // PCM
+  b.writeUInt16LE(1, 22); // mono
+  b.writeUInt32LE(rate, 24);
+  b.writeUInt32LE(rate, 28);
+  b.writeUInt16LE(1, 32);
+  b.writeUInt16LE(8, 34);
+  b.write("data", 36);
+  b.writeUInt32LE(rate, 40);
+  return b;
 }
+const SILENCE = silentWav();
+
+function bandcampFixture(url) {
+  const u = new URL(url);
+  const entry = fixtureIndex[u.origin + u.pathname];
+  if (entry) {
+    if (entry.status) return { status: entry.status, contentType: "text/html", body: "Not found (e2e fixture)" };
+    return {
+      status: 200,
+      contentType: entry.type || "text/html; charset=utf-8",
+      body: fs.readFileSync(path.join(FIXTURES, entry.file)),
+    };
+  }
+  if (/\.bcbits\.com$/.test(u.host) && u.pathname.startsWith("/img/")) return { status: 200, contentType: "image/png", body: PIXEL };
+  if (/\.bcbits\.com$/.test(u.host) && u.pathname.startsWith("/stream/")) return { status: 200, contentType: "audio/wav", body: SILENCE };
+  if (u.host === "bandcamp.com" && u.pathname === "/stream_redirect") return { status: 200, contentType: "audio/wav", body: SILENCE };
+  if (u.host === "bandcamp.com" && u.pathname.startsWith("/EmbeddedPlayer/")) {
+    return { status: 200, contentType: "text/html; charset=utf-8", body: fs.readFileSync(path.join(FIXTURES, "embed.html")) };
+  }
+  if (/\.bandcamp\.com$/.test(u.host) && /^\/(album|track)\/[^/]+\/?$/.test(u.pathname)) {
+    standInPages.push(u.origin + u.pathname);
+    return { status: 200, contentType: "text/html; charset=utf-8", body: fs.readFileSync(path.join(FIXTURES, "page-no-data.html")) };
+  }
+  return null;
+}
+
+async function routeBandcamp(route) {
+  const fixture = bandcampFixture(route.request().url());
+  if (fixture) return route.fulfill(fixture);
+  const u = new URL(route.request().url());
+  escapedRequests.push(`${route.request().method()} ${u.origin}${u.pathname}`);
+  return route.abort("blockedbyclient");
+}
+
+// Any test that asked Bandcamp for something we have no recording of fails.
+afterEach(() => {
+  standInPages.length = 0;
+  const escaped = escapedRequests.splice(0);
+  assert.deepEqual(escaped, [], `Bandcamp requests with no fixture (blocked): ${escaped.join(", ")}`);
+});
 
 before(async () => {
   fs.rmSync(PROFILE, { recursive: true, force: true });
@@ -114,11 +164,17 @@ before(async () => {
     what: "the server",
   });
 
+  process.env.PW_EXPERIMENTAL_SERVICE_WORKER_NETWORK_EVENTS = "1"; // route the extension's own fetches too
   context = await chromium.launchPersistentContext(PROFILE, {
     channel: "chromium",
     headless: !process.env.HEADED,
-    args: [`--disable-extensions-except=${EXT_DIR}`, `--load-extension=${EXT_DIR}`],
+    args: [
+      `--disable-extensions-except=${EXT_DIR}`,
+      `--load-extension=${EXT_DIR}`,
+      `--host-resolver-rules=${NO_BANDCAMP_DNS}`, // backstop: nothing live, even if a request skips the route
+    ],
   });
+  await context.route(BANDCAMP_URL, routeBandcamp);
   const sw = context.serviceWorkers()[0] || (await context.waitForEvent("serviceworker"));
   extId = new URL(sw.url()).host;
   probe = await context.newPage();
@@ -275,13 +331,8 @@ test("tag edits queued on the server are applied by the extension", async () => 
   await popup.close();
 });
 
-test("ownership from Bandcamp via the extension (cookie file)", async (t) => {
-  const cookies = loadCookies(COOKIES);
-  if (!cookies.length) {
-    t.skip("no Bandcamp cookie file");
-    return;
-  }
-  await context.addCookies(cookies);
+test("ownership from Bandcamp via the extension (recorded collection summary)", async () => {
+  const lookup = JSON.parse(fs.readFileSync(path.join(FIXTURES, "collection_summary.json"), "utf8")).collection_summary.tralbum_lookup;
   const app = await context.newPage();
   await app.goto(SERVER + "/");
   await app.waitForFunction(() => /extension connected/.test(document.getElementById("navExt").textContent));
@@ -291,8 +342,10 @@ test("ownership from Bandcamp via the extension (cookie file)", async (t) => {
   });
   const status = await app.textContent("#refreshStatus");
   const owned = Number((status.match(/owned: (\d+)/) || [])[1] || 0);
-  assert.ok(owned > 0, `expected owned items, got: ${status.replace(/\s+/g, " ").slice(0, 120)}`);
-  console.log(`# ownership: ${owned} owned items`);
+  assert.equal(owned, Object.keys(lookup).length, `status: ${status.replace(/\s+/g, " ").slice(0, 120)}`);
+  await waitFor(() => api("/api/items/t1004723757").then((it) => it.owned && it.owned.status === "owned"), {
+    what: "the server's ownership",
+  });
   await app.close();
 });
 
@@ -311,7 +364,7 @@ test("local app: the Show filter narrows by status and explains an empty result"
   await app.close();
 });
 
-test("Fix album IDs reads the real album from track pages (Bandcamp)", async () => {
+test("Fix album IDs reads the real album from track pages (recorded Bandcamp pages)", async () => {
   // Two tracks tagged on their own pages (one stored "a" + its own id, one
   // none), plus one whose page is gone (404) that must not stop the run.
   // t1110893101's page is on a custom domain: it goes through the embedded player.
@@ -738,7 +791,7 @@ test("Main target, real server: dry run, confirm, and write to a sandbox copy", 
 // Album pages: the header widget is the album (a<id>), each row its own track
 // (t<id>), paired by position with the page's data. If Bandcamp's markup ever
 // shifts that pairing, album items would be saved/removed under track ids.
-test("album page: the header widget is the album item; track rows never touch it (Bandcamp)", async () => {
+test("album page: the header widget is the album item; track rows never touch it (recorded album page)", async () => {
   const albumId = "a563830364"; // Synergy Trilogy (in the imported export)
   const trackId = "t3738475288"; // Holo Law, one of its tracks
   const page = await context.newPage();
@@ -975,5 +1028,93 @@ test("extension page: old position-based widths move to the right columns", asyn
   assert.equal(await page.$eval("#collectionTable thead th.col-title", (th) => th.style.width), "333px");
   assert.deepEqual(JSON.parse(await page.evaluate(() => localStorage.getItem("bc_collection_col_widths_by_id"))), { title: 333 });
   await page.evaluate(() => localStorage.removeItem("bc_collection_col_widths_by_id"));
+  await page.close();
+});
+
+// --- Phase 3: import preview (stubbed import API) ------------------------------------
+// The server's import endpoints are stubbed (scripts/e2e/importStub.mjs, shapes
+// as documented by Session A) until they land; everything else is the real app.
+// Bandcamp lookup is paused, so matches come from the collection, the file's
+// URL or a pasted URL, and Find on Bandcamp is only a link (never followed here).
+
+const IMPORT_SAMPLE = path.join(ROOT, "scripts/e2e/fixtures/import-sample.json");
+
+test("import: file → tag mapping → preview with tints, match sources, Find link, pasted URL, Import selected", async () => {
+  const stub = importStub(JSON.parse(fs.readFileSync(IMPORT_SAMPLE, "utf8")), { located: [1, 2] });
+  const page = await context.newPage();
+  await stub.install(page);
+  page.on("dialog", (d) => d.accept());
+  await page.goto(SERVER + "/settings/#import");
+  await page.setInputFiles("#importFile", IMPORT_SAMPLE);
+  await page.waitForFunction(() => /6 rows from/.test(document.getElementById("importFileInfo").textContent));
+  assert.match(await page.textContent("#importFileInfo"), /2 tags not in your vocabulary/);
+  await page.click("#importStart");
+
+  // Mapping step: the file's suggestion is pre-filled; create the rest.
+  await page.waitForSelector("#importMapping:not([hidden])");
+  assert.deepEqual(await page.$$eval("#importMapping .map-row", (r) => r.map((x) => x.dataset.tag)), ["chill", "4/4"]);
+  await page.click("#mapCreate");
+  await page.waitForURL(/\/import\/\?batch=e2e-b1/);
+  const tagsCall = stub.calls.find((c) => c.path.endsWith("/tags"));
+  assert.deepEqual(tagsCall.body, { map: { "4/4": ["four-four"] }, unmapped: "create" });
+  const startCall = stub.calls.find((c) => c.method === "POST" && c.path === "/api/import");
+  assert.equal(startCall.body.name, "import-sample.json");
+  assert.equal(startCall.body.file.format, "bc-tagger-import/1");
+
+  // Preview: tints and where each match came from.
+  await page.waitForFunction(() => document.querySelectorAll("#collectionTable tbody tr").length === 6);
+  const rowInfo = () =>
+    page.$$eval("#collectionTable tbody tr", (trs) =>
+      trs.map((tr) => ({
+        key: tr.dataset.key,
+        cls: ["row-duplicate", "row-missing"].filter((c) => tr.classList.contains(c)).join(" "),
+        source: tr.querySelector(".match-cell .chip").dataset.source,
+        find: (tr.querySelector(".match-cell a.find-bc") || {}).href || null,
+      }))
+    );
+  const byKey = Object.fromEntries((await rowInfo()).map((r) => [r.key, r]));
+  assert.equal(byKey.r0.cls, "row-duplicate");
+  assert.equal(byKey.r0.source, "collection");
+  assert.equal(byKey.r1.cls, "");
+  assert.equal(byKey.r1.source, "file");
+  assert.equal(byKey.r2.cls, "row-missing");
+  assert.equal(byKey.r2.source, "none");
+  assert.equal(byKey.r5.source, "candidates");
+  assert.equal(byKey.r2.find, "https://bandcamp.com/search?q=Nobody%20Known%20Slow%20One&item_type=t");
+  assert.equal(byKey.r4.find, "https://bandcamp.com/search?q=Sample%20Artist%20Sample%20Album&item_type=a");
+  assert.equal(byKey.r0.find, null, "matched rows have no Find link in the cell");
+  assert.equal(await page.getAttribute("tr[data-key='r2'] a.find-bc", "target"), "_blank");
+  assert.match(await page.textContent(".import-stats"), /6 rows/);
+
+  // Paste a URL: junk is refused, a real page URL (query dropped) becomes the match.
+  await page.click("tr[data-key='r2'] .match-cell .chip");
+  await page.fill(".popover .match-url", "not a url");
+  await page.click(".popover .pop-url button.primary");
+  assert.match(await page.textContent(".popover .pop-err"), /isn't a Bandcamp track or album page/);
+  await page.fill(".popover .match-url", "https://nobodyknown.bandcamp.com/track/slow-one?from=search");
+  await page.click(".popover .pop-url button.primary");
+  await page.waitForFunction(() => document.querySelector("tr[data-key='r2'] .match-cell .chip").dataset.source === "url");
+  assert.deepEqual(stub.calls.filter((c) => c.method === "PUT").pop().body, { match_url: "https://nobodyknown.bandcamp.com/track/slow-one" });
+  assert.equal(await page.$("tr[data-key='r2'] a.find-bc"), null);
+
+  // Pick a search candidate, then send another row back to Other.
+  await page.click("tr[data-key='r5'] .match-cell .chip");
+  await page.click(".popover .pop-file button.primary >> nth=0");
+  await page.waitForFunction(() => document.querySelector("tr[data-key='r5'] .match-cell .chip").dataset.source === "picked");
+  assert.deepEqual(stub.calls.filter((c) => c.method === "PUT").pop().body, { choose: "t7000000001" });
+  await page.click("tr[data-key='r1'] .match-cell .chip");
+  await page.click(".popover button.danger");
+  await page.waitForFunction(() => document.querySelector("tr[data-key='r1'] .match-cell .chip").dataset.source === "none");
+  assert.deepEqual(stub.calls.filter((c) => c.method === "PUT").pop().body, { choose: null });
+
+  // Select: one row off, then Import selected.
+  await page.click("tr[data-key='r3'] .row-check");
+  await page.waitForFunction(() => /\(5\)/.test(document.getElementById("importSelected").textContent));
+  assert.equal(await page.$eval("#selectAll", (b) => b.indeterminate), true);
+  await page.click("#importSelected");
+  await page.waitForFunction(() => /^Imported:/.test(document.getElementById("refreshStatus").textContent));
+  assert.match(await page.textContent("#refreshStatus"), /pending adds 2, tag merges 1, other added 2/);
+  assert.ok(stub.calls.some((c) => c.path.endsWith("/commit")));
+  assert.deepEqual(standInPages, [], "the preview fetches no Bandcamp pages");
   await page.close();
 });

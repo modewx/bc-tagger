@@ -168,7 +168,7 @@ async function refreshHealth() {
     // `other` rows have no Bandcamp page: the title searches Discogs.
     titleUrl: (item) =>
       sourceOf(item) === "other"
-        ? item.discogs_url || `https://www.discogs.com/search/?type=all&q=${encodeURIComponent([item.artist, item.title].filter(Boolean).join(" "))}`
+        ? (item.links && item.links.discogs) || `https://www.discogs.com/search/?type=all&q=${encodeURIComponent([item.artist, item.title].filter(Boolean).join(" "))}`
         : null,
     onView: (shown, total) => {
       statusFilter.onView(shown, total);

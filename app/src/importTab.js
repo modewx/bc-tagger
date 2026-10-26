@@ -238,7 +238,7 @@ export function createImportTab(container) {
           "div",
           { class: "batch-row" },
           el("a", { href: previewUrl(b.id) }, b.source || b.id),
-          el("span", { class: "muted" }, [when, b.committed_at ? "imported" : b.status || "", statsLine(b.stats)].filter(Boolean).join(" · ")),
+          el("span", { class: "muted" }, [when, b.committed ? "imported" : b.status || "", statsLine(b.stats)].filter(Boolean).join(" · ")),
           del
         )
       );

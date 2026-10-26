@@ -73,15 +73,16 @@ function renderSource(cell, key, item) {
     return a;
   };
   if (sourceOf(item) === "other") {
+    const links = item.links || {};
     cell.append(
-      link("src-discogs", "D", item.discogs_url || searchUrl("https://www.discogs.com/search/?type=all&q=", item), "Search Discogs"),
-      link("src-youtube", "▶", item.youtube_url || searchUrl("https://www.youtube.com/results?search_query=", item), "Search YouTube")
+      link("src-discogs", "D", links.discogs || searchUrl("https://www.discogs.com/search/?type=all&q=", item), "Search Discogs"),
+      link("src-youtube", "▶", links.youtube || searchUrl("https://www.youtube.com/results?search_query=", item), "Search YouTube")
     );
   } else {
     const url = item.url || item.item_url;
     if (url) cell.appendChild(link("src-bandcamp", "bc", url, "Bandcamp page"));
     else cell.appendChild(el("span", "src-icon src-bandcamp", "bc"));
-    if (item.pending_in_tagger || item.tagger_pending) {
+    if (item.pending === "tagger") {
       const p = el("span", "chip pending-chip", "pending");
       p.title = "Imported: waiting for the extension to add it to the tagger";
       cell.appendChild(p);
