@@ -60,14 +60,3 @@ def test_missing_root_keeps_rows(tmp_path):
     stats = indexer.scan(store, roots)
     assert stats["roots"][0]["exists"] is False and stats["removed"] == 0
     assert len(_paths(store)) == 2
-
-
-def test_locate_skips_a_fresh_rescan(make_service, tmp_path):
-    root = tmp_path / "music"
-    write_aiff(root / "A - Album" / "01 - One.aiff", "One", "A", "Album", 1)
-    svc = make_service(root, items={"t1": {"title": "One", "artist": "A", "album_title": "Album", "track_num": 1, "tags": ["x"]}})
-    svc.RESCAN_MAX_AGE_S = 300
-    assert svc.locate(ids=["t1"])["scan"] is not None  # first time: scans
-    assert svc.locate(ids=["t1"])["scan"] is None  # fresh: skipped
-    svc.settings.update({"not_owned_roots": [{"path": str(root), "globs": []}, {"path": str(tmp_path / "other"), "globs": []}]})
-    assert svc.locate(ids=["t1"])["scan"] is not None  # roots changed: scans again

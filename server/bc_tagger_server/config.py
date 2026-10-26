@@ -83,6 +83,11 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     "match_threshold": 0.85,
     # Keep candidates at or above this confidence for the user to confirm.
     "candidate_threshold": 0.6,
+    # Locate/Export run a quick scan of files created/changed since the selected items'
+    # tag dates minus this many days; full scans are manual only.
+    "quick_scan_margin_days": 2,
+    # Suggest a manual full rescan when the last one is older than this.
+    "full_rescan_hint_days": 30,
     # Seed for the items mirror until the extension pushes its own data.
     "seed_export_json": str(DEFAULT_EXPORT_JSON),
     # Where the built local app (Session B) lives; served at "/".
@@ -169,6 +174,14 @@ def _validate(merged: dict[str, Any]) -> dict[str, Any]:
     if not name:
         raise SettingsError("playlist_folder must not be empty")
     out["playlist_folder"] = name
+    for key in ("quick_scan_margin_days", "full_rescan_hint_days"):
+        try:
+            v = float(out[key])
+        except (TypeError, ValueError):
+            raise SettingsError(f"{key} must be a number") from None
+        if v < 0:
+            raise SettingsError(f"{key} must not be negative")
+        out[key] = int(v) if v == int(v) else v
     if out.get("rekordbox_target") not in ("test", "main"):
         raise SettingsError("rekordbox_target must be 'test' or 'main'")
     if not isinstance(out.get("allow_main_writes"), bool):

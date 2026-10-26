@@ -6,7 +6,7 @@ import asyncio
 import json
 import logging
 import re
-from typing import Any, Optional
+from typing import Any, Literal, Optional
 
 from fastapi import Body, FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -53,6 +53,9 @@ class SelectionBody(BaseModel):
     ids: Optional[list[str]] = None
     latest: Optional[int] = None
     dry_run: bool = False
+    # "quick" (default): index files created/changed since the items' tag dates;
+    # "none": use the index as is; "full": full rescan (only on an explicit user action).
+    scan: Optional[Literal["quick", "none", "full"]] = None
 
 
 class ExportBody(SelectionBody):
@@ -165,11 +168,16 @@ def create_app(service: Service | None = None) -> FastAPI:
 
     @app.post("/api/index/scan")
     def scan() -> dict:
-        return {"job_id": svc.start_scan().id}
+        job, joined = svc.start_scan()
+        return {"job_id": job.id, "joined": joined}
+
+    @app.get("/api/index/status")
+    def index_status() -> dict:
+        return svc.index_status()
 
     @app.post("/api/locate")
     def locate(body: SelectionBody = Body(default_factory=SelectionBody)) -> dict:
-        return {"job_id": svc.start_locate(ids=body.ids, latest=body.latest).id}
+        return {"job_id": svc.start_locate(ids=body.ids, latest=body.latest, scan=body.scan).id}
 
     @app.post("/api/matches/{item_id}/confirm")
     def confirm(item_id: str, body: PathBody) -> dict:
@@ -186,7 +194,8 @@ def create_app(service: Service | None = None) -> FastAPI:
         if not body.dry_run and not body.confirm_token and svc.target().is_main:
             # No client can skip the dry run on the main collection.
             raise HTTPException(409, "dry run required")
-        job = svc.start_export(ids=body.ids, latest=body.latest, dry_run=body.dry_run, confirm_token=body.confirm_token)
+        job = svc.start_export(ids=body.ids, latest=body.latest, dry_run=body.dry_run,
+                               confirm_token=body.confirm_token, scan=body.scan)
         return {"job_id": job.id}
 
     @app.get("/api/rekordbox/playlists")
@@ -205,7 +214,7 @@ def create_app(service: Service | None = None) -> FastAPI:
 
     @app.post("/api/rekordbox/xml")
     def rb_xml(body: SelectionBody = Body(default_factory=SelectionBody)) -> dict:
-        return svc.write_xml(ids=body.ids, latest=body.latest)
+        return svc.write_xml(ids=body.ids, latest=body.latest, scan=body.scan)
 
     @app.post("/api/download")
     def download(body: DownloadBody) -> dict:

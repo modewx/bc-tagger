@@ -53,6 +53,20 @@ def cmd_seed(svc: Service, args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_index_status(svc: Service, args: argparse.Namespace) -> int:
+    st = svc.index_status()
+    lines = [f"last full scan: {st['last_scan_at'] or 'never'}  files: {st['files']}  stale: {st['stale']}"]
+    lines += [f"  {r['kind']:9} {'mounted' if r['mounted'] else 'NOT MOUNTED':11} "
+              f"{'complete' if r['complete'] else 'INCOMPLETE':10} {r['files']:6}  {r['path']}" for r in st["roots"]]
+    q = st.get("last_quick_scan")
+    if q:
+        lines.append(f"last quick scan: {q.get('at')} since {q.get('cutoff')}: checked {q.get('checked')}, "
+                     f"read {q.get('read')}, added {q.get('added')}")
+    lines += [f"hint: {h['message']}" for h in st["hints"]]
+    _out(st, args, "\n".join(lines))
+    return 0
+
+
 def cmd_scan(svc: Service, args: argparse.Namespace) -> int:
     stats = svc.scan()
     lines = [f"{r['kind']:9} {'ok' if r['exists'] else 'MISSING':7} {r['files']:6} files  {r['path']}" for r in stats["roots"]]
@@ -69,7 +83,7 @@ def cmd_locate(svc: Service, args: argparse.Namespace) -> int:
     if sel["ids"] is None and sel["latest"] is None and not args.all:
         print("choose --latest N, --ids ID,ID or --all", file=sys.stderr)
         return 2
-    result = svc.locate(**sel)
+    result = svc.locate(**sel, scan=args.scan)
     lines = []
     for s in result["items"]:
         kind = "album" if s["is_album"] else "track"
@@ -141,7 +155,7 @@ def cmd_export(svc: Service, args: argparse.Namespace) -> int:
     from .rbguard import WriteRefused
 
     try:
-        diff = svc.export(**sel, dry_run=args.dry_run, confirm_token=args.confirm)
+        diff = svc.export(**sel, dry_run=args.dry_run, confirm_token=args.confirm, scan=args.scan)
     except (ExportError, WriteRefused) as e:
         print(f"export refused: {e}", file=sys.stderr)
         return 1
@@ -154,7 +168,7 @@ def cmd_xml(svc: Service, args: argparse.Namespace) -> int:
     if sel["ids"] is None and sel["latest"] is None and not args.all:
         print("choose --latest N, --ids ID,ID or --all", file=sys.stderr)
         return 2
-    result = svc.write_xml(**sel)
+    result = svc.write_xml(**sel, scan=args.scan)
     text = [f"wrote {result['path']} ({result['tracks']} tracks)", f"also {result['latest']}"]
     text += [f"  {name}: {n}" for name, n in result["playlists"].items()]
     _out(result, args, "\n".join(text))
@@ -238,6 +252,8 @@ def add_selection(p: argparse.ArgumentParser) -> None:
     p.add_argument("--ids", default=None, help="comma-separated item ids (t123,a456)")
     p.add_argument("--all", action="store_true", help="every item")
     p.add_argument("--json", action="store_true", help="print JSON")
+    p.add_argument("--scan", choices=["quick", "none", "full"], default=None,
+                   help="index update first: quick (default: files since the items' tag dates), none, or full")
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -256,9 +272,13 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--json", action="store_true")
     s.set_defaults(func=cmd_seed)
 
-    s = sub.add_parser("scan", help="index the configured roots (incremental)")
+    s = sub.add_parser("scan", help="full scan of the configured roots (incremental; the manual 'Rescan drive')")
     s.add_argument("--json", action="store_true")
     s.set_defaults(func=cmd_scan)
+
+    s = sub.add_parser("index-status", help="index freshness, per-root state and rescan hints")
+    s.add_argument("--json", action="store_true")
+    s.set_defaults(func=cmd_index_status)
 
     s = sub.add_parser("locate", help="match items to local files")
     add_selection(s)

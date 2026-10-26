@@ -1,7 +1,13 @@
 """Scan configured roots for audio files and cache their tags in SQLite.
 
-Rescans are incremental: a file is re-read only when its size or mtime changed, and rows
-for files that disappeared are dropped. Roots are only read, never written.
+* Full scan (``scan``, manual only): walks every root. Incremental: a file is re-read only
+  when its size or mtime changed, rows for deleted files are dropped (never for a root that
+  is missing or went away mid-walk), and per-root completeness is recorded.
+* Quick scan (``quick_scan``, before every Locate/Export): only audio files created or
+  modified since a cutoff date, found with Spotlight (``mdfind``) plus a shallow walk into
+  recently modified folders; never deletes rows.
+
+Roots are only read, never written.
 """
 
 from __future__ import annotations
@@ -10,6 +16,8 @@ import fnmatch
 import json
 import logging
 import os
+import subprocess
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
 
@@ -25,7 +33,7 @@ FILE_COLUMNS = (
     "path", "root", "root_kind", "size", "mtime", "ext", "format", "title", "artist",
     "albumartist", "album", "tracknumber", "discnumber", "comment", "bc_urls", "duration",
     "bitrate", "sample_rate", "bits", "codec", "year", "genre", "label", "release_dir",
-    "parsed", "scanned_at", "error",
+    "created", "parsed", "scanned_at", "error",
 )
 
 
@@ -48,6 +56,7 @@ def file_record(path: Path, root: str, root_kind: str, st: os.stat_result) -> di
         "mtime": st.st_mtime,
         "ext": path.suffix.lower(),
         "release_dir": str(rel),
+        "created": _created(st),
         "parsed": json.dumps(parsed),
         "scanned_at": now_iso(),
         "error": None,
@@ -77,6 +86,10 @@ def file_record(path: Path, root: str, root_kind: str, st: os.stat_result) -> di
         label=tags.get("label"),
     )
     return rec
+
+
+def _created(st: os.stat_result) -> float:
+    return float(getattr(st, "st_birthtime", 0) or st.st_ctime)
 
 
 def _wanted(rel: str, globs: list[str]) -> bool:
@@ -116,6 +129,10 @@ def scan(
             r["path"]: (r["size"], r["mtime"])
             for r in store.query("SELECT path, size, mtime FROM files WHERE root = ?", (root_key,))
         }
+        no_created = {
+            r["path"] for r in store.query("SELECT path FROM files WHERE root = ? AND created IS NULL", (root_key,))
+        }
+        created_updates: list[tuple[float, str]] = []
         seen: set[str] = set()
         batch: list[dict] = []
         walk_errors: list[str] = []
@@ -140,6 +157,8 @@ def scan(
                 rstats["files"] += 1
                 if known.get(key) == (st.st_size, st.st_mtime):
                     stats["unchanged"] += 1
+                    if key in no_created:  # rows indexed before creation times were recorded
+                        created_updates.append((_created(st), key))
                     continue
                 rec = file_record(path, root_key, root["kind"], st)
                 stats["read"] += 1
@@ -151,6 +170,9 @@ def scan(
                 if progress and stats["files"] % 25 == 0:
                     progress(stats["files"], 0, f"scanning {root_key}")
         _flush(store, batch)
+        if created_updates:
+            with store.tx() as c:
+                c.executemany("UPDATE files SET created = ? WHERE path = ?", created_updates)
         if walk_errors or not root_path.is_dir():
             # A drive that went away mid-walk (or unreadable folders) must not look like
             # deleted files: keep every row we didn't see.
@@ -170,13 +192,162 @@ def scan(
     marks = ",".join("?" * len(keep)) or "''"
     with store.tx() as c:
         stats["removed"] += c.execute(f"DELETE FROM files WHERE root NOT IN ({marks})", keep).rowcount
+    at = now_iso()
     store.set_meta("last_scan", {
-        "at": now_iso(),
+        "at": at,
         **{k: v for k, v in stats.items() if k != "roots"},
         "roots": [r["path"] for r in roots],
     })
+    store.set_meta("last_full_scan", {
+        "at": at,
+        "files": stats["files"],
+        "incomplete_roots": stats["incomplete_roots"] + [r["path"] for r in stats["roots"] if not r["exists"]],
+        "roots": [
+            {"path": r["path"], "kind": r["kind"], "mounted": r["exists"], "files": r["files"],
+             "complete": bool(r["exists"] and not r.get("incomplete"))}
+            for r in stats["roots"]
+        ],
+    })
     if progress:
         progress(stats["files"], stats["files"], "scan finished")
+    return stats
+
+
+# -- quick scan ------------------------------------------------------------------------------
+
+
+def _mount_point(path: Path) -> Path:
+    p = path.resolve()
+    while not os.path.ismount(p) and p != p.parent:
+        p = p.parent
+    return p
+
+
+def spotlight_enabled(root: Path) -> bool:
+    """``mdutil -s`` says "Indexing enabled." for the volume holding ``root``."""
+    try:
+        out = subprocess.run(["mdutil", "-s", str(_mount_point(root))], capture_output=True, text=True, timeout=10)
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return out.returncode == 0 and "Indexing enabled" in out.stdout
+
+
+def spotlight_recent(root: Path, cutoff: datetime) -> list[str] | None:
+    """Files under ``root`` created or changed since ``cutoff`` per Spotlight (None: unavailable)."""
+    if not spotlight_enabled(root):
+        return None
+    t = cutoff.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    query = f"(kMDItemFSCreationDate >= $time.iso({t}) || kMDItemFSContentChangeDate >= $time.iso({t}))"
+    try:
+        out = subprocess.run(["mdfind", "-onlyin", str(root), query], capture_output=True, text=True, timeout=120)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if out.returncode != 0:
+        return None
+    return [line for line in out.stdout.splitlines() if line.strip()]
+
+
+def walk_recent(root: Path, cutoff_ts: float) -> list[str]:
+    """Shallow fallback: descend only into folders modified since the cutoff.
+
+    A folder's mtime changes when entries are added to it directly, so new release folders
+    (and their parents) are found. Limitation: a file added deep inside folders whose own
+    entries otherwise didn't change is missed when its parent's parent wasn't touched;
+    the manual full scan finds it.
+    """
+    found: list[str] = []
+    stack = [root]
+    while stack:
+        d = stack.pop()
+        try:
+            entries = list(os.scandir(d))
+        except OSError:
+            continue
+        for e in entries:
+            if e.name.startswith("."):
+                continue
+            try:
+                st = e.stat(follow_symlinks=False)
+            except OSError:
+                continue
+            if e.is_dir(follow_symlinks=False):
+                if st.st_mtime >= cutoff_ts:
+                    stack.append(Path(e.path))
+            elif max(st.st_mtime, _created(st)) >= cutoff_ts:
+                found.append(e.path)
+    return found
+
+
+def quick_scan(
+    store: Store,
+    roots: list[dict],
+    cutoff: datetime,
+    progress: Callable[[int, int, str], None] | None = None,
+) -> dict[str, Any]:
+    """Index audio files created or modified since ``cutoff`` in the mounted roots."""
+    cutoff_ts = cutoff.timestamp()
+    stats: dict[str, Any] = {
+        "mode": "quick", "cutoff": cutoff.astimezone(timezone.utc).isoformat(timespec="seconds"),
+        "checked": 0, "read": 0, "added": 0, "unchanged": 0, "errors": 0, "roots": [],
+    }
+    for root in roots:
+        root_path = Path(root["path"]).expanduser()
+        root_key = str(root_path)
+        rstats: dict[str, Any] = {"path": root_key, "kind": root["kind"], "mounted": root_path.is_dir()}
+        stats["roots"].append(rstats)
+        if not rstats["mounted"]:
+            rstats["method"] = "skipped (not mounted)"
+            continue
+        spot = spotlight_recent(root_path, cutoff)
+        paths = set(walk_recent(root_path, cutoff_ts))
+        rstats["method"] = "walk" if spot is None else "spotlight+walk"
+        if spot is not None:
+            paths |= set(spot)
+        candidates = []
+        for p in paths:
+            path = Path(p)
+            if path.suffix.lower() not in AUDIO_EXTS or path.name.startswith("."):
+                continue
+            try:
+                rel = str(path.relative_to(root_path))
+            except ValueError:
+                continue
+            if any(part.startswith(".") for part in Path(rel).parts) or not _wanted(rel, root.get("globs") or []):
+                continue
+            candidates.append(path)
+        known = {}
+        for chunk in range(0, len(candidates), 500):
+            part = [str(c) for c in candidates[chunk:chunk + 500]]
+            marks = ",".join("?" * len(part))
+            for r in store.query(f"SELECT path, size, mtime FROM files WHERE path IN ({marks})", part):
+                known[r["path"]] = (r["size"], r["mtime"])
+        batch: list[dict] = []
+        rstats.update(checked=len(candidates), read=0, added=0)
+        for path in sorted(candidates):
+            try:
+                st = path.stat()
+            except OSError:
+                continue
+            key = str(path)
+            if known.get(key) == (st.st_size, st.st_mtime):
+                stats["unchanged"] += 1
+                continue
+            rec = file_record(path, root_key, root["kind"], st)
+            rstats["read"] += 1
+            if key not in known:
+                rstats["added"] += 1
+            if rec["error"]:
+                stats["errors"] += 1
+            batch.append(rec)
+            if len(batch) >= BATCH:
+                _flush(store, batch)
+        _flush(store, batch)
+        for k in ("checked", "read", "added"):
+            stats[k] += rstats[k]
+        if progress:
+            progress(stats["checked"], 0, f"quick scan {root_key}")
+    stats["at"] = now_iso()
+    store.set_meta("last_quick_scan", stats)
     return stats
 
 

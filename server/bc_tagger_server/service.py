@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import threading
 from pathlib import Path
 from typing import Any, Iterable
 
@@ -22,6 +23,10 @@ class Service:
         self.settings = settings or Settings()
         self.store = store or Store()
         self.jobs = JobManager()
+        self._scanning: dict[str, Any] | None = None
+        self._scan_job_id: str | None = None
+        self._scan_lock = threading.Lock()
+        self.last_prepare: dict[str, Any] | None = None
         if seed:
             self.seed_items()
         self._migrate_playlist_keys()
@@ -199,31 +204,138 @@ class Service:
 
     # -- index & locate ---------------------------------------------------------------
 
+    #: Locate/Export default; "full" only when the user explicitly asks (Rescan drive / CLI).
+    default_scan_mode = "quick"
+
+    def _index_event(self, phase: str, kind: str, **data: Any) -> None:
+        self.jobs.bus.publish("index", {"phase": phase, "kind": kind, **data})
+
     def scan(self, ctx=None) -> dict[str, Any]:
+        """Full scan of every root (manual only: Rescan drive, the CLI, or scan="full")."""
         from .indexer import scan
 
-        progress = (lambda cur, tot, msg: ctx.progress(cur, tot, msg)) if ctx else None
-        return scan(self.store, self.settings.roots(), progress)
+        self._scanning = {"kind": "full", "job_id": ctx.job.id if ctx else None, "progress": {}}
+        self._index_event("started", "full")
 
-    RESCAN_MAX_AGE_S = 300
+        def progress(cur, tot, msg):
+            self._scanning["progress"] = {"files": cur, "message": msg}
+            self._index_event("progress", "full", files=cur, message=msg)
+            if ctx:
+                ctx.progress(cur, tot, msg)
 
-    def scan_if_stale(self, ctx=None, max_age_s: float | None = None) -> dict[str, Any] | None:
-        """Rescan before locating/exporting unless the last scan is recent (a full rescan of a
-        large drive takes about a minute even when nothing changed). Returns None if skipped."""
+        try:
+            stats = scan(self.store, self.settings.roots(), progress)
+        finally:
+            self._scanning = None
+        stats["mode"] = "full"
+        self._index_event("finished", "full", files=stats["files"], read=stats["read"],
+                          removed=stats["removed"], incomplete_roots=stats["incomplete_roots"])
+        return stats
+
+    def quick_scan_cutoff(self, items: list[dict]):
+        """min(date_added of the items) - quick_scan_margin_days, or None without dates."""
+        from datetime import datetime, timedelta
+
+        dates = []
+        for it in items:
+            try:
+                dates.append(datetime.fromisoformat(str(it.get("date_added")).replace("Z", "+00:00")))
+            except ValueError:
+                continue
+        if not dates:
+            return None
+        return min(dates) - timedelta(days=float(self.settings.get("quick_scan_margin_days")))
+
+    def prepare_index(self, items: list[dict], scan: str | None = None, ctx=None) -> dict[str, Any]:
+        """Bring the index up to date before matching ``items``: "quick" (default), "none" or "full"."""
+        from .indexer import quick_scan
+
+        mode = scan or self.default_scan_mode
+        if mode not in ("quick", "none", "full"):
+            raise ValueError(f"scan must be quick, none or full (got {mode!r})")
+        if mode == "none":
+            return {"mode": "none"}
+        if mode == "full":
+            return self.scan(ctx)
+        cutoff = self.quick_scan_cutoff(items)
+        if cutoff is None:
+            return {"mode": "quick", "skipped": "the selected items have no tag dates"}
+        self._scanning = {"kind": "quick", "job_id": ctx.job.id if ctx else None, "progress": {}}
+        self._index_event("started", "quick", cutoff=cutoff.isoformat())
+        try:
+            stats = quick_scan(
+                self.store, self.settings.roots(), cutoff,
+                lambda cur, tot, msg: self._index_event("progress", "quick", files=cur, message=msg),
+            )
+        finally:
+            self._scanning = None
+        self._index_event("finished", "quick", cutoff=stats["cutoff"], checked=stats["checked"],
+                          read=stats["read"], added=stats["added"])
+        return stats
+
+    def start_scan(self) -> tuple[Any, bool]:
+        """Start the manual full scan, or join the one already queued/running."""
+        with self._scan_lock:
+            job = self.jobs.get(self._scan_job_id) if self._scan_job_id else None
+            if job is not None and job.status in ("queued", "running"):
+                return job, True
+            job = self.jobs.submit("scan", lambda ctx: self.scan(ctx))
+            self._scan_job_id = job.id
+            return job, False
+
+    def index_status(self) -> dict[str, Any]:
         from datetime import datetime, timezone
 
-        last = self.store.get_meta("last_scan") or {}
-        limit = self.RESCAN_MAX_AGE_S if max_age_s is None else max_age_s
-        try:
-            age = (datetime.now(timezone.utc) - datetime.fromisoformat(last["at"])).total_seconds()
-        except (KeyError, TypeError, ValueError):
-            age = None
-        if age is not None and age < limit and last.get("roots") == [r["path"] for r in self.settings.roots()]:
-            return None
-        return self.scan(ctx)
-
-    def start_scan(self):
-        return self.jobs.submit("scan", lambda ctx: self.scan(ctx))
+        s = self.settings.all()
+        full = self.store.get_meta("last_full_scan")
+        quick = self.store.get_meta("last_quick_scan")
+        per_root = {r["root"]: r["n"] for r in self.store.query("SELECT root, COUNT(*) AS n FROM files GROUP BY root")}
+        full_roots = {r["path"]: r for r in (full or {}).get("roots", [])}
+        roots, hints = [], []
+        for r in self.settings.roots():
+            path = str(Path(r["path"]).expanduser())
+            last = full_roots.get(path)
+            mounted = Path(path).is_dir()
+            roots.append({"path": path, "kind": r["kind"], "mounted": mounted, "files": per_root.get(path, 0),
+                          "complete": bool(last and last["complete"])})
+            if full and last is None:
+                hints.append({"code": "root_never_scanned", "path": path,
+                              "message": f"{path} hasn't had a full scan yet: run Rescan drive."})
+            elif full and not last["complete"]:
+                hints.append({"code": "root_incomplete", "path": path,
+                              "message": f"{path} was {'missing' if not last['mounted'] else 'not fully read'} "
+                                         f"at the last full scan{' and is mounted now' if mounted else ''}: run Rescan drive."})
+        age_days = None
+        if full:
+            age_days = (datetime.now(timezone.utc) - datetime.fromisoformat(full["at"])).total_seconds() / 86400
+        stale = full is None or age_days > float(s["full_rescan_hint_days"])
+        if full is None:
+            hints.insert(0, {"code": "never_scanned", "path": None, "message": "No full scan yet: run Rescan drive."})
+        elif stale:
+            hints.append({"code": "stale", "path": None,
+                          "message": f"The last full scan is {int(age_days)} days old: run Rescan drive to catch "
+                                     "files the quick scan can't see."})
+        scanning = None
+        if self._scanning:
+            scanning = dict(self._scanning)
+        else:
+            job = self.jobs.get(self._scan_job_id) if self._scan_job_id else None
+            if job is not None and job.status in ("queued", "running"):
+                scanning = {"kind": "full", "job_id": job.id, "progress": job.progress}
+        return {
+            "last_scan_at": (full or {}).get("at"),
+            "files": sum(per_root.values()),
+            "roots": roots,
+            "incomplete_roots": (full or {}).get("incomplete_roots", []),
+            "stale": stale,
+            "scanning": scanning,
+            # Full scans never run automatically; this names why one is suggested (first hint).
+            "next_auto_reason": hints[0]["code"] if hints else None,
+            "hints": hints,
+            "last_quick_scan": quick,
+            "quick_scan_margin_days": s["quick_scan_margin_days"],
+            "full_rescan_hint_days": s["full_rescan_hint_days"],
+        }
 
     def match_config(self):
         from .matcher import MatchConfig
@@ -241,15 +353,15 @@ class Service:
 
         return FileIndex(load_files(self.store))
 
-    def locate(self, ids=None, latest=None, ctx=None, rescan: bool = True) -> dict[str, Any]:
+    def locate(self, ids=None, latest=None, ctx=None, scan: str | None = None) -> dict[str, Any]:
         """Locate the selected items (all valid items if neither ``ids`` nor ``latest``)."""
         from .items import select_items
         from .matcher import load_overrides, locate_item, save_result
 
-        scan_stats = self.scan_if_stale(ctx) if rescan else None
+        chosen = select_items(self.store.all_items(), ids=ids, latest=latest)
+        scan_stats = self.prepare_index(chosen, scan, ctx)
         index = self.file_index()
         cfg = self.match_config()
-        chosen = select_items(self.store.all_items(), ids=ids, latest=latest)
         summary = []
         for n, item in enumerate(chosen, 1):
             result = locate_item(item, index, cfg, load_overrides(self.store, item["id"]))
@@ -263,24 +375,26 @@ class Service:
             counts[s["status"]] = counts.get(s["status"], 0) + 1
         return {"items": summary, "counts": counts, "files_indexed": len(index.files), "scan": scan_stats}
 
-    def start_locate(self, ids=None, latest=None):
-        return self.jobs.submit("locate", lambda ctx: self.locate(ids=ids, latest=latest, ctx=ctx))
+    def start_locate(self, ids=None, latest=None, scan=None):
+        return self.jobs.submit("locate", lambda ctx: self.locate(ids=ids, latest=latest, ctx=ctx, scan=scan))
 
     # -- rekordbox --------------------------------------------------------------------
 
-    def select_located(self, ids=None, latest=None, ctx=None) -> list[dict]:
+    def select_located(self, ids=None, latest=None, ctx=None, scan: str | None = None) -> list[dict]:
         """Locate and pick the items to export.
 
         ``ids``: exactly those items. ``latest``: the N most recent items that are *located*
-        (walking newest first). Neither: every item.
+        (walking newest first). Neither: every item. The quick scan's cutoff comes from the
+        selected ids, or from the N newest items (older ones were indexed earlier).
+        Stats of the scan land in ``self.last_prepare``.
         """
         from .items import select_items
         from .matcher import load_overrides, locate_item, save_result
 
-        self.scan_if_stale(ctx)
+        pool = select_items(self.store.all_items(), ids=ids)
+        self.last_prepare = self.prepare_index(pool[:latest] if latest is not None else pool, scan, ctx)
         index = self.file_index()
         cfg = self.match_config()
-        pool = select_items(self.store.all_items(), ids=ids)
         chosen: list[dict] = []
         for item in pool:
             result = locate_item(item, index, cfg, load_overrides(self.store, item["id"]))
@@ -333,7 +447,7 @@ class Service:
         return {"plan_fingerprint": row["plan_fingerprint"], "source_fingerprint": row["source_fingerprint"]}
 
     def export(self, ids=None, latest=None, dry_run=False, ctx=None, guard_kwargs=None,
-               confirm_token: str | None = None) -> dict[str, Any]:
+               confirm_token: str | None = None, scan: str | None = None) -> dict[str, Any]:
         """Export to the configured target. The main collection needs ``confirm_token`` from a dry run."""
         from .rbexport import ExportError, build_selection, export
 
@@ -344,7 +458,8 @@ class Service:
                 expect = self._token_expectation(confirm_token, target)
             elif target.is_main:
                 raise ExportError("dry run required: exports to your main collection need a confirmed dry run")
-        items = self.select_located(ids=ids, latest=latest, ctx=ctx)
+        items = self.select_located(ids=ids, latest=latest, ctx=ctx, scan=scan)
+        scan_stats = self.last_prepare
         selection = build_selection(self.store, items, self.store.get_tags(), self.playlist_rule())
         progress = (lambda cur, tot, msg: ctx.progress(cur, tot, msg)) if ctx else None
         diff = export(
@@ -358,6 +473,7 @@ class Service:
             expect=expect,
         )
         diff["selected_items"] = [{"id": it["id"], "title": it.get("title"), "tags": it.get("tags")} for it in items]
+        diff["scan"] = scan_stats
         if dry_run:
             diff["confirm_token"], diff["token_expires_at"] = self._issue_token(target, diff, [it["id"] for it in items])
         elif confirm_token:
@@ -368,10 +484,11 @@ class Service:
                 ctx.item_updated(it["id"])
         return diff
 
-    def start_export(self, ids=None, latest=None, dry_run=False, confirm_token=None):
+    def start_export(self, ids=None, latest=None, dry_run=False, confirm_token=None, scan=None):
         return self.jobs.submit(
             "export",
-            lambda ctx: self.export(ids=ids, latest=latest, dry_run=dry_run, ctx=ctx, confirm_token=confirm_token),
+            lambda ctx: self.export(ids=ids, latest=latest, dry_run=dry_run, ctx=ctx,
+                                    confirm_token=confirm_token, scan=scan),
         )
 
     def rekordbox_playlists(self) -> list[dict[str, Any]]:
@@ -404,11 +521,11 @@ class Service:
             db.close()
             db.engine.dispose()
 
-    def write_xml(self, ids=None, latest=None) -> dict[str, Any]:
+    def write_xml(self, ids=None, latest=None, scan: str | None = None) -> dict[str, Any]:
         from .rbexport import build_selection
         from .xmlexport import write_xml
 
-        items = self.select_located(ids=ids, latest=latest)
+        items = self.select_located(ids=ids, latest=latest, scan=scan)
         selection = build_selection(self.store, items, self.store.get_tags(), self.playlist_rule())
         result = write_xml(
             selection,
@@ -417,6 +534,7 @@ class Service:
             self.settings.xml_output_dir(),
         )
         result["selected_items"] = [{"id": it["id"], "title": it.get("title")} for it in items]
+        result["scan"] = self.last_prepare
         return result
 
     def set_match_override(self, item_id: str, path: str, decision: str) -> dict[str, Any]:
