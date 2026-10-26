@@ -798,7 +798,7 @@ test("Rescan drive: live progress, Locate/Export wait, then the status line", as
   assert.match(await app.textContent("#refreshStatus"), /Rescan drive: done/);
   assert.equal(await app.isDisabled("#locateLatest"), false, "re-enabled after the scan");
   if (await hasIndexStatus()) {
-    await app.waitForFunction(() => /^Scanned (just now|\d+ min ago) · [\d,.]+ files$/.test(document.getElementById("indexStatus").textContent));
+    await app.waitForFunction(() => /^Full scan (just now|\d+ min ago) · [\d,.]+ files$/.test(document.getElementById("indexStatus").textContent));
   }
   await app.close();
 });
@@ -826,18 +826,46 @@ test("index hint: a drive missing at the last scan, cleared once it's back", asy
   await app.close();
 });
 
-test("Settings: rescan_max_age_minutes under General → Matching", async (t) => {
-  if (!("rescan_max_age_minutes" in (await api("/api/settings")))) {
-    t.skip("server has no rescan_max_age_minutes yet");
+test("Settings: quick-scan margin and full-rescan hint under General → Matching", async (t) => {
+  const s0 = await api("/api/settings");
+  if (!("quick_scan_margin_days" in s0)) {
+    t.skip("server has no quick_scan_margin_days yet");
     return;
   }
   const page = await context.newPage();
   await page.goto(SERVER + "/settings/");
-  await page.waitForSelector("#f_rescan_max_age_minutes");
-  assert.equal(await page.isVisible('#sec_matching .field[data-key="rescan_max_age_minutes"]'), true);
-  await page.fill("#f_rescan_max_age_minutes", "15");
+  await page.waitForSelector("#f_quick_scan_margin_days");
+  assert.equal(await page.isVisible('#sec_matching .field[data-key="quick_scan_margin_days"]'), true);
+  assert.equal(await page.isVisible('#sec_matching .field[data-key="full_rescan_hint_days"]'), true);
+  await page.fill("#f_quick_scan_margin_days", "3");
+  await page.fill("#f_full_rescan_hint_days", "45");
   await page.click("#saveBtn");
   await page.waitForFunction(() => /Saved/.test(document.getElementById("saveState").textContent));
-  assert.equal((await api("/api/settings")).rescan_max_age_minutes, 15);
+  const s1 = await api("/api/settings");
+  assert.equal(s1.quick_scan_margin_days, 3);
+  assert.equal(s1.full_rescan_hint_days, 45);
+  await put({ quick_scan_margin_days: s0.quick_scan_margin_days, full_rescan_hint_days: s0.full_rescan_hint_days });
   await page.close();
+});
+
+test("Locate never runs a full scan; its status shows what the quick scan did", async (t) => {
+  if (!(await hasIndexStatus())) {
+    t.skip("server has no /api/index/status yet");
+    return;
+  }
+  const lastFull = (await api("/api/index/status")).last_scan_at;
+  const scanJobsBefore = (await api("/api/jobs")).filter((j) => j.kind === "scan").length;
+  const app = await context.newPage();
+  await app.goto(SERVER + "/");
+  await app.waitForSelector("#locateLatest:not([disabled])");
+  await app.click("#locateLatest");
+  await app.waitForFunction(() => /^Locate latest 10: (done|failed)/.test(document.getElementById("refreshStatus").textContent), null, {
+    timeout: 120000,
+  });
+  const status = await app.textContent("#refreshStatus");
+  assert.match(status, /\((checked|no scan)[^)]*\)/, `quick-scan summary: ${status}`);
+  assert.doesNotMatch(status, /full scan/, "no full scan from Locate");
+  assert.equal((await api("/api/index/status")).last_scan_at, lastFull, "last full scan time unchanged");
+  assert.equal((await api("/api/jobs")).filter((j) => j.kind === "scan").length, scanJobsBefore, "no scan job started");
+  await app.close();
 });

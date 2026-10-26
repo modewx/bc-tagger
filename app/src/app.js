@@ -139,7 +139,7 @@ async function refreshHealth() {
       {
         id: "rescanDrive",
         label: "Rescan drive",
-        title: "Re-read the music folders now (Locate/Export otherwise reuse the index and rescan only when it's stale)",
+        title: "Full rescan of the music folders. Locate/Export only do a quick scan of files added since the items were tagged.",
         className: "job-btn",
         run: async (statusEl, button) => {
           button.disabled = true;

@@ -1,7 +1,8 @@
-// The file index: "Scanned 12 min ago · 41,037 files", live progress while a
-// scan runs, and a hint when the next Locate/Export will rescan first (stale
-// index, drive missing at the last scan). Fed by GET /api/index/status, SSE
-// `index` events and the scan job's own events.
+// The file index: "Full scan 12 min ago · 41,037 files", live progress while
+// a full scan runs, and the server's hints (e.g. a drive was missing at the
+// last full scan, or it's old: run Rescan drive). Full scans are manual only;
+// Locate/Export do a small date-based quick scan. Fed by GET
+// /api/index/status, SSE `index` events and the scan job's own events.
 
 import { apiJson } from "../../shared/datasource/HttpDataSource";
 import { resultText } from "./jobs";
@@ -53,25 +54,26 @@ export function createIndexStatus({ events, jobs, onScanning }) {
       el.textContent = `Scanning the drive…${count}`;
       el.title = p.message || "";
     } else if (status && status.last_scan_at) {
-      el.textContent = `Scanned ${ago(status.last_scan_at)} · ${nf.format(status.files || 0)} files`;
+      el.textContent = `Full scan ${ago(status.last_scan_at)} · ${nf.format(status.files || 0)} files`;
       el.title = (status.roots || [])
         .map((r) => `${r.mounted === false ? "✗ not mounted" : r.complete === false ? "⚠ incomplete" : "✓"} ${r.path} (${nf.format(r.files || 0)} files)`)
         .join("\n");
     } else if (status) {
-      el.textContent = "Drive not scanned yet";
+      el.textContent = "No full scan yet";
       el.title = "";
     }
-    const missing = (status && status.incomplete_roots) || [];
-    const reason = status && status.next_auto_reason;
-    const text = scanning
-      ? ""
-      : reason
-      ? `Next Locate/Export rescans first: ${reason}`
-      : missing.length
-      ? `Drive was missing at the last scan: ${missing.join(", ")}`
-      : "";
+    const text = scanning ? "" : hintsOf(status).join(" · ");
     hint.hidden = !text;
     hint.textContent = text;
+  }
+
+  // The server's hints ([string] or [{code, message}]); before it had them,
+  // derive one from incomplete_roots.
+  function hintsOf(st) {
+    if (!st) return [];
+    if (Array.isArray(st.hints)) return st.hints.map((h) => (typeof h === "string" ? h : h.message || h.code)).filter(Boolean);
+    const missing = st.incomplete_roots || [];
+    return missing.length ? [`Drive was missing at the last full scan (${missing.join(", ")}): run Rescan drive`] : [];
   }
 
   async function refresh() {

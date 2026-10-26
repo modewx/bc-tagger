@@ -53,11 +53,17 @@ const FIELDS = {
     help: "When several files match, the first format in this list wins.",
   },
   match_threshold: { section: "matching", type: "ratio", label: "Auto-accept matches at or above" },
-  rescan_max_age_minutes: {
+  quick_scan_margin_days: {
     section: "matching",
     type: "int",
-    label: "Rescan the drive when the index is older than (minutes)",
-    help: "Locate and Export reuse the file index. They rescan first only when it's older than this, when a drive was missing at the last scan, or when you click Rescan drive.",
+    label: "Quick scan: also look this many days before the tag date",
+    help: "Locate and Export only check files created or changed since the oldest selected item was tagged, minus this margin. The full drive is only scanned with Rescan drive.",
+  },
+  full_rescan_hint_days: {
+    section: "matching",
+    type: "int",
+    label: "Suggest a full rescan after (days)",
+    help: "The collection page suggests Rescan drive when the last full scan is older than this.",
   },
   candidate_threshold: {
     section: "matching",
