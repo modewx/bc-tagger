@@ -76,7 +76,7 @@ export function createCollectionPage(opts) {
   const mount = opts.mount || document.body;
   const colWidthKey = opts.colWidthKey || "bc_collection_col_widths_v3";
   const bc = createBandcampFetcher((url, o) => ds.fetchPage(url, o));
-  const { fetchFreshStream, resolveAlbumDoc, resolveItemArt } = bc;
+  const { fetchFreshStream, resolveAlbumDoc, resolveItemArt, resolveTrackTralbum } = bc;
 
   // --- Shell -----------------------------------------------------------------
   const shell = document.createElement("div");
@@ -88,6 +88,12 @@ export function createCollectionPage(opts) {
     { id: "refreshPlayers", label: "Refresh player files", run: refreshAllFiles },
     { id: "refreshThumbs", label: "Refresh thumbnails", run: refreshAllThumbnails },
     { id: "fixArtists", label: "Fix artists", run: fixArtists },
+    {
+      id: "fixAlbumIds",
+      label: "Fix album IDs",
+      title: "Read the real album of tracks tagged on their own page (needed to see ownership through the album)",
+      run: fixAlbumIds,
+    },
   ];
   const toolbar = document.getElementById("toolbar");
   const statusEl = document.getElementById("refreshStatus");
@@ -953,6 +959,62 @@ export function createCollectionPage(opts) {
     if (statusEl) statusEl.textContent = `Fixed ${fixed} artists.`;
     if (button) button.disabled = false;
     renderCollectionTable(currentView);
+  }
+
+  // "Fix album IDs": tracks tagged on their own track page used to get "a" +
+  // the track's own id (or nothing) as album_id, so ownership through the
+  // album couldn't work. Read the real album from each track page
+  // (current.album_id; null for a single) and mark the item checked so it
+  // isn't fetched again.
+  async function fixAlbumIds(statusEl, button) {
+    if (needsPageFetch(statusEl)) return;
+    if (button) button.disabled = true;
+
+    const targets = Object.entries(allItems).filter(
+      ([key, item]) =>
+        item.tralbum_type === "t" &&
+        !item.album_checked &&
+        (!item.album_id || String(item.album_id) === `a${item.raw_id}`)
+    );
+    let done = 0, fixed = 0, singles = 0;
+    let pending = {};
+    const flush = async () => {
+      if (Object.keys(pending).length) {
+        const batch = pending;
+        pending = {};
+        await ds.persistFields(batch);
+      }
+    };
+    const setStatus = () => {
+      if (statusEl) statusEl.textContent = `Album IDs: ${done}/${targets.length} checked (${fixed} fixed, ${singles} singles)...`;
+    };
+    setStatus();
+
+    await Promise.all(
+      targets.map(([key, item]) =>
+        resolveTrackTralbum(item).then(async (tralbum) => {
+          const current = tralbum && tralbum.current;
+          if (current && "album_id" in current) {
+            const album_id = current.album_id ? `a${current.album_id}` : null;
+            item.album_id = album_id;
+            item.album_checked = true;
+            pending[key] = { album_id, album_checked: true };
+            if (album_id) fixed++;
+            else singles++;
+          }
+          done++;
+          setStatus();
+          if (Object.keys(pending).length >= 20) await flush(); // periodic save
+        })
+      )
+    );
+    await flush();
+
+    const missed = targets.length - fixed - singles;
+    if (statusEl) {
+      statusEl.textContent = `Album IDs: ${fixed} fixed, ${singles} singles` + (missed ? `, ${missed} pages not reachable (try again later).` : ".");
+    }
+    if (button) button.disabled = false;
   }
 
   // ---------------------------------------------------------------------------

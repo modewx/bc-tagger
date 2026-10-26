@@ -654,7 +654,13 @@ function extractTrackData(tralbum, album_data, item_url, art_url, album_artist=n
   console.log(album_data)
   // let data = extractAlbumData(tralbum);
   const track_num = "track_num" in tralbum ? tralbum.track_num : tralbum.trackinfo[0].track_num;
-  const album_id = "album_id" in tralbum ? tralbum.album_id : album_data.id;// "album_id" in tralbum ?  tralbum.album_id : album_data.id;
+  // Album pages pass a trackinfo entry plus the album's data. On a track page
+  // `tralbum` is the track itself: its album is current.album_id (null for a
+  // single), not album_data.id, which would be "a" + the track's own id.
+  let album_id;
+  if ("album_id" in tralbum) album_id = tralbum.album_id;
+  else if (tralbum.current) album_id = tralbum.current.album_id ? `a${tralbum.current.album_id}` : null;
+  else album_id = album_data.id;
   const file = "file" in tralbum ? tralbum.file : tralbum.trackinfo[0].track_num;
   const album_title = album_data.title;
 

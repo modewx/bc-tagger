@@ -204,7 +204,7 @@ test("the bundled collection page renders with the shared code", async () => {
   const headers = await page.$$eval("#collectionTable thead th", (ths) => ths.map((t) => t.firstChild.textContent));
   assert.deepEqual(headers, ["#", "Added", "Thumbnail", "Title", "Artist", "Player", "Tags"]);
   const buttons = await page.$$eval("#toolbar button", (bs) => bs.map((b) => b.textContent));
-  assert.deepEqual(buttons, ["Refresh player files", "Refresh thumbnails", "Fix artists"]);
+  assert.deepEqual(buttons, ["Refresh player files", "Refresh thumbnails", "Fix artists", "Fix album IDs"]);
   await page.waitForSelector("select.tag-editor", { state: "attached" });
   await page.close();
 });
@@ -311,4 +311,28 @@ test("local app: the Show filter narrows by status and explains an empty result"
   assert.match(await app.textContent("#viewCount"), new RegExp(`0 of ${total}`));
   await app.selectOption("#statusFilter", "all");
   await app.close();
+});
+
+test("Fix album IDs reads the real album from track pages (Bandcamp)", async () => {
+  // Two tracks tagged on their own pages: one stored "a" + its own id, one none.
+  const targets = { t1004723757: "a1994132225", t1011914860: null };
+  await probe.evaluate(async (ids) => {
+    const { taggedItems } = await chrome.storage.local.get("taggedItems");
+    Object.entries(taggedItems).forEach(([id, it]) => {
+      if (it.tralbum_type === "t" && !ids.includes(id)) it.album_checked = true; // keep the run short
+    });
+    await chrome.storage.local.set({ taggedItems });
+  }, Object.keys(targets));
+  const page = await context.newPage();
+  await page.goto(extPage("collection.html"));
+  await page.waitForFunction(() => document.querySelectorAll("#collectionTable tbody tr").length > 0);
+  await page.click("#fixAlbumIds");
+  await page.waitForFunction(() => /Album IDs: \d+ fixed/.test(document.getElementById("refreshStatus").textContent), null, {
+    timeout: 60000,
+  });
+  const items = (await storage("taggedItems")).taggedItems;
+  assert.equal(items.t1004723757.album_id, targets.t1004723757);
+  assert.match(String(items.t1011914860.album_id), /^a\d+$/);
+  assert.equal(items.t1011914860.album_checked, true);
+  await page.close();
 });
