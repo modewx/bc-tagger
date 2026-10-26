@@ -213,6 +213,24 @@ async function handleAppBridge(op, payload, sender) {
       const text = await res.text();
       return { status: res.status, text: res.ok ? text : "", challenge: isChallengePage(text) };
     }
+    case "bandcampRequest": {
+      // A Bandcamp request the local server asked for ("Look up in my
+      // browser" for imports): its search (POST, JSON body) or a release
+      // page (GET), in this browser, without the user's cookies. The body
+      // goes back as is (the server reads it, and sees a bot check).
+      const { method = "GET", url, body } = payload;
+      if (!isBandcampUrl(url)) throw new Error("only bandcamp.com requests");
+      if (method !== "GET" && method !== "POST") throw new Error("GET or POST only");
+      const init = { method, credentials: "omit" };
+      if (method === "POST" && body != null) {
+        init.headers = { "Content-Type": "application/json" };
+        init.body = JSON.stringify(body);
+      }
+      const res = await fetch(url, init);
+      if (res.url && !isBandcampUrl(res.url)) throw new Error("redirected away from bandcamp.com");
+      const text = await res.text();
+      return { status: res.status, text, challenge: isChallengePage(text) };
+    }
     case "refreshOwnership":
       return refreshOwnership();
     case "syncNow": {
