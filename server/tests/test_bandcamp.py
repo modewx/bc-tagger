@@ -275,3 +275,30 @@ def test_fetcher_backs_off_politely_on_429(tmp_path):
     with pytest.raises(RateLimited):
         always.request("GET", "https://bandcamp.com/b")
     assert always.network_requests == 4
+
+
+def test_one_honest_product_user_agent():
+    from bc_tagger_server import USER_AGENT, ownership
+
+    assert bandcamp.USER_AGENT is USER_AGENT and ownership.USER_AGENT is USER_AGENT
+    assert USER_AGENT.startswith("bc-tagger/0.1 (") and "github.com/modewx/bc-tagger" in USER_AGENT
+    assert not any(s in USER_AGENT for s in ("dev", "Mozilla", "Java", "Node", "Chrome", "Safari"))
+
+
+def test_interval_default_and_migration(tmp_path):
+    from bc_tagger_server.config import Settings
+
+    fresh = Settings(path=tmp_path / "a" / "settings.json")
+    assert fresh.get("bandcamp_request_interval_s") == 1.0
+    # a file written before the default changed, holding the old default: moved to 1.0
+    old = tmp_path / "b" / "settings.json"
+    old.parent.mkdir()
+    old.write_text(json.dumps({"bandcamp_request_interval_s": 2.5, "server_port": 8765}))
+    assert Settings(path=old).get("bandcamp_request_interval_s") == 1.0
+    # chosen after the change (the file says so): kept
+    s = Settings(path=old)
+    s.update({"bandcamp_request_interval_s": 2.5})
+    assert json.loads(old.read_text())["settings_version"] == 2
+    assert Settings(path=old).get("bandcamp_request_interval_s") == 2.5
+    old.write_text(json.dumps({"bandcamp_request_interval_s": 3}))  # not the old default: kept
+    assert Settings(path=old).get("bandcamp_request_interval_s") == 3

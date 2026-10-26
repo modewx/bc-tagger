@@ -17,12 +17,12 @@ from typing import Any
 
 import httpx
 
+from . import USER_AGENT
 from .fetcher import is_challenge
 
 log = logging.getLogger(__name__)
 
 SUMMARY_URL = "https://bandcamp.com/api/fan/2/collection_summary"
-USER_AGENT = "bc-tagger-dev/0.1 (personal collection tool; not used for AI training; https://github.com/modewx/bc-tagger)"
 
 
 class OwnershipError(RuntimeError):

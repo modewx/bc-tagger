@@ -255,8 +255,8 @@ without a filter, refuses more than 5 releases, and only downloads into `test-do
    tracklist), else searches Bandcamp's public autocomplete. The search answer (id, URL, names, art)
    is enough to import; the track page (`data-tralbum`) is only fetched by the optional
    `POST /api/import/<id>/details` job. Requests come from this server one at a time, every
-   `bandcamp_request_interval_s` seconds (default 2.5, at least 0.5; read before every request), with the honest User-Agent
-   `bc-tagger-dev/0.1 (…)`, and are cached for 30 days in `http_cache`. HTTP 429: `Retry-After` is
+   `bandcamp_request_interval_s` seconds (default 1.0, at least 0.5; read before every request), with the app's own
+   User-Agent `bc-tagger/0.1 (personal music collection app; …)` (`bc_tagger_server.USER_AGENT`), and are cached for 30 days in `http_cache`. HTTP 429: `Retry-After` is
    honored, else it waits 30, 60, 120 s; still limited, the batch pauses ("Bandcamp is rate-limiting;
    try again later") until `POST /api/import/<id>/resume`. Bandcamp's bot check ("Client Challenge")
    stops the batch's lookups for good (and every batch's for an hour); it is never cached, retried or

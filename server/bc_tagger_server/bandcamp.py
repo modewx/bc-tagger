@@ -1,7 +1,7 @@
 """Find imported rows on Bandcamp, and build tagger items from Bandcamp pages.
 
 * Search: the public autocomplete JSON (``bcsearch_public_api/1/autocomplete_elastic``), from the
-  local server with the honest User-Agent below (never a browser's), one request at a time at the
+  local server with the app's own User-Agent (``bc_tagger_server.USER_AGENT``, never a browser's), one request at a time at the
   ``bandcamp_request_interval_s`` pace, cached (see ``fetcher``). No HTML-search fallback.
 * Bandcamp's bot check ("Client Challenge") raises ``Challenged``: the import stops its Bandcamp
   lookups and marks the rest of the rows unavailable. Never retried, never worked around.
@@ -25,13 +25,13 @@ from dataclasses import dataclass
 from typing import Any
 from urllib.parse import urlencode, urljoin, urlsplit
 
+from . import USER_AGENT
 from .fetcher import Challenged, Fetcher, RateLimited, Unavailable, load_fixtures
 from .rowmatch import ACCEPT_AT, score_row
 from .store import Store
 
 SEARCH_URL = "https://bandcamp.com/api/bcsearch_public_api/1/autocomplete_elastic"
 HTML_SEARCH_URL = "https://bandcamp.com/search"  # opened in the user's browser, never fetched
-USER_AGENT = "bc-tagger-dev/0.1 (personal collection tool; not used for AI training; https://github.com/modewx/bc-tagger)"
 ITEM_FIELDS = ("id", "raw_id", "tralbum_type", "item_type", "title", "artist", "album_title", "album_id",
                "album_url", "item_url", "url", "art_url", "band_id", "track_num", "publish_date", "file")
 _ID = re.compile(r"^[at]\d+$")

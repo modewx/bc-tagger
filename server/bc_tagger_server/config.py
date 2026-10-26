@@ -89,7 +89,9 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     # Suggest a manual full rescan when the last one is older than this.
     "full_rescan_hint_days": 30,
     # Imports: seconds between the server's Bandcamp requests (one at a time; read before each one).
-    "bandcamp_request_interval_s": 2.5,
+    "bandcamp_request_interval_s": 1.0,
+    # Which migrations this file has had (set by the server, not by clients).
+    "settings_version": 2,
     # The browser side (extension / app shared code) reads these for its own Bandcamp fetches.
     "bandcamp_browser_concurrency": 2,
     "bandcamp_browser_spacing_ms": 400,
@@ -107,6 +109,9 @@ DEFAULT_SETTINGS: dict[str, Any] = {
 
 # Keys the API refuses to change (they are safety-relevant or derived).
 READ_ONLY_KEYS: set[str] = set()
+# Bumped when a stored default changes meaning; files from before are migrated on load.
+# 2: bandcamp_request_interval_s default 2.5 → 1.0.
+SETTINGS_VERSION = 2
 
 
 def data_dir() -> Path:
@@ -134,6 +139,7 @@ def check_playlist_name(name: str) -> None:
 
 def _validate(merged: dict[str, Any]) -> dict[str, Any]:
     out = dict(merged)
+    out["settings_version"] = SETTINGS_VERSION
     if not isinstance(out.get("owned_root"), str):
         raise SettingsError("owned_root must be a string path")
     roots = out.get("not_owned_roots")
@@ -265,6 +271,8 @@ class Settings:
             try:
                 stored = json.loads(self.path.read_text())
                 data.update({k: v for k, v in stored.items() if k in DEFAULT_SETTINGS})
+                if stored.get("settings_version", 1) < 2 and stored.get("bandcamp_request_interval_s") == 2.5:
+                    data["bandcamp_request_interval_s"] = 1.0  # 2.5 was only the old default
             except (OSError, json.JSONDecodeError):
                 pass
         return _validate(data)
