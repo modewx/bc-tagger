@@ -5,7 +5,7 @@ import {
   probeServer,
   pullTagEdits,
   pullPendingAdds,
-  openImportRows,
+  importLinkCandidates,
   linkImportRow,
   queueItemsDiff,
   queueTags,
@@ -350,10 +350,10 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
     return true;
   }
 
-  // From the content script: imports waiting for a Bandcamp page, and linking
-  // the page's item to one of their rows.
-  if (request.type === "importRows") {
-    openImportRows().then(
+  // From the content script: import rows that fit an item of the page, and
+  // linking the page's item to one of them.
+  if (request.type === "importLinkCandidates") {
+    importLinkCandidates(request.item, request.page_url).then(
       (rows) => sendResponse({ ok: true, rows }),
       (e) => sendResponse({ ok: false, error: e.message })
     );
@@ -365,7 +365,7 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
       sendResponse({ ok: false, error: "not a Bandcamp track or album" });
       return false;
     }
-    linkImportRow(request.batch_id, request.n, item).then(
+    linkImportRow(request.batch_id, request.n, item, request.page_url).then(
       (row) => sendResponse({ ok: true, row }),
       (e) => sendResponse({ ok: false, error: e.message })
     );

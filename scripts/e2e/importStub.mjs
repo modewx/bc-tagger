@@ -1,37 +1,32 @@
 // A stand-in for the server's import API (Phase 3, shapes as documented by
 // Session A in LOCAL_COLLECTION_PLAN.md), served with page.route() so the
-// import UI can be tested before the server implements it. The "resolver":
-// rows already in the collection (existing_id) match it; a row with a link
-// hint (the file's bandcamp_url) is resolved from it (match_source "file"),
-// except rows listed in `unavailable`, which get the bot-check state the
-// server's resolver stops with; "Maybe Track" gets candidates; the rest are
-// unmatched (the user links or pastes them).
+// import UI's details can be tested on states the real server only produces
+// with the live site (the real-server import test covers the flow). Rows use
+// A's shape (row.bandcamp = {item, via}). The "resolver": rows already in the
+// collection (existing_id) match it; a row with a link hint (bandcamp_url) is
+// resolved from it (match.source "file_url"), except rows listed in
+// `unavailable`, which get the bot-check error A's resolver reports; "Maybe
+// Track" gets candidates; the rest are unmatched.
 
 export function importStub(file, { located = [], unavailable = [] } = {}) {
   const calls = [];
   let unknown = { ...file.unknown_tags };
   let status = "ready";
+  const UNAVAILABLE = "Unavailable: Bandcamp search unavailable (the HTML search returns a bot-check page)";
+  const itemFor = (c, it) => ({ id: c.id, raw_id: Number(c.id.slice(1)), tralbum_type: c.id[0], title: c.title, artist: c.artist, item_url: c.url });
+  // A's row shape: row.bandcamp = {item, via} when the row has a Bandcamp item.
+  function resolveFromHint(r) {
+    const c = { id: `t80000000${String(r.line).padStart(2, "0")}`, type: "track", title: r.title, artist: r.artist, url: r.hints.bandcamp_url, confidence: 0.97 };
+    r.match = { status: "accepted", source: "file_url", confidence: c.confidence, query: r.hints.bandcamp_url, candidates: [c], chosen: c };
+    r.bandcamp = { item: itemFor(c), via: "resolved" };
+    r.source = "bandcamp";
+  }
   const rows = file.items.map((it, n) => {
-    const kind = it.kind || "track";
-    const cands =
-      it.title === "Maybe Track"
-        ? [
-            { id: "t7000000001", type: "track", title: "Maybe Track", artist: "Two Options", album: null, url: "https://twooptions.bandcamp.com/track/maybe-track", confidence: 0.62 },
-            { id: "t7000000002", type: "track", title: "Maybe Track (Dub)", artist: "Two Options", album: null, url: "https://twooptions.bandcamp.com/track/maybe-track-dub", confidence: 0.41 },
-          ]
-        : [];
-    const blocked = unavailable.includes(it.line);
-    const fromHint = !it.existing_id && it.bandcamp_url && !blocked;
-    const chosen = it.existing_id
-      ? { id: it.existing_id, type: "track", title: it.title, artist: it.artist, url: null, confidence: 1 }
-      : fromHint
-      ? { id: `t80000000${String(it.line).padStart(2, "0")}`, type: "track", title: it.title, artist: it.artist, url: it.bandcamp_url, confidence: 0.97 }
-      : null;
-    return {
+    const r = {
       n,
       line: it.line,
       raw: it.raw,
-      kind,
+      kind: it.kind || "track",
       artist: it.artist ?? null,
       title: it.title,
       album: it.album ?? null,
@@ -45,24 +40,31 @@ export function importStub(file, { located = [], unavailable = [] } = {}) {
       flags: it.flags || [],
       note: it.note || null,
       checked: true,
-      source: chosen ? "bandcamp" : "other",
-      match: {
-        status: chosen ? "accepted" : blocked ? "unavailable" : cands.length ? "candidates" : "none",
-        source: it.existing_id ? "collection" : fromHint ? "file" : null,
-        error: blocked ? "Bandcamp answered with its bot check (Client Challenge); lookup stopped" : null,
-        confidence: chosen ? chosen.confidence : null,
-        query: [it.artist, it.title].filter(Boolean).join(" "),
-        url: null,
-        chosen,
-        candidates: cands,
-        item: chosen ? { id: chosen.id, title: it.title, artist: it.artist, tralbum_type: "t", url: chosen.url } : null,
-      },
+      source: "other",
+      match: { status: "none", source: null, confidence: 0, query: [it.artist, it.title].filter(Boolean).join(" "), candidates: [], chosen: null },
+      bandcamp: null,
       duplicate: it.existing_id ? { of: it.existing_id, source: "bandcamp", title: it.title, artist: it.artist, tags: it.existing_tags || [] } : null,
       hints: { bandcamp_url: it.bandcamp_url || null, discogs_url: it.discogs_url || null },
       located: located.includes(it.line) ? { status: "located", best: { path: `/e2e/${it.title}.aiff`, format: "aiff" }, candidates: [] } : { status: "missing", best: null, candidates: [] },
       links: { discogs: null, youtube: null },
       committed: null,
     };
+    if (it.existing_id) {
+      r.match.status = "in_collection";
+      r.bandcamp = { item: { id: it.existing_id, title: it.title, artist: it.artist, tralbum_type: "t" }, via: "collection" };
+      r.source = "bandcamp";
+    } else if (unavailable.includes(it.line)) {
+      Object.assign(r.match, { status: "error", error: UNAVAILABLE });
+    } else if (it.bandcamp_url) {
+      resolveFromHint(r);
+    } else if (it.title === "Maybe Track") {
+      r.match.status = "candidates";
+      r.match.candidates = [
+        { id: "t7000000001", type: "track", title: "Maybe Track", artist: "Two Options", album: null, url: "https://twooptions.bandcamp.com/track/maybe-track", confidence: 0.62 },
+        { id: "t7000000002", type: "track", title: "Maybe Track (Dub)", artist: "Two Options", album: null, url: "https://twooptions.bandcamp.com/track/maybe-track-dub", confidence: 0.41 },
+      ];
+    }
+    return r;
   });
   const stats = () => ({
     total: rows.length,
@@ -112,16 +114,17 @@ export function importStub(file, { located = [], unavailable = [] } = {}) {
       if (m) {
         const r = rows[Number(m[1])];
         ["tags", "checked", "artist", "title", "album"].forEach((k) => k in body && (r[k] = body[k]));
-        if (body.re_resolve) Object.assign(r.match, { status: "none", source: null, chosen: null, candidates: [], item: null });
+        // Requested of A (contract request 19): a pasted URL becomes the row's hint.
+        if ("bandcamp_url" in body) r.hints.bandcamp_url = body.bandcamp_url;
+        if (body.re_resolve) {
+          if (r.hints.bandcamp_url) resolveFromHint(r);
+          else Object.assign(r, { source: "other", bandcamp: null, match: { ...r.match, status: "none", source: null, chosen: null, candidates: [] } });
+        }
         if ("choose" in body) {
           const c = r.match.candidates.find((x) => x.id === body.choose) || null;
-          Object.assign(r.match, { status: c ? "manual" : "none", source: c ? "picked" : "none", chosen: c, url: null, item: null });
+          Object.assign(r.match, { status: "manual", chosen: c });
+          r.bandcamp = c ? { item: itemFor(c), via: "chosen" } : null;
           r.source = c ? "bandcamp" : "other";
-        }
-        if ("match_url" in body) {
-          const chosen = { id: null, type: /\/album\//.test(body.match_url) ? "album" : "track", title: r.title, artist: r.artist, url: body.match_url, confidence: null };
-          Object.assign(r.match, { status: "manual", source: "url", chosen, url: body.match_url });
-          r.source = "bandcamp";
         }
         return json(route, r);
       }

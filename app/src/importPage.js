@@ -239,6 +239,8 @@ const SOURCES = {
     "match-unavail",
     "Bandcamp lookup unavailable: Bandcamp showed its bot check (“Client Challenge”) to the server, which stopped looking rows up. Open on Bandcamp, then link the page with the tagger's button on it, or paste its URL here.",
   ],
+  notbc: ["not on Bandcamp", "match-none", "You marked it as not on Bandcamp: it goes to Other."],
+  pending: ["not looked up", "match-none", "Not looked up yet."],
   none: ["unmatched", "match-none", "No Bandcamp match yet: Open on Bandcamp, then link the page with the tagger's button on it, or paste its URL here."],
 };
 const sourceInfo = (row) => SOURCES[matchSource(row)] || [matchSource(row), "match-bc", `Match source: ${matchSource(row)}.`];
@@ -264,17 +266,25 @@ function urlForm(row) {
   input.className = "pop-input match-url";
   input.placeholder = "Paste a Bandcamp track or album URL";
   input.value = row.match.url || "";
+  if (!input.value && row.hints.bandcamp) input.placeholder = `Paste a Bandcamp track or album URL (the import has ${row.hints.bandcamp})`;
   const err = el("div", "pop-meta pop-err");
   const use = el("button", "primary", "Use URL");
+  // The URL becomes the row's link hint; the server then looks the row up from
+  // it (not after the bot check: then Link to import on the page does it).
   const submit = async () => {
     const url = cleanBandcampUrl(input.value);
     if (!url) {
       err.textContent = "That isn't a Bandcamp track or album page (…/track/… or …/album/…).";
       return;
     }
-    const saved = await patchRow(row, { match_url: url }, "Saving the URL…");
-    const took = saved && (saved.match.url === url || (saved.match.chosen && saved.match.chosen.url === url));
-    if (saved && !took) page.statusEl.textContent = "The server didn't keep the URL (it doesn't take pasted URLs yet).";
+    const saved = await patchRow(row, { bandcamp_url: url }, "Saving the URL…");
+    if (!saved) return;
+    if (saved.hints.bandcamp !== url) {
+      page.statusEl.textContent = "This server doesn't take a URL yet: open it and use Link to import on the page. ";
+      page.statusEl.appendChild(openLink(saved, "Open it ↗", url));
+      return;
+    }
+    if (!saved.lookupUnavailable) await patchRow(saved, { re_resolve: true }, "Looking it up…");
   };
   use.addEventListener("click", submit);
   input.addEventListener("keydown", (e) => e.key === "Enter" && submit());

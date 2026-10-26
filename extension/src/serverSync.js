@@ -269,19 +269,19 @@ export async function pullPendingAdds() {
 
 // --- Import rows (Phase 3) -----------------------------------------------------
 
-// Rows of open imports still waiting for their Bandcamp page (for the content
-// script's "Link to import"): [{batch_id, batch_name, n, line, artist, title,
-// album, position, track_num, hint, match_url}].
-export async function openImportRows() {
-  const rows = await api("/api/import/open-rows", { timeoutMs: 4000 });
+// Rows of open imports that fit an item of the Bandcamp page the user has open
+// (for the content script's "Link to import"), best first:
+// [{batch_id, batch_name, n, artist, title, album, score, hint_match, bandcamp_id, via}].
+export async function importLinkCandidates(item, pageUrl) {
+  const rows = await api("/api/import/link-candidates", { method: "POST", body: { item, page_url: pageUrl }, timeoutMs: 4000 });
   return Array.isArray(rows) ? rows : [];
 }
 
-// The page's item (as the content script saves it) becomes the row's match.
-export function linkImportRow(batchId, n, item) {
-  return api(`/api/import/${encodeURIComponent(batchId)}/rows/${encodeURIComponent(n)}`, {
-    method: "PUT",
-    body: { link_item: item },
+// The page's item (as the content script saves it) becomes the row's Bandcamp item.
+export function linkImportRow(batchId, n, item, pageUrl) {
+  return api(`/api/import/${encodeURIComponent(batchId)}/rows/${encodeURIComponent(n)}/link`, {
+    method: "POST",
+    body: { item, page_url: pageUrl },
   });
 }
 

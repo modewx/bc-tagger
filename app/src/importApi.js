@@ -7,6 +7,7 @@
 // Row:   {n, line, raw, kind, artist, title, album, album_artist, track_num, position, duration, year,
 //         label, catalog, expanded_from, tags, flags, note, checked, needsConfirmation,
 //         source: "bandcamp" | "other", duplicate: null | {of, source, title, artist, tags},
+//         via: how the row got its Bandcamp item ("collection" | "resolved" | "chosen" | "linked" | null),
 //         match: {status, source, confidence, query, url, error, chosen, candidates, item}, item (tagger item or null),
 //         lookupUnavailable (the server's Bandcamp lookup hit the bot check and stopped),
 //         hints: {bandcamp, discogs} (links from the file or a metadata lookup), local,
@@ -25,16 +26,17 @@ function normDuplicate(d, r) {
 }
 
 // The server's resolver stops on Bandcamp's bot check; rows it didn't look up
-// say so ("unavailable", or an error naming the challenge).
+// say so ("unavailable", or an error naming the challenge / bot-check page).
 function lookupUnavailable(r, match) {
   if (r.lookup === "unavailable" || r.lookup_status === "unavailable") return true;
   if (match.status === "unavailable" || match.status === "challenge") return true;
-  return match.status === "error" && /challenge|bot check/i.test(String(match.error || match.message || ""));
+  return match.status === "error" && /challenge|bot.?check/i.test(String(match.error || match.message || ""));
 }
 
 function normRow(r, i) {
   const match = r.match || r.resolve || {};
   const chosen = match.chosen || match.candidate || null;
+  const bc = r.bandcamp || null; // the server's {item, via}
   return {
     n: r.n ?? r.index ?? r.row ?? i,
     line: r.line,
@@ -55,7 +57,8 @@ function normRow(r, i) {
     flags: Array.isArray(r.flags) ? r.flags : [],
     note: r.note || null,
     checked: r.checked !== false,
-    source: r.source || (chosen || r.item || match.item ? "bandcamp" : "other"),
+    source: r.source || (bc || chosen || r.item || match.item ? "bandcamp" : "other"),
+    via: (bc && bc.via) || null,
     duplicate: normDuplicate(r.duplicate || r.duplicate_of, r),
     needsConfirmation: (Array.isArray(r.flags) ? r.flags : []).includes("needs_user_confirmation"),
     lookupUnavailable: lookupUnavailable(r, match),
@@ -70,7 +73,7 @@ function normRow(r, i) {
       candidates: Array.isArray(match.candidates) ? match.candidates : [],
       item: match.item || null,
     },
-    item: match.item || r.item || null,
+    item: (bc && bc.item) || match.item || r.item || null,
     local: r.located || r.local || null,
     links: r.links || {},
     hints: {
@@ -106,7 +109,7 @@ export const listBatches = () => apiJson("/api/import").then((l) => (Array.isArr
 export const getBatch = (id) => apiJson(`/api/import/${enc(id)}`).then(normBatch);
 export const startImport = (file, name, defaultTags) =>
   apiJson("/api/import", { method: "POST", body: { file, name, default_tags: defaultTags } });
-// patch: any of {tags, checked, choose: <candidate id> | null, artist, title, album, re_resolve, match_url}
+// patch: any of {tags, checked, choose: <candidate id> | null, artist, title, album, re_resolve, bandcamp_url}
 export const updateRow = (id, n, patch) =>
   apiJson(`/api/import/${enc(id)}/rows/${enc(n)}`, { method: "PUT", body: patch }).then((r) => (r ? normRow(r, n) : r));
 export const applyTagMap = (id, map, unmapped) =>
@@ -116,15 +119,19 @@ export const discardBatch = (id) => apiJson(`/api/import/${enc(id)}`, { method: 
 
 // Where a row's Bandcamp match came from, for the preview's Match column.
 // The server's match.source when it sends one, else from the status.
+const VIA = { collection: "collection", chosen: "picked", linked: "linked" };
+
 export function matchSource(row) {
   const m = row.match;
+  if (row.via) return VIA[row.via] || (m.source === "file_url" ? "file" : "search");
   if (row.lookupUnavailable && row.source !== "bandcamp") return "unavailable";
-  if (m.source) return m.source;
+  if (m.source && m.source !== "file_url") return m.source;
   if (row.duplicate && row.duplicate.source !== "other" && row.source === "bandcamp") return "collection";
-  if (m.status === "manual") return m.url ? "url" : m.item && !m.candidates.length ? "linked" : "picked";
+  if (m.status === "manual") return m.url ? "url" : m.chosen ? "picked" : "notbc"; // chosen null: "not on Bandcamp"
   if (m.status === "accepted") return "search";
   if (m.status === "candidates") return "candidates";
   if (m.status === "error") return "error";
+  if (m.status === "pending") return "pending";
   return "none";
 }
 
