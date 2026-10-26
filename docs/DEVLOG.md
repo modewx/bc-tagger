@@ -47,4 +47,40 @@ Tests never touch Bandcamp, the music drive or a real rekordbox library: Bandcam
 
 ## App and extension (`app/`, `extension/`, `shared/`, branch `claude/local-collection-ui-e8f6f6`)
 
-*(Session B's notes go here.)*
+### How to run
+
+```bash
+npm run build:app && npm run build:dev   # the local app (served by the server at /) and "Bc Tagger (dev)"
+npm run test:e2e                         # Playwright e2e: own profile, server :8767, app in .e2e/app-dist
+```
+
+### 2026-10-26
+
+- **Shared collection page:**
+  - The extension's built-in page and the local app use the same table (`shared/collection/`).
+  - Column widths are stored by column id. Adding a column once shifted them onto the wrong columns.
+  - **Columns ▾** shows and hides columns per page; Selection comes first; **Modified** sits next to Added;
+    Track # is off by default.
+  - One player per row.
+- **Extension:**
+  - Syncs to the server (diffs, a guarded full sync) and is the bridge for the local app (tag edits, page fetches,
+    pending adds from imports).
+  - Stamps `modified_at` whenever it changes an item's tags: its own edits, the app's, queued edits, imports and
+    merges.
+  - Content script: **Link to import** on Bandcamp album and track pages.
+  - "Look up in my browser" requests (Bandcamp hosts only, no cookies).
+  - The first "Client Challenge" stops its fetching; the last ownership check survives reloads, so dev rebuilds
+    don't ask Bandcamp again.
+- **Local app:**
+  - Collection: Owned / Located / Rekordbox; selection-driven Locate / **Export Selected to RB** / Download owned
+    missing; Settings (folders, matching, downloads, Bandcamp pacing, lookup source, the rekordbox target and the
+    tag → playlist mapping, which prefills `tag → tag` and shows playlists to be created in yellow).
+  - **Import:** file → tag mapping → preview (tints, match sources, Notes popover, Open on Bandcamp, pasted URL,
+    Locate again, Set file by search or Browse, Download) → Import selected. That opens the collection with
+    exactly the imported and merged items selected, newest Modified first.
+  - Open imports reopen at their step after navigation, reloads or a server restart.
+- **e2e:** no live Bandcamp (fixtures, recordings, the stub downloader); the app is built into its own folder so
+  runs never reload the user's tab.
+- **Checked on copies** (`.e2e/phase5-e2e.mjs`, a sandbox `rekordbox_test`):
+  - `annotations-test.json` → map → preview → Download → Import selected → Locate → Export Selected to RB;
+  - the selection after import is exactly the imported and merged items, newest Modified first.

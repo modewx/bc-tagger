@@ -278,9 +278,9 @@ test("the bundled collection page renders with the shared code", async () => {
   await page.goto(extPage("collection.html"));
   await page.waitForFunction((n) => document.querySelectorAll("#collectionTable tbody tr").length === n, exportCount);
   const headers = await page.$$eval("#collectionTable thead th", (ths) => ths.map((t) => t.firstChild.textContent));
-  assert.deepEqual(headers, ["#", "Added", "Thumbnail", "Title", "Artist", "Player", "Tags"]);
+  assert.deepEqual(headers, ["#", "Added", "Modified", "Thumbnail", "Title", "Artist", "Player", "Tags"]);
   const buttons = await page.$$eval("#toolbar button", (bs) => bs.map((b) => b.textContent));
-  assert.deepEqual(buttons, ["Refresh player files", "Refresh thumbnails", "Fix artists", "Fix album IDs"]);
+  assert.deepEqual(buttons, ["Refresh player files", "Refresh thumbnails", "Fix artists", "Fix album IDs", "Columns ▾"]);
   await page.waitForSelector("select.tag-editor", { state: "attached" });
   await page.close();
 });
@@ -1465,7 +1465,7 @@ test("collection: with rows selected, Locate / Export / Download act on them; wi
     const keys = await app.$$eval("#collectionTable tbody tr", (r) => r.slice(0, 2).map((x) => x.dataset.key));
     for (const k of keys) await app.check(`tr[data-key="${k}"] .row-check`);
     assert.equal(await app.textContent("#locateShown"), "Locate selected (2)");
-    assert.equal(await app.textContent("#exportShown"), "Export selected (2)…");
+    assert.equal(await app.textContent("#exportShown"), "Export Selected to RB (2)…");
     assert.equal(await app.textContent("#downloadOwnedMissing"), "Download owned missing (selected)");
     assert.equal(await app.textContent("#clearSelection"), "Clear selection (2)");
     assert.equal(await app.$eval("#selectAll", (b) => b.indeterminate), true);
@@ -1504,6 +1504,83 @@ test("collection: with rows selected, Locate / Export / Download act on them; wi
     assert.equal(await app.textContent("#locateShown"), `Locate selected (${shown})`);
     await app.uncheck("#selectAll");
     assert.equal(await app.textContent("#locateShown"), `Locate shown (${shown})`);
+  } finally {
+    await app.close();
+  }
+});
+
+// --- Phase 6: Modified, the Columns chooser -----------------------------------------------
+
+test("collection: the Columns chooser lists every column in order, toggles at once and remembers it; Selection first, Modified next to Added, Track # off", async () => {
+  const app = await context.newPage();
+  const KEY = "bc_app_col_widths_v2_shown";
+  try {
+    await app.goto(SERVER + "/");
+    await app.evaluate((k) => localStorage.removeItem(k), KEY);
+    await app.reload();
+    await app.waitForFunction(() => document.querySelectorAll("#collectionTable tbody tr").length > 0);
+    const headers = () => app.$$eval("#collectionTable thead th", (ths) => ths.map((th) => th.className.replace(/^col-/, "")));
+    const h = await headers();
+    assert.equal(h[0], "sel", "Selection first");
+    assert.equal(h.indexOf("modified"), h.indexOf("date") + 1, "Modified next to Added");
+    assert.ok(!h.includes("track"), "Track # is off by default");
+    await app.click("#columnsChooser");
+    const menu = await app.$$eval("#columnsMenu label", (ls) => ls.map((l) => [l.dataset.col, l.querySelector("input").checked]));
+    assert.deepEqual(menu.filter(([, on]) => on).map(([id]) => id), h, "the shown columns, in display order");
+    assert.deepEqual(menu.find(([id]) => id === "track"), ["track", false]);
+    assert.equal(await app.textContent('#columnsMenu label[data-col="sel"]'), " Selection");
+    await app.click('#columnsMenu label[data-col="track"] input');
+    assert.ok((await headers()).includes("track"), "shown at once");
+    await app.click('#columnsMenu label[data-col="thumb"] input');
+    assert.ok(!(await headers()).includes("thumb"), "hidden at once");
+    await app.reload();
+    await app.waitForFunction(() => document.querySelectorAll("#collectionTable tbody tr").length > 0);
+    const h2 = await headers();
+    assert.ok(h2.includes("track") && !h2.includes("thumb"), "remembered");
+    assert.ok(h2.indexOf("track") > h2.indexOf("modified") && h2.indexOf("track") < h2.indexOf("title"), "the order is kept");
+    // The extension's page has its own choice.
+    const ext = await context.newPage();
+    await ext.goto(extPage("collection.html"));
+    await ext.waitForFunction(() => document.querySelectorAll("#collectionTable tbody tr").length > 0);
+    assert.ok(!(await ext.$$eval("#collectionTable thead th", (ths) => ths.map((th) => th.className))).includes("col-track"));
+    await ext.close();
+  } finally {
+    await app.evaluate((k) => localStorage.removeItem(k), KEY).catch(() => {});
+    await app.close();
+  }
+});
+
+test("collection: Modified is when tags last changed; newest first puts undated items last", async () => {
+  const app = await context.newPage();
+  try {
+    await app.goto(SERVER + "/");
+    await app.waitForFunction(() => /extension connected/.test(document.getElementById("navExt").textContent));
+    await app.waitForFunction(() => document.querySelectorAll("#collectionTable tbody tr").length > 5);
+    const [a, b] = await app.$$eval("#collectionTable tbody tr", (trs) => trs.slice(3, 5).map((tr) => tr.dataset.key));
+    const edit = async (key) => {
+      await app.locator(`tr[data-key="${key}"]`).scrollIntoViewIfNeeded();
+      await app.waitForSelector(`tr[data-key="${key}"] select.tag-editor`, { state: "attached" });
+      const tags = await app.$eval(`tr[data-key="${key}"] select.tag-editor`, (s) => [...s.selectedOptions].map((o) => o.value));
+      const next = tags.includes("pool") ? tags.filter((t) => t !== "pool") : [...tags, "pool"];
+      await app.evaluate(([k, t]) => $(`tr[data-key="${k}"] select.tag-editor`).val(t).trigger("change"), [key, next]);
+      await waitFor(() => api(`/api/items/${key}`).then((it) => it.modified_at && JSON.stringify(it.tags.slice().sort()) === JSON.stringify(next.slice().sort())), { what: `${key} modified on the server` });
+    };
+    await edit(a);
+    await sleep(50);
+    await edit(b); // b is newer
+    const items = await storage("taggedItems");
+    assert.ok(items.taggedItems[a].modified_at && items.taggedItems[b].modified_at > items.taggedItems[a].modified_at, "the extension stamps modified_at");
+    await app.reload();
+    await app.waitForFunction(() => document.querySelectorAll("#collectionTable tbody tr").length > 5);
+    await app.click("th.col-modified"); // oldest first
+    await app.click("th.col-modified"); // newest first
+    assert.match(await app.textContent("th.col-modified"), /▼/);
+    const order = await app.$$eval("#collectionTable tbody tr", (trs) => trs.map((tr) => [tr.dataset.key, tr.querySelector(".col-modified").textContent]));
+    const keys = order.map(([k]) => k);
+    assert.ok(keys.indexOf(b) < keys.indexOf(a), "newest first");
+    const firstUndated = order.findIndex(([, d]) => !d);
+    assert.ok(firstUndated > keys.indexOf(a), "undated items after the dated ones");
+    assert.ok(order.slice(firstUndated).every(([, d]) => !d), "…all of them at the end");
   } finally {
     await app.close();
   }
@@ -2003,18 +2080,25 @@ test("import end to end (real server): resolve, map tags, paste a URL, link from
   assert.equal(holo.bandcamp.item.id, "t3738475288");
   assert.equal(batch.rows.find((r) => r.title === "E2E stand-in track").bandcamp.item.id, "t3738475200");
 
-  // Import selected → pending adds into the extension, the rest into Other.
+  // Import selected → the collection opens with exactly the imported and merged
+  // items selected, newest Modified first; the pending adds reach the extension.
+  const commits = [];
+  page.on("response", async (r) => {
+    if (/\/api\/import\/[^/]+\/commit$/.test(new URL(r.url()).pathname)) commits.push(await r.json().catch(() => null));
+  });
   await page.click("#importSelected");
-  await page.waitForFunction(() => /^Imported:/.test(document.getElementById("refreshStatus").textContent), null, { timeout: 30000 });
-  const status = await page.textContent("#refreshStatus");
-  const count = (k) => Number((status.match(new RegExp(`${k} (\\d+)`)) || [])[1] || 0);
-  assert.equal(count("tag merges"), 2, status);
-  assert.ok(count("pending adds") >= 4, status); // Holo Law, the stand-in, Super Drama, Astika at least
-  assert.ok(count("other added") >= 1, status);
+  await page.waitForURL(SERVER + "/", { timeout: 30000 });
+  const res = await waitFor(async () => commits[0], { what: "the commit result" });
+  assert.equal(res.tag_merges, 2, JSON.stringify(res));
+  assert.ok(res.pending_adds >= 4, JSON.stringify(res)); // Holo Law, the stand-in, Super Drama, Astika at least
+  assert.ok(res.other_added >= 1, JSON.stringify(res));
+  const chosen = res.selected;
+  assert.ok(Array.isArray(chosen) && chosen.length === res.pending_adds + res.tag_merges + res.other_added + res.other_merged, JSON.stringify(res));
   await waitFor(async () => !!(await storage("taggedItems")).taggedItems.t3738475288, { what: "Holo Law in the extension", timeout: 30000 });
   const after = (await storage("taggedItems")).taggedItems;
-  assert.equal(Object.keys(after).length, before + count("pending adds"));
+  assert.equal(Object.keys(after).length, before + res.pending_adds);
   assert.ok(after.t3738475288.tags.includes("vocal"));
+  assert.ok(after.t3738475288.modified_at, "new items carry modified_at");
   const elhwah = batch.rows.find((r) => r.title === "Elhwah").tags;
   await waitFor(
     async () => {
@@ -2025,15 +2109,35 @@ test("import end to end (real server): resolve, map tags, paste a URL, link from
   );
   assert.equal((await api("/api/tagger/pending-adds")).length, 0, "all pending adds acknowledged");
 
+  // Exactly those selected (new Bandcamp items join as the extension adds them), newest Modified first.
+  await page.waitForFunction((n) => document.querySelectorAll("#collectionTable .row-check:checked").length === n, chosen.length, { timeout: 30000 });
+  const checked = await page.$$eval("#collectionTable .row-check:checked", (b) => b.map((x) => x.closest("tr").dataset.key));
+  assert.deepEqual(checked.slice().sort(), chosen.slice().sort());
+  assert.match(await page.textContent("th.col-modified"), /▼/);
+  const top = await page.$$eval("#collectionTable tbody tr", (trs, n) => trs.slice(0, n).map((tr) => tr.dataset.key), chosen.length);
+  assert.deepEqual(top.slice().sort(), chosen.slice().sort(), "the imported items come first");
+  assert.match(await page.textContent("#refreshStatus"), new RegExp(`The ${chosen.length} imported and merged items are selected`));
+  assert.equal(await page.textContent("#exportShown"), `Export Selected to RB (${chosen.length})…`);
+
+  // Export Selected to RB: the dry run is exactly the selection (cancelled here; the sandbox run writes).
+  const exportPosts = [];
+  page.on("request", (r) => {
+    if (r.method() === "POST" && new URL(r.url()).pathname === "/api/rekordbox/export") exportPosts.push(JSON.parse(r.postData() || "{}"));
+  });
+  await page.click("#exportShown");
+  await waitFor(async () => exportPosts.length > 0, { what: "the export dry run", timeout: 60000 });
+  assert.equal(exportPosts[0].dry_run, true);
+  assert.deepEqual(exportPosts[0].ids.slice().sort(), chosen.slice().sort());
+  await page.waitForFunction(() => document.querySelector(".confirm-dialog .dialog-cancel") || !document.getElementById("exportShown").disabled, null, { timeout: 60000 });
+  if (await page.$(".confirm-dialog .dialog-cancel")) await page.click(".confirm-dialog .dialog-cancel");
+  assert.equal(exportPosts.length, 1, "only the dry run");
+
   // The collection: Other only.
-  const app = await context.newPage();
-  await app.goto(SERVER + "/");
-  await app.waitForFunction(() => document.querySelectorAll("#collectionTable tbody tr").length > 0);
-  if (await app.isChecked("#source_bandcamp")) await app.click("#source_bandcamp");
-  const others = await app.$$eval("#collectionTable tbody tr", (trs) => trs.map((tr) => tr.dataset.key));
-  assert.equal(others.length, count("other added"));
+  await page.click("#clearSelection");
+  if (await page.isChecked("#source_bandcamp")) await page.click("#source_bandcamp");
+  const others = await page.$$eval("#collectionTable tbody tr", (trs) => trs.map((tr) => tr.dataset.key));
+  assert.equal(others.length, res.other_added);
   assert.ok(others.every((k) => /^o[0-9a-f]+$/.test(k)), others.join(","));
-  await app.click("#source_bandcamp");
-  await app.close();
+  await page.click("#source_bandcamp");
   await page.close();
 });

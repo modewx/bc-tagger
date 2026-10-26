@@ -16,6 +16,28 @@ The extension owns the tags (`chrome.storage.local`) and keeps the server's mirr
 app edits tags through the extension (a content script on the server's page); when the extension isn't
 reachable, edits are queued on the server and applied by the extension on its next sync.
 
+## The local app
+
+- **Collection** (`/`): Owned / Located / Rekordbox columns, Bandcamp and Other collections, a selection
+  column (select-all for the rows shown), **Columns ▾** to show or hide columns (remembered per page; Track # is
+  off by default), and **Modified** (when an item's tags last changed) next to **Added**.
+  - The bulk buttons act on the selected rows, or on the rows shown when none are selected: **Locate**,
+    **Export Selected to RB** (always a dry run, then confirm), **Download owned missing**.
+  - The Located popover: candidates, Locate again, **Download** for owned releases that aren't on the drive.
+- **Settings → Import:**
+  - import a `bc-tagger-import/1` track list: default tags, optionally on every track; lookups by the server or
+    **in my browser** (the extension);
+  - map unknown tags, then review the preview: tints, match sources, Notes, Locate again / Set file (search or
+    Browse), Download, Open on Bandcamp, or **Link to import** on the Bandcamp page itself.
+  - **Import selected** opens the collection with exactly the imported and merged items selected, newest
+    Modified first, ready for **Export Selected to RB**.
+  - An open import survives leaving the page; the header shows where it is.
+- **Settings → General:** music folders, matching, downloads (folder and format), Bandcamp request pacing, the
+  lookup source (Bandcamp / MusicBrainz / both); **Rekordbox:** the target library and tag → playlist mapping.
+
+Bandcamp is only reached by the server's paced lookups (if enabled) and by the extension in your own Chrome. The
+first "Client Challenge" (bot check) stops it and says so.
+
 ## Build
 
 ```bash
@@ -42,10 +64,18 @@ npm run test:e2e     # HEADED=1 npm run test:e2e to watch
 ```
 
 Runs the extension, server and local app together in a Playwright Chromium with a throwaway profile
-(`.e2e/`), never the regular Chrome profile: Import, sync, the built-in collection page, the popup's See
-Collection (server up/down), app ↔ extension tag edits, queued edits, and Bandcamp ownership when the
-cookie file exists. It builds "Bc Tagger (e2e)" pointed at its own server on port 8767 with a fresh data
-folder, so it never touches the server on 8765 or rekordbox. First time only: `npx playwright install chromium`.
+(`.e2e/`), never the regular Chrome profile.
+- It builds "Bc Tagger (e2e)" pointed at its own server on port 8767 with a fresh data folder, and the app into
+  `.e2e/app-dist` (served by that server). It never touches the server on 8765, the `app/dist` it serves, or
+  rekordbox.
+- **No live Bandcamp:** Bandcamp hosts don't resolve in the test browser. Pages and API answers come from
+  `scripts/e2e/fixtures/bandcamp/` and the server's recordings (`server/tests/fixtures/`). Downloads use the stub
+  downloader. Any unrecorded Bandcamp request fails the test that made it.
+- It covers import/sync/popup/bridge, the collection page (selection, columns, Modified), the import flow on the
+  real server (mapping, linking, browser lookups, downloads, re-locate, browse), settings, and rekordbox dry runs
+  and a sandbox write.
+
+First time only: `npx playwright install chromium`.
 
 Other helpers: `node scripts/ext-page-harness.js --build extension/build --data <export.json>` serves a
 built extension page in any browser with a stub `chrome` API. Server tests: see `server/README.md`.

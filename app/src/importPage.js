@@ -212,6 +212,7 @@ function selectColumn() {
     id: "sel",
     first: true,
     label: "",
+    chooserLabel: "Selection",
     headerRender(th) {
       const all = document.createElement("input");
       all.type = "checkbox";
@@ -866,6 +867,17 @@ async function importSelected(statusEl, button) {
         .filter(([, v]) => typeof v === "number")
         .map(([k, v]) => `${k.replace(/_/g, " ")} ${v}`)
         .join(", ");
+    // The collection opens with exactly what was imported and merged
+    // selected, newest Modified first, ready for "Export Selected to RB".
+    if (Array.isArray(r.selected)) {
+      try {
+        localStorage.setItem("bc_after_import", JSON.stringify({ ids: r.selected, at: Date.now(), batch: batchId, summary: statusEl.textContent }));
+      } catch (e) {
+        /* no handoff: the link below still opens the collection */
+      }
+      location.href = "/";
+      return;
+    }
     const link = el("a", "", "Open the collection →");
     link.href = "/";
     statusEl.append(" ", link);

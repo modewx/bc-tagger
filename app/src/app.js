@@ -111,13 +111,29 @@ function updateShownButtons() {
   const dl = document.getElementById("downloadOwnedMissing");
   const clear = document.getElementById("clearSelection");
   if (loc) loc.textContent = sel ? `Locate selected (${sel})` : `Locate shown (${shown})`;
-  if (exp) exp.textContent = sel ? `Export selected (${sel})…` : `Export shown (${shown})…`;
+  if (exp) exp.textContent = sel ? `Export Selected to RB (${sel})…` : `Export shown (${shown})…`;
   if (dl) dl.textContent = sel ? "Download owned missing (selected)" : "Download owned missing";
   if (clear) {
     clear.hidden = !sel;
     clear.textContent = `Clear selection (${sel})`;
   }
   syncSelectAll();
+}
+
+// After an import (the preview hands over what it imported and merged): those
+// items selected, all others not, newest Modified first, ready for "Export
+// Selected to RB". Consumed once.
+const AFTER_IMPORT_KEY = "bc_after_import";
+function takeImportedSelection() {
+  let handoff = null;
+  try {
+    handoff = JSON.parse(localStorage.getItem(AFTER_IMPORT_KEY) || "null");
+    localStorage.removeItem(AFTER_IMPORT_KEY);
+  } catch (e) {
+    return null;
+  }
+  if (!handoff || !Array.isArray(handoff.ids) || Date.now() - (handoff.at || 0) > 10 * 60 * 1000) return null;
+  return handoff;
 }
 
 // The checkbox column: select rows for the bulk buttons; the header box
@@ -136,6 +152,7 @@ function selectColumn() {
     id: "sel",
     first: true,
     label: "",
+    chooserLabel: "Selection",
     headerRender(th) {
       const all = document.createElement("input");
       all.type = "checkbox";
@@ -299,5 +316,20 @@ async function refreshHealth() {
     await page.start();
   } catch (e) {
     page.statusEl.textContent = `Could not load the collection from the server: ${e.message}`;
+  }
+
+  const imported = takeImportedSelection();
+  if (imported) {
+    // New Bandcamp items join as the extension adds them: they're selected as they appear.
+    selected.clear();
+    imported.ids.forEach((id) => selected.add(id));
+    statusFilter.reset();
+    sourceFilter.reset();
+    page.refilter();
+    page.sortBy("modified", -1);
+    updateShownButtons();
+    page.statusEl.textContent =
+      `${imported.summary ? `${imported.summary} ` : ""}The ${imported.ids.length} imported and merged items are selected, ` +
+      "newest Modified first: Export Selected to RB adds them to rekordbox.";
   }
 })();
