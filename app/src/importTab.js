@@ -9,6 +9,7 @@ import { ServerEvents } from "../../shared/datasource/serverEvents";
 import { Jobs, progressText, resultText } from "./jobs";
 import { listBatches, getBatch, startImport, applyTagMap, discardBatch, resumeLookups } from "./importApi";
 import { rememberImport, rememberedImport, stepLabel, stepOf, stepUrl } from "./openImport";
+import { runBrowserLookups, lookupsText } from "./browserLookups";
 
 const STAT_LABELS = [
   ["total", "rows"],
@@ -58,7 +59,7 @@ function tagSelect(id, vocab, selected, width) {
   };
 }
 
-export function createImportTab(container) {
+export function createImportTab(container, { bridge } = {}) {
   const events = new ServerEvents().start();
   const jobs = new Jobs(events);
   let vocab = [];
@@ -70,6 +71,9 @@ export function createImportTab(container) {
   const fileInfo = el("div", { class: "help", id: "importFileInfo" });
   const tagsHolder = el("div", { id: "importDefaultTagsHolder" });
   const allBox = el("input", { type: "checkbox", id: "importDefaultAll" });
+  // Where the Bandcamp lookups run.
+  const viaServer = el("input", { type: "radio", name: "importLookup", value: "server", id: "importLookupServer", checked: true });
+  const viaBrowser = el("input", { type: "radio", name: "importLookup", value: "browser", id: "importLookupBrowser" });
   const start = el("button", { type: "button", id: "importStart", disabled: true }, "Start import");
   const progress = el("div", { class: "import-progress", id: "importProgress", hidden: true });
   const openCard = el("div", { class: "import-open", id: "importOpen", hidden: true });
@@ -97,6 +101,18 @@ export function createImportTab(container) {
         tagsHolder,
         el("label", { class: "check-label" }, allBox, " Add default tags to all tracks"),
         el("div", { class: "help" }, "Off: only tracks with no tags get them. On: every track gets them on top of its own tags.")
+      ),
+      el(
+        "div",
+        { class: "field" },
+        el("label", { class: "field-label" }, "Look up on Bandcamp"),
+        el("label", { class: "check-label" }, viaServer, " by the server"),
+        el("label", { class: "check-label" }, viaBrowser, " in my browser (the Bc Tagger extension, while this page stays open)"),
+        el(
+          "div",
+          { class: "help" },
+          "In your browser, the searches run in your Chrome session, paced by General → Bandcamp requests; they stop on Bandcamp's bot check or rate limit."
+        )
       ),
       el("div", { class: "field" }, start, progress),
       mapping
@@ -157,7 +173,7 @@ export function createImportTab(container) {
     progress.textContent = "Starting…";
     let res;
     try {
-      res = await startImport(fileData, fileName, defaultTags ? defaultTags.get() : [], allBox.checked);
+      res = await startImport(fileData, fileName, defaultTags ? defaultTags.get() : [], allBox.checked, viaBrowser.checked ? "browser" : "server");
     } catch (e) {
       progress.className = "import-progress err";
       progress.textContent = `Import failed: ${e.message}`;
@@ -167,10 +183,64 @@ export function createImportTab(container) {
     rememberImport(res.batch_id);
     setHash(res.batch_id);
     const est = res.estimate && res.estimate.text ? ` (${res.estimate.text})` : "";
-    if (await follow(res.batch_id, res.job_id, est)) await afterResolve(res.batch_id);
+    if (await follow(res.batch_id, res.job_id, est)) await afterLookups(res.batch_id);
     start.disabled = false;
     loadBatches();
   });
+
+  // After the server's first job: a browser batch waits for this page to run
+  // its lookups; then (or for a server batch, now) the mapping step / preview.
+  async function afterLookups(id) {
+    const b = await getBatch(id).catch(() => null);
+    if (b && stepOf(b) === "browser") return driveBrowser(id);
+    return afterResolve(id);
+  }
+
+  // Run a browser batch's lookups through the extension, then follow the
+  // locate job the server starts, then the next step.
+  let driving = null;
+  async function driveBrowser(id) {
+    if (driving === id) return;
+    driving = id;
+    progress.hidden = false;
+    progress.className = "import-progress";
+    try {
+      if (!bridge || !bridge.connected) {
+        progress.className = "import-progress err";
+        progress.textContent =
+          "This import looks up in your browser: open this page in the Chrome profile that has the Bc Tagger extension (connected) and it carries on.";
+        return;
+      }
+      let st;
+      try {
+        st = await runBrowserLookups(id, bridge, (s) => (progress.textContent = lookupsText(s)));
+      } catch (e) {
+        progress.className = "import-progress err";
+        progress.textContent = `Lookups in your browser stopped: ${e.message}`;
+        return;
+      }
+      progress.textContent = lookupsText(st);
+      if (st.state === "paused") {
+        progress.className = "import-progress err";
+        const again = el("button", { type: "button", class: "mini-btn", id: "importResumeBrowser" }, "Resume in my browser");
+        again.addEventListener("click", async () => {
+          again.disabled = true;
+          await resumeLookups(id).catch(() => {});
+          driveBrowser(id);
+        });
+        progress.append(" ", again);
+        return;
+      }
+      if (st.state === "stopped") progress.className = "import-progress err";
+      const b = await getBatch(id);
+      const jobId = (b.job && b.job.id) || b.job_id;
+      if (b.status === "resolving" && jobId && !(await follow(id, jobId))) return;
+      const now = await getBatch(id);
+      if (now.status === "ready") await afterResolve(id);
+    } finally {
+      driving = null;
+    }
+  }
 
   // Follow a batch's lookups (its job) until they're done; also after a
   // reload or coming back from another page: nothing was cancelled meanwhile.
@@ -219,9 +289,12 @@ export function createImportTab(container) {
     showOpen(batch);
     const step = stepOf(batch);
     const jobId = (batch.job && batch.job.id) || batch.job_id;
-    if (step === "progress") {
+    if (step === "browser") {
       setHash(id);
-      if (following !== id && jobId && (await follow(id, jobId))) await afterResolve(id);
+      driveBrowser(id);
+    } else if (step === "progress") {
+      setHash(id);
+      if (following !== id && jobId && (await follow(id, jobId))) await afterLookups(id);
     } else if (step === "interrupted") {
       setHash(id);
       progress.hidden = false;

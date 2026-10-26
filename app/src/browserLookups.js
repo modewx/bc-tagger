@@ -34,7 +34,7 @@ export async function runBrowserLookups(id, bridge, onProgress = () => {}) {
         const wait = nextStart - Date.now();
         nextStart = Math.max(nextStart, Date.now()) + spacing;
         if (wait > 0) await sleep(wait);
-        if (stop) return;
+        if (stop || !queue.length) return; // another request took the last one meanwhile
         const req = queue.shift();
         let r;
         try {

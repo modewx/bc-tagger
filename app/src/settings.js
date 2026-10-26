@@ -572,7 +572,7 @@ function render(main, data) {
     mapping.setTargetFolder(folderInput.value);
     folderInput.addEventListener("input", () => mapping.setTargetFolder(folderInput.value));
   }
-  importTab = createImportTab(main);
+  importTab = createImportTab(main, { bridge });
   const start = fromHash();
   showTab(start ? start.tab : "general", start && start.arg);
 }

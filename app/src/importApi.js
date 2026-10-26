@@ -122,8 +122,10 @@ export function normBatch(b) {
 
 export const listBatches = () => apiJson("/api/import").then((l) => (Array.isArray(l) ? l : (l && l.batches) || []).map(normBatch));
 export const getBatch = (id) => apiJson(`/api/import/${enc(id)}`).then(normBatch);
-export const startImport = (file, name, defaultTags, defaultTagsAll = false) =>
-  apiJson("/api/import", { method: "POST", body: { file, name, default_tags: defaultTags, default_tags_all: defaultTagsAll } });
+// lookup: "server" (the server looks rows up on Bandcamp) or "browser" (the
+// extension does, in the user's Chrome, while the Import tab is open).
+export const startImport = (file, name, defaultTags, defaultTagsAll = false, lookup = "server") =>
+  apiJson("/api/import", { method: "POST", body: { file, name, default_tags: defaultTags, default_tags_all: defaultTagsAll, lookup } });
 // Change an open batch's default tags: `all` puts them on every row, else only on untagged rows.
 export const setDefaultTags = (id, tags, all) =>
   apiJson(`/api/import/${enc(id)}/default-tags`, { method: "PUT", body: { tags, all } });

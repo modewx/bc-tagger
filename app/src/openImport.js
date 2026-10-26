@@ -34,6 +34,7 @@ export async function openImports() {
 // (the preview), "committing", "committed" or "error". From the server's
 // `step`, or (older servers) from the status and stats.
 const STEPS = {
+  browser: "browser",
   resolving: "progress",
   locating: "progress",
   interrupted: "interrupted",
@@ -70,6 +71,10 @@ export function stepLabel(batch, live) {
     }
     case "interrupted":
       return "Import interrupted: resume the lookups";
+    case "browser": {
+      const p = live || batch.progress || {};
+      return `Import: looking up in your browser${p.total ? ` ${p.current || 0}/${p.total}` : ""}…`;
+    }
     case "committing":
       return "Import: importing…";
     case "mapping":

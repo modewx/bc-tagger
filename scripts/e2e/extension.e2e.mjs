@@ -17,6 +17,7 @@ import { test, before, after, afterEach } from "node:test";
 import assert from "node:assert/strict";
 import { spawn, execFileSync } from "node:child_process";
 import fs from "node:fs";
+import crypto from "node:crypto";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { chromium } from "playwright";
@@ -1793,6 +1794,122 @@ test("bot check: ownership reports it and stops refreshing in the background", a
   const after = await probe.evaluate(() => chrome.storage.session.get("bcSyncStatus").then((s) => s.bcSyncStatus));
   assert.ok(!after.ownership.challenge);
   await app.close();
+});
+
+// --- "Look up in my browser" (Phase 5): the extension answers the server's requests -----
+// Every Bandcamp request the extension makes is answered from Session A's
+// recordings, found by the same key the server's fetcher uses:
+// sha1(json.dumps([method, url, body], sort_keys=True)) (Python's spacing and
+// \u escapes). Nothing reaches Bandcamp.
+
+function pyJson(v) {
+  if (v === null || v === undefined) return "null";
+  if (typeof v === "boolean") return v ? "true" : "false";
+  if (typeof v === "number") return String(v);
+  if (typeof v === "string") return JSON.stringify(v).replace(/[\u0080-￿]/g, (c) => "\\u" + c.charCodeAt(0).toString(16).padStart(4, "0"));
+  if (Array.isArray(v)) return "[" + v.map(pyJson).join(", ") + "]";
+  return "{" + Object.keys(v).sort().map((k) => `${pyJson(k)}: ${pyJson(v[k])}`).join(", ") + "}";
+}
+const recordedKey = (method, url, body) => crypto.createHash("sha1").update(pyJson([method, url, body ?? null])).digest("hex");
+const BANDCAMP_HOSTS = /^https?:\/\/([a-z0-9-]+\.)*bandcamp\.com\//i;
+
+function browserAnswers({ challenge = false } = {}) {
+  const recorded = Object.fromEntries(
+    JSON.parse(fs.readFileSync(path.join(RECORDED_RESOLVER, "bandcamp_recorded.json"), "utf8")).map((e) => [e.key, e])
+  );
+  const seen = [];
+  const handler = (route) => {
+    const req = route.request();
+    let body = null;
+    try {
+      body = req.postData() ? JSON.parse(req.postData()) : null;
+    } catch (e) {
+      /* not JSON */
+    }
+    const rec = recorded[recordedKey(req.method(), req.url(), body)];
+    seen.push({ method: req.method(), url: req.url(), recorded: !!rec });
+    if (challenge) return route.fulfill({ status: 200, contentType: "text/html", body: CHALLENGE_HTML });
+    if (rec) return route.fulfill({ status: rec.status, contentType: req.method() === "POST" ? "application/json" : "text/html; charset=utf-8", body: rec.body });
+    if (req.method() === "POST") return route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ auto: { results: [] } }) });
+    return route.fulfill({ status: 404, contentType: "text/html", body: "Not found (e2e)" });
+  };
+  return { handler, seen };
+}
+
+async function startBrowserImport(page, file) {
+  await page.goto(SERVER + "/settings/#import");
+  await page.waitForFunction(() => /extension connected/.test(document.getElementById("navExt").textContent));
+  await page.setInputFiles("#importFile", file);
+  await page.waitForFunction(() => /rows from/.test(document.getElementById("importFileInfo").textContent));
+  await page.check("#importLookupBrowser");
+  await page.click("#importStart");
+}
+
+test("import, Look up in my browser: the extension makes the server's requests (recorded answers); same results as the server; then mapping and preview (real server)", async () => {
+  const items = JSON.parse(fs.readFileSync(path.join(ROOT, "server/tests/fixtures/import_rows.json"), "utf8"));
+  const file = path.join(E2E, "import-browser.json");
+  fs.writeFileSync(file, JSON.stringify({ format: "bc-tagger-import/1", source: "e2e-browser.txt", revision: 3, unknown_tags: { mourn: ["melancholic"] }, pending_releases: [], items }));
+  const answers = browserAnswers();
+  await context.route(BANDCAMP_HOSTS, answers.handler);
+  const page = await context.newPage();
+  let batchId = null;
+  try {
+    await startBrowserImport(page, file);
+    try {
+      await page.waitForSelector("#importMapping:not([hidden])", { timeout: 90000 });
+    } catch (e) {
+      const id = decodeURIComponent((page.url().split("#import/")[1] || ""));
+      const st = id ? await api(`/api/import/${id}/lookups`).catch((x) => String(x)) : null;
+      throw new Error(`no mapping step: progress "${await page.textContent("#importProgress")}", seen ${JSON.stringify(answers.seen.slice(0, 6))} (${answers.seen.length}), lookups ${JSON.stringify(st).slice(0, 600)}`);
+    }
+    batchId = decodeURIComponent(page.url().split("#import/")[1]);
+    assert.ok(answers.seen.some((s) => s.method === "POST" && s.recorded), "searches answered from the recordings");
+    assert.ok(answers.seen.every((s) => s.recorded), `requests with no recording: ${answers.seen.filter((s) => !s.recorded).map((s) => s.url).join(", ")}`);
+    await page.click("#mapCreate");
+    await page.waitForURL(/\/import\/\?batch=imp-/);
+    await page.waitForFunction(() => document.querySelectorAll("#collectionTable tbody tr").length === 12);
+    const src = await page.$$eval("#collectionTable tbody tr", (trs) =>
+      Object.fromEntries(trs.map((tr) => [tr.querySelector(".col-title").textContent, tr.querySelector(".match-cell .chip").dataset.source]))
+    );
+    assert.equal(src["Take It As A Game (Super Drama Mix)"], "file");
+    assert.equal(src.Astika, "search");
+    assert.equal(src.Elhwah, "collection");
+  } finally {
+    await context.unroute(BANDCAMP_HOSTS, answers.handler);
+    if (batchId) await api(`/api/import/${batchId}`, { method: "DELETE" });
+    await page.close();
+  }
+});
+
+test("import, Look up in my browser: Bandcamp's bot check in the browser stops the lookups (real server)", async () => {
+  // Rows nobody has looked up (answers already in the server's cache aren't asked for again).
+  const items = [1, 2, 3, 4].map((n) => ({ line: n, raw: `Never Seen ${n} - Unknown Artist`, artist: "Unknown Artist", title: `Never Seen ${n}`, tags: ["must"] }));
+  const file = path.join(E2E, "import-browser-challenge.json");
+  fs.writeFileSync(file, JSON.stringify({ format: "bc-tagger-import/1", source: "e2e-challenge.txt", items }));
+  const answers = browserAnswers({ challenge: true });
+  await context.route(BANDCAMP_HOSTS, answers.handler);
+  const page = await context.newPage();
+  let batchId = null;
+  try {
+    await startBrowserImport(page, file);
+    try {
+      await page.waitForFunction(() => /Stopped: .*bot check/.test((document.getElementById("importProgress") || {}).textContent || ""), null, { timeout: 60000 });
+    } catch (e) {
+      throw new Error(`no stop message: at ${page.url()}, progress "${await page.textContent("#importProgress").catch(() => "-")}", ${answers.seen.length} requests`);
+    }
+    batchId = decodeURIComponent(page.url().split("#import/")[1]);
+    const asked = answers.seen.length;
+    assert.ok(asked >= 1 && asked <= 4, `requests: ${asked}`);
+    await page.waitForTimeout(1500);
+    assert.equal(answers.seen.length, asked, "nothing more after the bot check");
+    const state = await api(`/api/import/${batchId}/lookups`);
+    assert.equal(state.state, "stopped");
+    assert.equal(state.reason, "challenge");
+  } finally {
+    await context.unroute(BANDCAMP_HOSTS, answers.handler);
+    if (batchId) await api(`/api/import/${batchId}`, { method: "DELETE" });
+    await page.close();
+  }
 });
 
 // --- Phase 3 end to end, on the real server ------------------------------------------
