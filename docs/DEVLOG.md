@@ -44,6 +44,14 @@ Tests never touch Bandcamp, the music drive or a real rekordbox library: Bandcam
   - Checked on a copy: sorted by Modified, the newest 20 items were exactly the commit's selection. Exporting
     that selection to a sandbox `rekordbox_test` (Elhwah merged with a new tag → added to
     `/bc-tagger/ritual`) gave 16 entries, 5 new playlists and no errors.
+- **Downloads, later that day (user's request):**
+  - Progress in plain words: "downloading 42 %", or "retrying 1/3 after: SocketTimeoutException: Read timed out".
+    A download had looked stuck on "Retrying (1/3).", but it finished on its second try.
+  - When the downloader's cache lists a release whose files are gone, the server downloads it again once
+    (`--force`) instead of reporting it as already downloaded.
+  - `full_release: true` downloads the whole album or EP a track is on, when that release is owned. Items and
+    import rows say what's owned (`track_owned`, `album_owned`, `full_release`), so the app shows Download File
+    only for owned items and Download Full Release only where it works.
 
 ## App and extension (`app/`, `extension/`, `shared/`, branch `claude/local-collection-ui-e8f6f6`)
 
