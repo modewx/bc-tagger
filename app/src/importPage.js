@@ -16,7 +16,7 @@ import { openPopover, closePopover } from "./popover";
 import { getBatch, updateRow, commitBatch, discardBatch, resumeLookups, setDefaultTags, relocateRows, relocateRow, searchFiles, listFolder, rowToItem, matchSource, bandcampSearchUrl, openOnBandcampUrl, cleanBandcampUrl } from "./importApi";
 import { statsLine } from "./importTab";
 import { rememberImport } from "./openImport";
-import { downloadFlow, stateLabel, trackDownloads } from "./downloads";
+import { downloadFileTitle, downloadFlow, fullReleaseOf, fullReleasesToggle, stateLabel, trackDownloads } from "./downloads";
 import { playableItem } from "./statusFilter";
 
 const batchId = new URLSearchParams(location.search).get("batch");
@@ -507,17 +507,20 @@ function matchColumn() {
 }
 
 // --- Downloads (owned releases) ---------------------------------------------------------
-// Rows have no ownership of their own: Download is offered for missing rows
-// with a Bandcamp item, and the dry run lists any that aren't owned.
+// Offered for missing rows whose Bandcamp item is owned (the server's row.owned):
+// Download File, and Download Full Release when the track's album or EP is owned.
 
 const refOf = (row) => `${batchId}:${row.n}`;
-const downloadableRow = (row) => row.source === "bandcamp" && !!row.item && !(row.local && row.local.status === "located") && row.owned !== false;
+const downloadableRow = (row) =>
+  row.source === "bandcamp" && !!row.item && !(row.local && row.local.status === "located") && !!row.owned && row.owned.status === "owned";
+const rowIsAlbum = (row) => String((row.item && row.item.id) || "").startsWith("a");
+const fullReleases = fullReleasesToggle();
 const dlState = trackDownloads(events, (d) => {
   if (!String(d.ref).startsWith(`${batchId}:`)) return;
   page.refreshRow(`r${String(d.ref).split(":").pop()}`);
 });
-const downloadRows = async (rows) => {
-  if (!(await downloadFlow(rows.map(refOf), "import", { jobs, statusEl: page.statusEl }))) return;
+const downloadRows = async (rows, fullRelease = false) => {
+  if (!(await downloadFlow(rows.map(refOf), "import", { jobs, statusEl: page.statusEl, fullRelease }))) return;
   await page.reload(); // what the server located, even if a live update was missed
   rows.forEach((r) => page.refreshRow(`r${r.n}`));
   renderInfo();
@@ -713,14 +716,24 @@ function locatedPopover(anchor, row) {
     });
     foot.append(again, setFile);
     if (downloadableRow(row)) {
-      const dl = el("button", "", "Download");
+      const dl = el("button", "", "Download File");
       dl.id = "downloadRow";
-      dl.title = "Download this release from your Bandcamp collection into the downloads folder, then locate it";
+      dl.title = downloadFileTitle(row.owned, rowIsAlbum(row));
       dl.addEventListener("click", () => {
         closePopover();
         downloadRows([row]);
       });
       foot.appendChild(dl);
+      if (fullReleaseOf(row.owned, row.item.id)) {
+        const full = el("button", "", "Download Full Release");
+        full.id = "downloadRowFullRelease";
+        full.title = "Download the whole album or EP this track is on into the downloads folder, then locate it";
+        full.addEventListener("click", () => {
+          closePopover();
+          downloadRows([row], true);
+        });
+        foot.appendChild(full);
+      }
     }
     if (local.manual) {
       const auto = el("button", "", "Back to automatic");
@@ -948,10 +961,12 @@ async function discard(statusEl) {
       {
         id: "downloadOwnedMissing",
         label: "Download owned missing",
-        title: "Download the selected rows you own on Bandcamp that aren't on your drive (shows the releases first)",
+        title:
+          "Download the selected rows you own on Bandcamp that aren't on your drive. " +
+          "With Download Full Releases ticked: each track's whole album or EP.",
         run: async (statusEl, button) => {
           button.disabled = true;
-          await downloadRows(batch.rows.filter((r) => r.checked && downloadableRow(r)));
+          await downloadRows(batch.rows.filter((r) => r.checked && downloadableRow(r)), fullReleases.checked());
           button.disabled = false;
           await page.reload();
           renderInfo();
@@ -970,6 +985,7 @@ async function discard(statusEl) {
     titleUrl: (item) => (item.source === "other" ? null : item.url || item.item_url || null),
   });
   showSel.addEventListener("change", () => page.refilter());
+  document.getElementById("downloadOwnedMissing").after(fullReleases.el);
   // "Locate again": missing rows by default, every row on request.
   const allRows = document.createElement("label");
   allRows.className = "locate-all";

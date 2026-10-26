@@ -1604,7 +1604,16 @@ const DL = {
   refused: { id: "a2773973352", artist: "Earthman", title: "[TerraFirm 3] Earthman - Orogenesis" },
 };
 
-async function downloadSetup() {
+// Ownership detail (the server's owned.track_owned / full_release): Download File only
+// for owned items; Download Full Release when a track's album or EP is owned.
+const FULLDL = {
+  notOwned: { id: "t1005306136", q: "Clicked" }, // Carré
+  trackOnly: { id: "t1002746421", q: "Futuro Lontano" }, // TSVI, bought on its own
+  viaAlbum: { id: "t1013878587", q: "Green Ranger", album: { id: "a2132989582", artist: "PIGMNT", title: "Green Ranger EP", tracks: ["Green Ranger", "Two"] } },
+  boxed: { id: "t1042405552", q: "Lords Of Gwaranjar", album: { id: "a3440228500", artist: "Smogo", title: "Sharp Knowledge EP", tracks: ["Lords Of Gwaranjar", "Two"] } },
+};
+
+async function downloadSetup({ releases = [], owned = [] } = {}) {
   fs.rmSync(OWNED, { recursive: true, force: true });
   fs.mkdirSync(OWNED, { recursive: true });
   const cookies = path.join(E2E, "cookies-dummy.txt");
@@ -1616,26 +1625,27 @@ async function downloadSetup() {
       [DL.collection.id]: release(DL.collection),
       [DL.import.id]: release(DL.import),
       [DL.refused.id]: release(DL.refused, { fail: "not_in_collection" }),
+      ...Object.fromEntries(releases.map((r) => [r.id, release(r, { tracks: r.tracks })])),
     })
   );
   const before = await api("/api/settings").then((d) => d.settings || d);
   const saved = await put({ owned_root: OWNED, cookies_file: cookies, downloads_dir: "", download_format: "aiff-lossless" });
   assert.ok(!saved.detail, `settings: ${JSON.stringify(saved.detail)}`);
-  await post("/api/ownership", { owned_ids: Object.values(DL).map((r) => r.id), source: "e2e", full: false });
+  await post("/api/ownership", { owned_ids: [...Object.values(DL).map((r) => r.id), ...owned], source: "e2e", full: false });
   return async () => {
     await put({ owned_root: before.owned_root, cookies_file: before.cookies_file, downloads_dir: before.downloads_dir || "" });
     fs.rmSync(OWNED, { recursive: true, force: true });
   };
 }
 
-test("Download (collection): an owned album not on the drive is downloaded (stub) and located; the confirm lists the release", async () => {
+test("Download (collection): an owned album not on the drive is downloaded (stub) and located, with no confirmation; the status names the release", async () => {
   const restore = await downloadSetup();
   const { id } = DL.collection;
   const app = await context.newPage();
-  let dialog = "";
+  const dialogs = [];
   app.on("dialog", (d) => {
-    dialog = d.message();
-    d.accept();
+    dialogs.push(d.message());
+    d.dismiss();
   });
   try {
     await app.goto(SERVER + "/");
@@ -1644,10 +1654,16 @@ test("Download (collection): an owned album not on the drive is downloaded (stub
     await app.waitForFunction((id) => document.querySelectorAll("#collectionTable tbody tr").length === 1 && document.querySelector(`tr[data-key="${id}"]`), id);
     await app.waitForFunction((id) => /owned/.test(document.querySelector(`tr[data-key="${id}"] .col-owned`).textContent), id);
     await app.click(`tr[data-key="${id}"] .col-located .chip`);
+    assert.equal(await app.textContent(".popover #downloadItem"), "Download File");
+    assert.equal(await app.$(".popover #downloadFullRelease"), null, "an album is its own full release");
+    let started = "";
     await app.click(".popover #downloadItem");
+    await app.waitForFunction(() => /^Download(ing|:)/.test(document.getElementById("refreshStatus").textContent));
+    started = await app.textContent("#refreshStatus");
     await app.waitForFunction(() => /^Download: 1 of 1 releases downloaded/.test(document.getElementById("refreshStatus").textContent), null, { timeout: 60000 });
-    assert.match(dialog, /^Download 1 release → .*\(aiff-lossless\):\n• Reptant – Halls Of Perception {2}\[a2225096452\]/);
-    assert.ok(dialog.includes(OWNED), dialog);
+    assert.deepEqual(dialogs, [], "no confirmation");
+    if (/^Downloading 1 release/.test(started)) assert.match(started, /→ .*\(aiff-lossless\): Reptant – Halls Of Perception\./);
+    assert.ok((await app.textContent("#refreshStatus")).includes(`→ ${OWNED}.`), "where it went");
     await waitFor(() => api(`/api/items/${id}`).then((it) => it.local && it.local.status === "located"), { what: "the item located on the server", timeout: 30000 });
     const item = await api(`/api/items/${id}`);
     assert.ok(item.local.best.path.startsWith(OWNED), item.local.best.path);
@@ -1668,22 +1684,32 @@ test("Download owned missing (import): the selected rows are downloaded and loca
   const items = [
     { line: 1, raw: "Bjarki - Look at yourself", artist: "Bjarki", title: "Look at yourself", existing_id: DL.import.id, tags: ["must"] },
     { line: 2, raw: "Earthman - Orogenesis", artist: "Earthman", title: "Orogenesis", existing_id: DL.refused.id, tags: ["must"] },
+    { line: 3, raw: "Carré - Clicked", artist: "Carré", title: "Clicked", existing_id: FULLDL.notOwned.id, tags: ["must"] },
   ];
   const { batch_id: batchId } = await post("/api/import", { file: { format: "bc-tagger-import/1", source: "e2e-download.txt", items }, default_tags: [], name: "e2e-download" });
   const page = await context.newPage();
-  let dialog = "";
+  const dialogs = [];
   page.on("dialog", (d) => {
-    dialog = d.message();
-    d.accept();
+    dialogs.push(d.message());
+    d.dismiss();
   });
+  const bodies = [];
+  page.on("request", (r) => r.method() === "POST" && r.url().endsWith("/api/download") && bodies.push(r.postDataJSON()));
   try {
     await waitFor(() => api(`/api/import/${batchId}`).then((b) => b.status === "ready"), { what: "the batch", timeout: 30000 });
     await page.goto(`${SERVER}/import/?batch=${batchId}`);
-    await page.waitForFunction(() => document.querySelectorAll("#collectionTable tbody tr").length === 2);
+    await page.waitForFunction(() => document.querySelectorAll("#collectionTable tbody tr").length === 3);
+    // The row that isn't owned has no Download (it couldn't work).
+    await page.click("tr[data-key='r2'] .located-cell .chip");
+    await page.waitForSelector(".popover");
+    assert.equal(await page.$(".popover #downloadRow"), null);
+    await page.keyboard.press("Escape");
     await page.click("#downloadOwnedMissing");
     await page.waitForFunction(() => /^Download: 1 of 2 releases downloaded, 1 failed/.test(document.getElementById("refreshStatus").textContent), null, { timeout: 60000 });
-    assert.match(dialog, /^Download 2 releases → /);
-    assert.match(dialog, /• Bjarki – Look at yourself {2}\[a3484490386\]/);
+    assert.deepEqual(dialogs, [], "no confirmation");
+    assert.deepEqual(bodies[0].ids, [`${batchId}:0`, `${batchId}:1`], "only the owned rows");
+    assert.equal(bodies[0].dry_run, true);
+    assert.equal(bodies[0].full_release, undefined);
     await page.waitForFunction(() => document.querySelector("tr[data-key='r0'] .located-cell .chip").dataset.status === "located", null, { timeout: 30000 });
     await page.waitForFunction(() => /download failed: not in your Bandcamp collection/.test(document.querySelector("tr[data-key='r1'] .located-cell").textContent));
     assert.equal((await api(`/api/import/${batchId}`)).rows[0].located.status, "located");
@@ -1691,6 +1717,119 @@ test("Download owned missing (import): the selected rows are downloaded and loca
     await api(`/api/import/${batchId}`, { method: "DELETE" });
     await restore();
     await page.close();
+  }
+});
+
+test("Download File only for owned items; Download Full Release for a track whose album is owned; the Download Full Releases box (collection, import)", async () => {
+  const restore = await downloadSetup({
+    releases: [FULLDL.viaAlbum.album, FULLDL.boxed.album],
+    owned: [FULLDL.trackOnly.id, FULLDL.viaAlbum.album.id, FULLDL.boxed.album.id],
+  });
+  const app = await context.newPage();
+  const bodies = [];
+  app.on("request", (r) => r.method() === "POST" && r.url().endsWith("/api/download") && bodies.push(r.postDataJSON()));
+  const dialogs = [];
+  app.on("dialog", (d) => {
+    dialogs.push(d.message());
+    d.dismiss();
+  });
+  const status = () => app.textContent("#refreshStatus");
+  const show = async ({ id, q }) => {
+    await app.fill("#searchInput", q);
+    await app.waitForFunction((id) => document.querySelector(`tr[data-key="${id}"]`), id);
+  };
+  const popoverButtons = async ({ id }) => {
+    await app.click(`tr[data-key="${id}"] .col-located .chip`);
+    await app.waitForSelector(".popover");
+    const b = await app.$$eval(".popover .pop-actions button", (bs) => bs.map((x) => x.textContent));
+    return b;
+  };
+  let batchId = null;
+  try {
+    await app.goto(SERVER + "/");
+    await app.waitForFunction(() => document.querySelectorAll("#collectionTable tbody tr").length > 0);
+    await app.evaluate(() => localStorage.removeItem("bc_download_full_releases"));
+    await app.reload();
+    await app.waitForFunction(() => document.querySelectorAll("#collectionTable tbody tr").length > 0);
+    // The box sits next to Download owned missing, off by default.
+    assert.equal(await app.$eval("#downloadOwnedMissing", (b) => b.nextElementSibling.querySelector("#downloadFullReleases") !== null), true);
+    assert.equal(await app.isChecked("#downloadFullReleases"), false);
+
+    await show(FULLDL.notOwned);
+    let b = await popoverButtons(FULLDL.notOwned);
+    assert.ok(!b.includes("Download File") && !b.includes("Download Full Release"), `not owned: ${b}`);
+    await app.keyboard.press("Escape");
+
+    await show(FULLDL.trackOnly);
+    b = await popoverButtons(FULLDL.trackOnly);
+    assert.ok(b.includes("Download File") && !b.includes("Download Full Release"), `bought on its own: ${b}`);
+    assert.match(await app.getAttribute(".popover #downloadItem", "title"), /bought on its own/);
+    await app.keyboard.press("Escape");
+
+    await show(FULLDL.viaAlbum);
+    b = await popoverButtons(FULLDL.viaAlbum);
+    assert.ok(b.includes("Download File") && b.includes("Download Full Release"), `album owned: ${b}`);
+    // The row says how far the download is ("downloading 50 %"), from the server's events.
+    await app.evaluate((id) => {
+      window.__dlSeen = [];
+      new MutationObserver(() => {
+        const t = (document.querySelector(`tr[data-key="${id}"] .col-located`) || {}).textContent || "";
+        if (t && !window.__dlSeen.includes(t)) window.__dlSeen.push(t);
+      }).observe(document.getElementById("collectionTable"), { childList: true, subtree: true, characterData: true });
+    }, FULLDL.viaAlbum.id);
+    await app.click(".popover #downloadFullRelease");
+    await app.waitForFunction(() => /^Download: 1 of 1 releases downloaded/.test(document.getElementById("refreshStatus").textContent), null, { timeout: 60000 });
+    const seen = await app.evaluate(() => window.__dlSeen);
+    assert.ok(seen.some((t) => /downloading \d+ %/.test(t)), `progress in the row: ${JSON.stringify(seen)}`);
+    assert.deepEqual(bodies.map((x) => [x.ids, x.full_release, !!x.dry_run]), [
+      [[FULLDL.viaAlbum.id], true, true],
+      [[FULLDL.viaAlbum.id], true, false],
+    ]);
+    assert.ok(fs.readdirSync(path.join(OWNED, "PIGMNT")).some((d) => d.includes("Green Ranger EP")), "the whole EP was downloaded");
+
+    // The box: the selected owned items' full releases; one bought on its own has none.
+    bodies.length = 0;
+    await show(FULLDL.trackOnly);
+    await app.check(`tr[data-key="${FULLDL.trackOnly.id}"] .row-check`);
+    await show(FULLDL.boxed);
+    await app.check(`tr[data-key="${FULLDL.boxed.id}"] .row-check`);
+    await app.check("#downloadFullReleases");
+    await app.click("#downloadOwnedMissing");
+    await app.waitForFunction(() => /^Download: 1 of 1 releases downloaded/.test(document.getElementById("refreshStatus").textContent), null, { timeout: 60000 });
+    assert.deepEqual(bodies[0].ids.slice().sort(), [FULLDL.trackOnly.id, FULLDL.boxed.id].sort());
+    assert.equal(bodies[0].full_release, true);
+    assert.match(await status(), /Not downloadable: 1 the full release isn't owned \(only this track\)\./);
+    assert.ok(fs.readdirSync(path.join(OWNED, "Smogo")).some((d) => d.includes("Sharp Knowledge EP")));
+    assert.deepEqual(dialogs, [], "no confirmation");
+    await app.reload();
+    await app.waitForFunction(() => document.querySelectorAll("#collectionTable tbody tr").length > 0);
+    assert.equal(await app.isChecked("#downloadFullReleases"), true, "remembered");
+
+    // The import preview: the same buttons from the row's ownership.
+    const items = [
+      { line: 1, raw: "Carré - Clicked", artist: "Carré", title: "Clicked", existing_id: FULLDL.notOwned.id, tags: ["must"] },
+      { line: 2, raw: "TSVI - Futuro Lontano", artist: "TSVI", title: "Futuro Lontano", existing_id: FULLDL.trackOnly.id, tags: ["must"] },
+    ];
+    ({ batch_id: batchId } = await post("/api/import", { file: { format: "bc-tagger-import/1", source: "e2e-full.txt", items }, default_tags: [], name: "e2e-full" }));
+    await waitFor(() => api(`/api/import/${batchId}`).then((x) => x.status === "ready"), { what: "the batch", timeout: 30000 });
+    await app.goto(`${SERVER}/import/?batch=${batchId}`);
+    await app.waitForFunction(() => document.querySelectorAll("#collectionTable tbody tr").length === 2);
+    assert.equal(await app.isChecked("#downloadFullReleases"), true, "the same box on the preview");
+    const rowButtons = async (n) => {
+      await app.click(`tr[data-key='r${n}'] .located-cell .chip`);
+      await app.waitForSelector(".popover");
+      const x = await app.$$eval(".popover .pop-actions button", (bs) => bs.map((y) => y.textContent));
+      await app.keyboard.press("Escape");
+      return x;
+    };
+    assert.ok(!(await rowButtons(0)).includes("Download File"), "not owned");
+    const own = await rowButtons(1);
+    assert.ok(own.includes("Download File") && !own.includes("Download Full Release"), `bought on its own: ${own}`);
+  } finally {
+    await app.evaluate(() => localStorage.removeItem("bc_download_full_releases")).catch(() => {});
+    if (batchId) await api(`/api/import/${batchId}`, { method: "DELETE" });
+    await restore();
+    await app.close();
   }
 });
 

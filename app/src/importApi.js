@@ -75,6 +75,8 @@ function normRow(r, i) {
       item: match.item || null,
     },
     item: (bc && bc.item) || match.item || r.item || null,
+    // The Bandcamp item's ownership ({status, track_owned, album_owned, full_release}); null when unknown.
+    owned: r.owned || null,
     local: r.located || r.local || null,
     links: r.links || {},
     hints: {
@@ -229,6 +231,7 @@ export function rowToItem(row) {
     url: base.url || base.item_url || (row.match.chosen && row.match.chosen.url) || null,
     links: row.links,
     local: row.local || base.local || null,
+    owned: row.owned || base.owned || null,
     importRow: row, // not "_row": the table compares items without _ fields, and row-only changes must show
   };
 }

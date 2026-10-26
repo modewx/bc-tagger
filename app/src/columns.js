@@ -6,7 +6,7 @@ import { openPopover, closePopover } from "./popover";
 import { progressText, resultText } from "./jobs";
 import { runExport } from "./exportFlow";
 import { sourceOf } from "./statusFilter";
-import { downloadFlow, stateLabel, trackDownloads } from "./downloads";
+import { downloadFileTitle, downloadFlow, fullReleaseOf, stateLabel, trackDownloads } from "./downloads";
 
 const LOCAL_RANK = { located: 0, candidates: 1, missing: 2, unknown: 3 };
 const OWNED_RANK = { owned: 0, not_owned: 1, unknown: 2 };
@@ -128,8 +128,8 @@ export function appColumns(ctx) {
   }
   // After the job, re-read the items too (like the other row jobs): rows show
   // what the server located even if a live update was missed.
-  const download = async (keys) => {
-    const job = await downloadFlow(keys, "collection", { jobs: ctx.jobs, statusEl: ctx.statusEl() });
+  const download = async (keys, fullRelease = false) => {
+    const job = await downloadFlow(keys, "collection", { jobs: ctx.jobs, statusEl: ctx.statusEl(), fullRelease });
     if (!job) return;
     keys.forEach((k) => delete busy[k]);
     await ctx.page().reload();
@@ -233,15 +233,27 @@ export function appColumns(ctx) {
         locate(key);
       });
       foot.appendChild(again);
+      // Only what can work: nothing for items not owned; the full release when
+      // the track's album or EP is owned.
       if (downloadable(item)) {
-        const dl = el("button", "", "Download");
+        const dl = el("button", "", "Download File");
         dl.id = "downloadItem";
-        dl.title = "Download this release from your Bandcamp collection into the downloads folder, then locate it";
+        dl.title = downloadFileTitle(item.owned, String(key).startsWith("a"));
         dl.addEventListener("click", () => {
           closePopover();
           download([key]);
         });
         foot.appendChild(dl);
+        if (fullReleaseOf(item.owned, key)) {
+          const full = el("button", "", "Download Full Release");
+          full.id = "downloadFullRelease";
+          full.title = "Download the whole album or EP this track is on into the downloads folder, then locate it";
+          full.addEventListener("click", () => {
+            closePopover();
+            download([key], true);
+          });
+          foot.appendChild(full);
+        }
       }
       pop.appendChild(foot);
     });

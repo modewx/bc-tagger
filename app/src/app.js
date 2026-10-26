@@ -8,7 +8,7 @@ import { ServerEvents } from "../../shared/datasource/serverEvents";
 import { Jobs, progressText, resultText } from "./jobs";
 import { buildNav } from "./nav";
 import { appColumns, downloadable, localPlayUrl } from "./columns";
-import { downloadFlow } from "./downloads";
+import { downloadFlow, fullReleasesToggle } from "./downloads";
 import { startDevReload } from "./devReload";
 import { createStatusFilter, createSourceFilter, sourceOf, playableItem } from "./statusFilter";
 import { runExport } from "./exportFlow";
@@ -22,6 +22,7 @@ const nav = buildNav("collection");
 nav.trackImports(events);
 const statusFilter = createStatusFilter();
 const sourceFilter = createSourceFilter();
+const fullReleases = fullReleasesToggle();
 
 let page = null;
 
@@ -257,13 +258,15 @@ async function refreshHealth() {
       {
         id: "downloadOwnedMissing",
         label: "Download owned missing",
-        title: "Download the selected (or shown) items you own on Bandcamp that aren't on your drive (shows the releases first)",
+        title:
+          "Download the selected (or shown) items you own on Bandcamp that aren't on your drive. " +
+          "With Download Full Releases ticked: each track's whole album or EP.",
         className: "job-btn",
         run: async (statusEl, button) => {
           button.disabled = true;
           const items = page.getItems();
           const keys = targetIds().filter((k) => downloadable(items[k]));
-          if (await downloadFlow(keys, "collection", { jobs, statusEl })) {
+          if (await downloadFlow(keys, "collection", { jobs, statusEl, fullRelease: fullReleases.checked() })) {
             await page.reload();
             keys.forEach((k) => page.refreshRow(k));
           }
@@ -296,6 +299,7 @@ async function refreshHealth() {
     if (b) b.dataset.title = b.title;
   });
   document.getElementById("rescanDrive").after(indexStatus.el, indexStatus.hint);
+  document.getElementById("downloadOwnedMissing").after(fullReleases.el);
 
   // Let the wide table scroll sideways on narrow screens.
   const table = document.getElementById("collectionTable");

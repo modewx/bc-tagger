@@ -22,8 +22,11 @@ reachable, edits are queued on the server and applied by the extension on its ne
   column (select-all for the rows shown), **Columns ▾** to show or hide columns (remembered per page; Track # is
   off by default), and **Modified** (when an item's tags last changed) next to **Added**.
   - The bulk buttons act on the selected rows, or on the rows shown when none are selected: **Locate**,
-    **Export Selected to RB** (always a dry run, then confirm), **Download owned missing**.
-  - The Located popover: candidates, Locate again, **Download** for owned releases that aren't on the drive.
+    **Export Selected to RB** (always a dry run, then confirm), **Download owned missing** (with **Download Full
+    Releases** ticked: each track's whole album or EP).
+  - The Located popover: candidates, Locate again, **Download File** for owned items that aren't on the drive, and
+    **Download Full Release** when a track's album or EP is owned. Downloads start at once and the row shows their
+    progress.
 - **Settings → Import:**
   - import a `bc-tagger-import/1` track list: default tags, optionally on every track; lookups by the server or
     **in my browser** (the extension);
