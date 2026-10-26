@@ -65,6 +65,12 @@ Tests never touch Bandcamp, the music drive or a real rekordbox library: Bandcam
   - A commit that stops part way is logged too, and so is the retry.
   - Downloads are now kept in a `download_log` table, so the logs can say what each row got.
   - API: `GET /api/import/logs`, `GET /api/import/logs/<name>`, `POST /api/import/logs/reveal`.
+- **"#" made explicit (user's request, via B):**
+  - `order` is one sequence across Bandcamp items (numbered by the extension) and Other items (numbered by
+    the server).
+  - Import commits number their new items after everything else, in import order. Merges keep their number.
+  - `GET /api/items` sorts by it by default, and `/api/health` gives `max_order` so the extension numbers new
+    tags after the import's Other items.
 
 ## App and extension (`app/`, `extension/`, `shared/`, branch `claude/local-collection-ui-e8f6f6`)
 
