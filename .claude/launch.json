@@ -2,6 +2,15 @@
   "version": "0.0.1",
   "configurations": [
     {
+      "name": "server-8765",
+      "runtimeExecutable": "bash",
+      "runtimeArgs": [
+        "-c",
+        "exec server/bct serve --port 8765"
+      ],
+      "port": 8765
+    },
+    {
       "name": "server-8766",
       "runtimeExecutable": "bash",
       "runtimeArgs": [
