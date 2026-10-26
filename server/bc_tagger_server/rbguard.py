@@ -262,8 +262,9 @@ def check_write_main(
 
     if not _allowed(allow):
         return refuse("writing to the main collection is turned off (Settings → Rekordbox)")
-    if target != resolve(configured):
-        return refuse(f"{t} is not the configured main collection ({resolve(configured)})")
+    configured_path = resolve(configured() if callable(configured) else configured)
+    if target != configured_path:
+        return refuse(f"{t} is not the configured main collection ({configured_path})")
     for d in protected_dirs:
         if is_within(target, d):
             return refuse(f"{t} is on the protected volume {d}")
@@ -423,3 +424,45 @@ def guarded_commit(db: Any, db_path: str | Path, mode: str = "test", **guard_kwa
         else:
             db.commit()
     return decision
+
+
+@dataclass
+class Target:
+    """Where an export writes: the test library or (only from settings) the main collection."""
+
+    kind: str  # "test" | "main"
+    db_path: str
+    guard: dict[str, Any]  # test: check_write kwargs; main: {allow, configured[, running]}
+
+    @property
+    def is_main(self) -> bool:
+        return self.kind == "main"
+
+    def check(self) -> GuardDecision:
+        if self.is_main:
+            return check_write_main(self.db_path, **self.guard)
+        return check_write(self.db_path, **self.guard)
+
+    def require(self) -> GuardDecision:
+        decision = self.check()
+        if not decision.allowed:
+            raise WriteRefused(decision.reason)
+        return decision
+
+    def backup(self) -> Path:
+        if self.is_main:
+            return backup_main(self.db_path, **self.guard)
+        return backup(self.db_path, **self.guard)
+
+    def open_write(self):
+        return open_database(self.db_path, for_write=True, mode=self.kind, **self.guard)
+
+    def open_read(self):
+        path = snapshot(self.db_path) if self.is_main else self.db_path
+        return open_database(path, for_write=False)
+
+    def commit(self, db: Any) -> GuardDecision:
+        return guarded_commit(db, self.db_path, mode=self.kind, **self.guard)
+
+    def source_fingerprint(self) -> str:
+        return source_fingerprint(self.db_path)

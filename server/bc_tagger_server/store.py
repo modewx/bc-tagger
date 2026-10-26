@@ -100,6 +100,19 @@ CREATE TABLE IF NOT EXISTS rb_entries (
     PRIMARY KEY (db_path, tag, content_id)
 );
 
+-- Dry runs that a real export may confirm (required for the main collection).
+CREATE TABLE IF NOT EXISTS confirm_tokens (
+    token TEXT PRIMARY KEY,
+    target TEXT NOT NULL,
+    db_path TEXT NOT NULL,
+    plan_fingerprint TEXT NOT NULL,
+    source_fingerprint TEXT NOT NULL,
+    item_ids TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    expires_at REAL NOT NULL,
+    used_at TEXT
+);
+
 CREATE TABLE IF NOT EXISTS tag_edits (
     seq INTEGER PRIMARY KEY AUTOINCREMENT,
     item_id TEXT NOT NULL,

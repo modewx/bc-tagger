@@ -87,8 +87,10 @@ def cmd_locate(svc: Service, args: argparse.Namespace) -> int:
 
 def _diff_text(diff: dict[str, Any]) -> str:
     g = diff.get("guard") or {}
+    target = diff.get("target", "test")
     lines = [
-        f"db: {diff['db_path']}{'  (DRY RUN)' if diff['dry_run'] else ''}",
+        f"target: {target.upper() if target == 'main' else target}  db: {diff['db_path']}"
+        f"{'  (DRY RUN)' if diff['dry_run'] else ''}",
         f"guard: {g.get('reason')}",
     ]
     if diff.get("backup"):
@@ -96,20 +98,26 @@ def _diff_text(diff: dict[str, Any]) -> str:
     lines.append(f"items: {diff['items']} selected, tracks: {diff['tracks']}")
     for it in diff.get("selected_items", []):
         lines.append(f"  - {it['id']:12} {it['title']}  {it.get('tags') or ''}")
-    f = diff["folder"]
-    lines.append(f"folder '{f['name']}': {'created' if f['created'] else 'exists'}")
+    for e in diff.get("errors", []):
+        lines.append(f"ERROR: {e}")
+    for w in diff.get("warnings", []):
+        lines.append(f"warning: {w}")
+    if diff.get("folders_created"):
+        lines.append(f"folders to create: {', '.join(diff['folders_created'])}")
     lines.append(f"content: {len(diff['content_added'])} added, {diff['content_existing']} already present"
                  + (f", {len(diff['content_updated'])} filled in" if diff.get("content_updated") else ""))
     for u in diff.get("content_updated", []):
         lines.append(f"  ~ filled {', '.join(u['fields'])}: {_short(u['path'])}")
     if diff["playlists_created"]:
-        lines.append(f"playlists created: {', '.join(diff['playlists_created'])}")
+        lines.append(f"playlists {'to create' if diff['dry_run'] else 'created'}: {', '.join(diff['playlists_created'])}")
     lines.append(
         f"entries: {len(diff['entries_added'])} added, {len(diff['entries_removed'])} removed, "
-        f"{diff['entries_kept_user']} user entries left alone"
+        f"{diff['entries_kept_user']} already there (left alone)"
     )
+    for pp in diff.get("per_playlist", []):
+        lines.append(f"  {pp['playlist']}{'' if pp['exists'] else ' (new)'}: +{pp['add']} -{pp['remove']}")
     for e in diff["entries_removed"]:
-        lines.append(f"  - removed [{e['tag']}] {_short(e['path'])}")
+        lines.append(f"  - removed [{e['playlist']}] {_short(e['path'])}")
     if diff["missing_files"]:
         lines.append(f"missing files: {len(diff['missing_files'])}")
     for f in diff.get("failed_files", []):
@@ -117,6 +125,8 @@ def _diff_text(diff: dict[str, Any]) -> str:
     if diff["skipped_items"]:
         lines.append("skipped: " + ", ".join(f"{s['id']} ({s['status']})" for s in diff["skipped_items"]))
     lines.append("changed: " + ("yes" if diff.get("changed") else "no (nothing to do)"))
+    if diff["dry_run"] and diff.get("confirm_token") and diff.get("changed"):
+        lines.append(f"confirm with: --confirm {diff['confirm_token']}  (valid until {diff['token_expires_at']})")
     return "\n".join(lines)
 
 
@@ -125,7 +135,14 @@ def cmd_export(svc: Service, args: argparse.Namespace) -> int:
     if sel["ids"] is None and sel["latest"] is None and not args.all:
         print("choose --latest N, --ids ID,ID or --all", file=sys.stderr)
         return 2
-    diff = svc.export(**sel, dry_run=args.dry_run)
+    from .rbexport import ExportError
+    from .rbguard import WriteRefused
+
+    try:
+        diff = svc.export(**sel, dry_run=args.dry_run, confirm_token=args.confirm)
+    except (ExportError, WriteRefused) as e:
+        print(f"export refused: {e}", file=sys.stderr)
+        return 1
     _out(diff, args, _diff_text(diff))
     return 0
 
@@ -144,13 +161,14 @@ def cmd_xml(svc: Service, args: argparse.Namespace) -> int:
 
 def cmd_rb_status(svc: Service, args: argparse.Namespace) -> int:
     from .rbexport import read_back
-    from .rbguard import check_write
 
     folder = svc.settings.get("playlist_folder")
-    state = read_back(svc.db_path(), folder)
-    state["guard"] = check_write(svc.db_path()).to_dict()
+    target = svc.target()
+    keys = sorted({k for t in svc.store.get_tags() for k in svc.playlist_rule()(t)})
+    state = read_back(target, folder, keys)
+    state["guard"] = target.check().to_dict()
     lines = [
-        f"db: {state['db_path']}",
+        f"target: {target.kind}  db: {state['db_path']}",
         f"write guard: {state['guard']['reason']}",
         f"content rows: {state['content_count']}  duplicate paths: {len(state.get('duplicate_content_paths', []))}",
     ]
@@ -169,7 +187,7 @@ def cmd_rb_status(svc: Service, args: argparse.Namespace) -> int:
 def cmd_rb_restore(svc: Service, args: argparse.Namespace) -> int:
     from .rbguard import BACKUP_DIRNAME, resolve, restore
 
-    db_path = resolve(svc.db_path())
+    db_path = resolve(svc.test_db_path())  # backups/restore are for the test library only
     backups = sorted((db_path.parent / BACKUP_DIRNAME).glob(f"{db_path.stem}_*.db"))
     if not args.backup:
         for b in backups:
@@ -185,6 +203,16 @@ def cmd_rb_restore(svc: Service, args: argparse.Namespace) -> int:
             c.execute(f"DELETE FROM {table} WHERE db_path = ?", (str(db_path),))
     _out(result, args, f"restored {result['db_path']} from {Path(result['restored_from']).name}\n"
          f"previous state saved as {result['previous_saved_as']}\nexport tracking for this DB reset")
+    return 0
+
+
+def cmd_rb_playlists(svc: Service, args: argparse.Namespace) -> int:
+    rows = svc.rekordbox_playlists()
+    text = "\n".join(
+        f"{'  ' * (r['path'].count('/') - 1)}{r['name']}  [{r['kind']}{'' if r['count'] is None else ' ' + str(r['count'])}]"
+        for r in rows
+    )
+    _out(rows, args, f"target: {svc.target().kind}  db: {svc.db_path()}\n{text}")
     return 0
 
 
@@ -237,7 +265,13 @@ def build_parser() -> argparse.ArgumentParser:
     s = sub.add_parser("export", help="export located tracks to the rekordbox test DB")
     add_selection(s)
     s.add_argument("--dry-run", action="store_true", help="show the diff without writing")
+    s.add_argument("--confirm", default=None, metavar="TOKEN",
+                   help="confirm a dry run (required when the target is your main collection)")
     s.set_defaults(func=cmd_export)
+
+    s = sub.add_parser("rb-playlists", help="the target library's playlist tree (read-only)")
+    s.add_argument("--json", action="store_true")
+    s.set_defaults(func=cmd_rb_playlists)
 
     s = sub.add_parser("xml", help="write the rekordbox XML fallback")
     add_selection(s)

@@ -85,7 +85,7 @@ def test_export_layout_and_idempotency(svc, library, test_db):
     assert read_back(test_db, FOLDER) == state
 
     view = svc.get_item_view("a100")["rekordbox"]
-    assert view["status"] == "exported" and sorted(view["playlists"]) == ["closer", "must"]
+    assert view["status"] == "exported" and view["playlists"] == [f"/{FOLDER}/closer", f"/{FOLDER}/must"]
 
 
 def _user_adds(test_db, playlist_name, path):
@@ -108,7 +108,7 @@ def test_managed_sync_only_removes_own_entries(svc, library, test_db, tmp_path):
     item["tags"] = ["electro"]  # untag 'pool'
     svc.store.upsert_items({"t200": item})
     diff = export(svc, ids=["t200"])
-    assert [(e["tag"], e["path"]) for e in diff["entries_removed"]] == [("pool", library["beta"])]
+    assert [(e["tag"], e["path"]) for e in diff["entries_removed"]] == [(f"/{FOLDER}/pool", library["beta"])]
 
     state = read_back(test_db, FOLDER)
     assert state["playlists"]["pool"] == [extra]
@@ -257,8 +257,8 @@ def test_unavailable_files_leave_existing_entries_alone(svc, library, test_db, t
     Path(library["beta"]).rename(moved)  # the drive goes away; the locate result still points there
     from bc_tagger_server.rbexport import build_selection, export as rb_export
 
-    selection = build_selection(svc.store, [svc.store.get_item("t200")], svc.store.get_tags())
+    selection = build_selection(svc.store, [svc.store.get_item("t200")], svc.store.get_tags(), svc.playlist_rule())
     assert selection.skipped == [{"id": "t200", "title": "Beta Song", "status": "unavailable"}]
-    diff = rb_export(svc.store, str(test_db), FOLDER, selection, guard_kwargs=GUARD)
+    diff = rb_export(svc.store, svc.target(GUARD), selection)
     assert not diff["changed"] and diff["entries_removed"] == []
     assert read_back(test_db, FOLDER)["playlists"]["pool"] == [library["beta"]]

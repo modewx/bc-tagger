@@ -1,13 +1,16 @@
-"""Export located tracks into a rekordbox ``master.db`` (pyrekordbox), one playlist per tag.
+"""Export located tracks into a rekordbox ``master.db`` (pyrekordbox), playlists from tags.
 
-Layout: a folder (default ``bc-tagger``) at the playlist root holding one flat playlist per
-tag (``must`` and ``pool`` included). Files are referenced in place.
+Layout: ``auto`` mode puts one playlist per tag (``must`` and ``pool`` included) in a folder
+(default ``bc-tagger``); ``custom`` mode maps each tag to any playlists (see playlists.py).
+Missing playlists/folders are created; smart playlists, folders and ambiguous paths are errors.
+Files are referenced in place.
 
-Managed sync: a (tag, track) entry is wanted while at least one tagged item "claims" it.
+Managed sync: a (playlist, track) entry is wanted while at least one tagged item "claims" it.
 Export of a selection updates the claims of the selected items only. The tool adds missing
 entries and removes only entries it created itself once nothing claims them; entries the
-user added in rekordbox are never touched. ``Content`` rows are looked up by file path
-first and never deleted, so re-running an export changes nothing.
+user added in rekordbox are never touched or claimed. ``Content`` rows are looked up by file
+path (NFC/NFD-insensitive) and never deleted; on the main collection they are never modified.
+Re-running an export changes nothing.
 """
 
 from __future__ import annotations
@@ -19,9 +22,14 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+import hashlib
+import json
+from typing import Callable
+
 from . import rbguard
 from .items import album_name, is_album, item_tags
 from .normalize import norm
+from .playlists import Tree, key_of, parts_of, playlists_for_tag
 from .store import Store, now_iso
 from .views import located_tracks
 
@@ -31,12 +39,17 @@ log = logging.getLogger(__name__)
 _FILE_TYPES = {"MP3", "MP4", "M4A", "AAC", "FLAC", "ALAC", "WAV", "AIFF", "AIF"}
 
 
+class ExportError(RuntimeError):
+    """The export can't run as planned (bad playlist mapping, or the plan changed)."""
+
+
 @dataclass
 class TrackPlan:
     path: str
     tags: list[str] = field(default_factory=list)  # ordered, unique
+    playlists: list[str] = field(default_factory=list)  # canonical playlist keys, ordered
     items: list[str] = field(default_factory=list)
-    claims: set[tuple[str, str]] = field(default_factory=set)  # (tag, item_id)
+    claims: set[tuple[str, str]] = field(default_factory=set)  # (playlist key, item_id)
     # Bandcamp's title/artist/album for this track, for fields the file's tags leave empty.
     meta: dict[str, str] = field(default_factory=dict)
 
@@ -47,6 +60,8 @@ class ExportSelection:
     tracks: dict[str, TrackPlan]  # path -> plan
     skipped: list[dict]  # items without a located (or currently available) file
     tag_order: list[str]
+    playlist_order: list[str] = field(default_factory=list)  # keys, in creation order
+    unmapped_tags: list[str] = field(default_factory=list)  # custom mode: tags with no playlist
 
 
 def item_metadata(item: dict, track: dict) -> dict[str, str]:
@@ -64,13 +79,29 @@ def item_metadata(item: dict, track: dict) -> dict[str, str]:
     return {k: str(v) for k, v in meta.items() if v}
 
 
-def build_selection(store: Store, items: list[dict], tag_vocabulary: list[str]) -> ExportSelection:
-    """Resolve items to located tracks; album tags apply to every track of the album."""
+def auto_rule(folder: str = "bc-tagger") -> Callable[[str], list[str]]:
+    return lambda tag: playlists_for_tag(tag, "auto", {}, folder)
+
+
+def build_selection(
+    store: Store,
+    items: list[dict],
+    tag_vocabulary: list[str],
+    playlist_rule: Callable[[str], list[str]] | None = None,
+) -> ExportSelection:
+    """Resolve items to located tracks and their playlists.
+
+    Album tags apply to every track of the album; a track gets the union of the playlists
+    of all its tags (``playlist_rule``: tag -> canonical playlist keys).
+    """
     from .views import local_status
 
+    rule = playlist_rule or auto_rule()
+    order = {t: i for i, t in enumerate(tag_vocabulary)}
     tracks: dict[str, TrackPlan] = {}
     skipped: list[dict] = []
     used_items: list[dict] = []
+    unmapped: set[str] = set()
     for item in items:
         local = local_status(store, item["id"])
         files = located_tracks(local["best"]) if local["status"] == "located" else []
@@ -92,10 +123,27 @@ def build_selection(store: Store, items: list[dict], tag_vocabulary: list[str]) 
             for t in tags:
                 if t not in plan.tags:
                     plan.tags.append(t)
-                plan.claims.add((t, item["id"]))
-    order = {t: i for i, t in enumerate(tag_vocabulary)}
+                keys = rule(t)
+                if not keys:
+                    unmapped.add(t)
+                for k in keys:
+                    if k not in plan.playlists:
+                        plan.playlists.append(k)
+                    plan.claims.add((k, item["id"]))
     all_tags = sorted({t for p in tracks.values() for t in p.tags}, key=lambda t: (order.get(t, len(order)), t))
-    return ExportSelection(items=used_items, tracks=tracks, skipped=skipped, tag_order=all_tags)
+    playlist_order: list[str] = []
+    for t in all_tags:
+        for k in rule(t):
+            if k not in playlist_order and any(k in p.playlists for p in tracks.values()):
+                playlist_order.append(k)
+    return ExportSelection(
+        items=used_items,
+        tracks=tracks,
+        skipped=skipped,
+        tag_order=all_tags,
+        playlist_order=playlist_order,
+        unmapped_tags=sorted(unmapped, key=lambda t: (order.get(t, len(order)), t)),
+    )
 
 
 # -- pyrekordbox helpers ---------------------------------------------------------------------
@@ -275,60 +323,90 @@ def remove_song(db: Any, song: Any) -> None:
 # -- export ----------------------------------------------------------------------------------
 
 
+def plan_fingerprint(diff: dict[str, Any]) -> str:
+    """What a confirmed dry run promised to write (independent of IDs assigned on write)."""
+    payload = {
+        "folders": diff["folders_created"],
+        "playlists": diff["playlists_created"],
+        "content": sorted(diff["content_added"]),
+        "updated": sorted(u["path"] for u in diff["content_updated"]),
+        "add": sorted([e["playlist"], e["path"] or e["content_id"]] for e in diff["entries_added"]),
+        "remove": sorted([e["playlist"], e["path"] or e["content_id"]] for e in diff["entries_removed"]),
+        "errors": diff["errors"],
+    }
+    return hashlib.sha256(json.dumps(payload, sort_keys=True).encode()).hexdigest()
+
+
 def export(
     store: Store,
-    db_path: str,
-    folder_name: str,
+    target: rbguard.Target,
     selection: ExportSelection,
     *,
     dry_run: bool = False,
+    folder_name: str | None = None,
     file_meta: dict[str, dict] | None = None,
-    guard_kwargs: dict[str, Any] | None = None,
     progress=None,
+    expect: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     """Apply (or with ``dry_run`` only compute) the export. Returns a diff.
 
-    A real run first plans with a dry pass; when nothing would change it returns without
-    taking a backup or opening the DB for writing.
+    A real run first plans with a dry pass (on the main collection: on a snapshot copy). It
+    refuses if the plan has errors, or if ``expect`` (from a confirmed dry run) no longer
+    matches the plan or the DB files. When nothing would change it returns without a backup.
     """
-    kw = dict(file_meta=file_meta, guard_kwargs=guard_kwargs, progress=progress)
-    plan = _export(store, db_path, folder_name, selection, dry_run=True, record=False, **kw)
+    source_fp = target.source_fingerprint()
+    kw = dict(folder_name=folder_name, file_meta=file_meta, progress=progress)
+    plan = _export(store, target, selection, dry_run=True, record=False, **kw)
+    plan["plan_fingerprint"] = plan_fingerprint(plan)
+    plan["source_fingerprint"] = source_fp
     if dry_run:
         return plan
+    if plan["errors"]:
+        raise ExportError("; ".join(plan["errors"]))
+    if expect is not None:
+        if expect.get("plan_fingerprint") != plan["plan_fingerprint"] or (
+            target.is_main and expect.get("source_fingerprint") != source_fp
+        ):
+            raise ExportError("the plan changed since the dry run (or the library was modified); run the dry run again")
     if not plan["changed"]:
         # Nothing to write, but claims may have moved between items: record them.
-        result = _export(store, db_path, folder_name, selection, dry_run=True, record=True, **kw)
+        result = _export(store, target, selection, dry_run=True, record=True, **kw)
         result["dry_run"] = False
         return result
-    return _export(store, db_path, folder_name, selection, dry_run=False, record=True, **kw)
+    return _export(store, target, selection, dry_run=False, record=True,
+                   expect_plan=plan["plan_fingerprint"], **kw)
 
 
 def _export(
     store: Store,
-    db_path: str,
-    folder_name: str,
+    target: rbguard.Target,
     selection: ExportSelection,
     *,
     dry_run: bool,
     record: bool,
+    folder_name: str | None,
     file_meta: dict[str, dict] | None,
-    guard_kwargs: dict[str, Any] | None,
     progress,
+    expect_plan: str | None = None,
 ) -> dict[str, Any]:
-    guard_kwargs = guard_kwargs or {}
-    db_key = str(rbguard.resolve(db_path))
+    db_key = str(rbguard.resolve(target.db_path))
     file_meta = file_meta or {}
     diff: dict[str, Any] = {
         "db_path": db_key,
+        "target": target.kind,
         "dry_run": dry_run,
         "folder": {"name": folder_name, "created": False, "id": None},
+        "folders_created": [],
+        "playlists_created": [],
         "content_added": [],
         "content_existing": 0,
         "content_updated": [],
-        "playlists_created": [],
         "entries_added": [],
         "entries_removed": [],
         "entries_kept_user": 0,
+        "per_playlist": [],
+        "errors": [],
+        "warnings": [],
         "skipped_items": selection.skipped,
         "missing_files": [],
         "failed_files": [],
@@ -337,31 +415,79 @@ def _export(
         "backup": None,
         "guard": None,
     }
+    if selection.unmapped_tags:
+        diff["warnings"].append("not exported (no playlist mapped): " + ", ".join(selection.unmapped_tags))
+    if not selection.playlist_order and selection.tracks:
+        diff["warnings"].append("no tag of the selected items maps to a playlist")
+    if target.is_main and _agent_running():
+        diff["warnings"].append(
+            "rekordboxAgent is running; if you use Cloud Library Sync, quit it before exporting"
+        )
 
     if dry_run:
-        decision = rbguard.check_write(db_key, **guard_kwargs)
-        diff["guard"] = decision.to_dict()
-        db = rbguard.open_database(db_key, for_write=False)
+        diff["guard"] = target.check().to_dict()
+        db = target.open_read()
     else:
-        decision = rbguard.require_write(db_key, **guard_kwargs)
-        diff["guard"] = decision.to_dict()
-        diff["backup"] = str(rbguard.backup(db_key, **guard_kwargs))
-        db = rbguard.open_database(db_key, for_write=True, **guard_kwargs)
+        diff["guard"] = target.require().to_dict()
+        diff["backup"] = str(target.backup())
+        db = target.open_write()
 
     content_ids: dict[str, str] = {}
-    new_entries: list[tuple[str, str, str, str]] = []  # (tag, content_id, song_id, playlist_id)
-    removed_entries: list[tuple[str, str]] = []  # (tag, content_id)
+    new_entries: list[tuple[str, str, str, str]] = []  # (playlist key, content_id, song_id, playlist_id)
+    removed_entries: list[tuple[str, str]] = []
     stale_entries: list[tuple[str, str]] = []
     created_content: list[tuple[str, str]] = []
     try:
-        # 1. Folder
-        folder = find_folder(db, folder_name)
-        if folder is None:
-            diff["folder"]["created"] = True
-            folder = None if dry_run else db.create_playlist_folder(folder_name)
-        diff["folder"]["id"] = folder.ID if folder is not None else None
+        tree = Tree(db)
+        rows: dict[str, Any] = {}  # playlist key -> DjmdPlaylist (None: planned or unresolvable)
+        bad: set[str] = set()
+        planned: set[str] = set()
 
-        # 2. Content rows (looked up by path first)
+        def ensure(key: str, create: bool):
+            """The playlist for ``key``; creates missing folders/playlists when ``create``."""
+            if key in rows:
+                return rows[key]
+            parts = parts_of(key)
+            node, missing_from, error = tree.lookup(parts)
+            if error:
+                if error not in diff["errors"]:
+                    diff["errors"].append(error)
+                bad.add(key)
+                rows[key] = None
+                return None
+            if node is not None or not create:
+                rows[key] = node
+                return node
+            parent = _folder_row(tree, parts[:missing_from]) if missing_from > 0 else None
+            for j in range(missing_from, len(parts)):
+                k = key_of(parts[: j + 1])
+                last = j == len(parts) - 1
+                if k not in planned:
+                    planned.add(k)
+                    (diff["playlists_created"] if last else diff["folders_created"]).append(k)
+                if dry_run:
+                    continue
+                if not last:
+                    existing = _folder_row(tree, parts[: j + 1])
+                    if existing is None:
+                        existing = db.create_playlist_folder(parts[j], parent=parent)
+                        tree.add(existing)
+                    parent = existing
+                else:
+                    pl = db.create_playlist(parts[j], parent=parent)
+                    tree.add(pl)
+                    rows[key] = pl
+                    return pl
+            rows[key] = None  # dry run: will be created
+            return None
+
+        # 1. Playlists (and folders) in mapping order, so new ones sort nicely in rekordbox
+        for key in selection.playlist_order:
+            ensure(key, create=True)
+        if folder_name:
+            diff["folder"]["created"] = key_of((folder_name,)) in diff["folders_created"]
+
+        # 2. Content rows (looked up by path first, NFC/NFD-insensitive)
         known = content_path_index(db)
         total = len(selection.tracks)
         for n, path in enumerate(selection.tracks, 1):
@@ -373,6 +499,8 @@ def _export(
             if existing is not None:
                 content_ids[path] = existing
                 diff["content_existing"] += 1
+                if target.is_main:
+                    continue  # never modify existing Content in the user's collection
                 ours = store.query_one(
                     "SELECT created_by_us FROM rb_content WHERE db_path = ? AND path = ?", (db_key, path)
                 )
@@ -396,7 +524,7 @@ def _export(
             if progress:
                 progress(n, total, f"content {n}/{total}")
 
-        # 3. Claims after this export, per (tag, content). Items that are not located right
+        # 3. Claims after this export, per (playlist, content). Items that are not located right
         # now (e.g. their drive is unmounted) are out of scope, so their entries stay put.
         scope = {it["id"] for it in selection.items}
         new_claims: dict[tuple[str, str], set[str]] = {}
@@ -412,22 +540,24 @@ def _export(
                     continue
                 cid = row["content_id"]
             track_pos.setdefault(cid, pos)
-            for tag, item_id in plan.claims:
-                new_claims.setdefault((tag, cid), set()).add(item_id)
+            for key, item_id in plan.claims:
+                if key not in bad:
+                    new_claims.setdefault((key, cid), set()).add(item_id)
+        marks = ",".join("?" * len(scope)) or "NULL"
         old_scope_pairs = {
             (r["tag"], r["content_id"])
             for r in store.query(
-                f"SELECT tag, content_id FROM rb_claims WHERE db_path = ? AND item_id IN ({','.join('?' * len(scope)) or 'NULL'})",
+                f"SELECT tag, content_id FROM rb_claims WHERE db_path = ? AND item_id IN ({marks})",
                 [db_key, *scope],
             )
         }
+        order = {k: i for i, k in enumerate(selection.playlist_order)}
         affected = sorted(
             set(new_claims) | old_scope_pairs,
-            key=lambda p: (_tag_pos(p[0], selection.tag_order), track_pos.get(p[1], len(track_pos)), p[1]),
+            key=lambda p: (order.get(p[0], len(order)), p[0], track_pos.get(p[1], len(track_pos)), p[1]),
         )
 
-        # 4. Playlists and entries
-        playlists: dict[str, Any] = {}
+        # 4. Entries
         songs_by_pl: dict[str, dict[str, list]] = {}
 
         def songs_for(pl) -> dict[str, list]:
@@ -440,58 +570,55 @@ def _export(
                 songs_by_pl[pl.ID] = by_cid
             return songs_by_pl[pl.ID]
 
-        def get_playlist(tag: str, create: bool):
-            if tag in playlists:
-                return playlists[tag]
-            pl = find_playlist(db, tag, folder.ID) if folder is not None else None
-            if pl is None and create:
-                diff["playlists_created"].append(tag)
-                pl = None if dry_run else db.create_playlist(tag, parent=folder)
-            playlists[tag] = pl
-            return pl
-
-        # Create playlists in vocabulary order so they sort nicely in rekordbox.
-        for tag in selection.tag_order:
-            get_playlist(tag, create=True)
-
-        for tag, cid in affected:
+        per: dict[str, dict[str, Any]] = {}
+        for key, cid in affected:
             others = store.query(
                 f"SELECT 1 FROM rb_claims WHERE db_path = ? AND tag = ? AND content_id = ? "
-                f"AND item_id NOT IN ({','.join('?' * len(scope)) or 'NULL'}) LIMIT 1",
-                [db_key, tag, cid, *scope],
+                f"AND item_id NOT IN ({marks}) LIMIT 1",
+                [db_key, key, cid, *scope],
             )
-            wanted = bool(new_claims.get((tag, cid))) or bool(others)
-            pl = get_playlist(tag, create=wanted)
+            wanted = bool(new_claims.get((key, cid))) or bool(others)
+            pl = ensure(key, create=wanted)
+            if key in bad:
+                continue
             present = list(songs_for(pl).get(cid, []))
             ours = store.query_one(
                 "SELECT song_id FROM rb_entries WHERE db_path = ? AND tag = ? AND content_id = ?",
-                (db_key, tag, cid),
+                (db_key, key, cid),
             )
             ours_song = next((s for s in present if ours and str(s.ID) == ours["song_id"]), None)
             if ours and ours_song is None:
-                stale_entries.append((tag, cid))
+                stale_entries.append((key, cid))
+            stats = per.setdefault(key, {"playlist": key, "exists": key not in planned, "add": 0, "remove": 0})
             if wanted:
                 if present:
                     if ours_song is None:
-                        diff["entries_kept_user"] += 1
+                        diff["entries_kept_user"] += 1  # the user's own entry: not claimed
                     continue
-                diff["entries_added"].append({"tag": tag, "content_id": cid, "path": _path_of(content_ids, cid)})
+                entry = {"playlist": key, "tag": key, "content_id": cid, "path": _path_of(content_ids, cid)}
+                diff["entries_added"].append(entry)
+                stats["add"] += 1
                 if not dry_run:
                     song = db.add_to_playlist(pl, cid)
                     songs_for(pl).setdefault(cid, []).append(song)
-                    new_entries.append((tag, cid, str(song.ID), str(pl.ID)))
+                    new_entries.append((key, cid, str(song.ID), str(pl.ID)))
             elif ours_song is not None:
-                diff["entries_removed"].append({"tag": tag, "content_id": cid, "path": _path_of(content_ids, cid)})
-                removed_entries.append((tag, cid))
+                entry = {"playlist": key, "tag": key, "content_id": cid, "path": _path_of(content_ids, cid)}
+                diff["entries_removed"].append(entry)
+                stats["remove"] += 1
+                removed_entries.append((key, cid))
                 if not dry_run:
                     remove_song(db, ours_song)
                     songs_for(pl)[cid].remove(ours_song)
+        for key in diff["playlists_created"]:
+            per.setdefault(key, {"playlist": key, "exists": False, "add": 0, "remove": 0})
+        diff["per_playlist"] = [v for v in per.values() if v["add"] or v["remove"] or not v["exists"]]
 
         changed = bool(
-            diff["folder"]["created"]
+            diff["folders_created"]
+            or diff["playlists_created"]
             or diff["content_added"]
             or diff["content_updated"]
-            or diff["playlists_created"]
             or diff["entries_added"]
             or diff["entries_removed"]
         )
@@ -500,8 +627,12 @@ def _export(
             db.rollback()
             if not record:
                 return diff
+        elif diff["errors"]:
+            raise ExportError("; ".join(diff["errors"]))
         elif changed:
-            diff["guard"] = rbguard.guarded_commit(db, db_key, **guard_kwargs).to_dict()
+            if expect_plan is not None and plan_fingerprint(diff) != expect_plan:
+                raise ExportError("the library changed while exporting; nothing was written, run the dry run again")
+            diff["guard"] = target.commit(db).to_dict()
         else:
             db.rollback()
     except Exception:
@@ -520,30 +651,45 @@ def _export(
                 "ON CONFLICT(db_path, path) DO UPDATE SET content_id = excluded.content_id, updated_at = excluded.updated_at",
                 (db_key, path, cid, int(any(p == path for p, _ in created_content)), ts),
             )
-        c.execute(
-            f"DELETE FROM rb_claims WHERE db_path = ? AND item_id IN ({','.join('?' * len(scope)) or 'NULL'})",
-            [db_key, *scope],
-        )
-        for (tag, cid), item_ids in new_claims.items():
+        c.execute(f"DELETE FROM rb_claims WHERE db_path = ? AND item_id IN ({marks})", [db_key, *scope])
+        for (key, cid), item_ids in new_claims.items():
             for item_id in item_ids:
                 c.execute(
                     "INSERT OR IGNORE INTO rb_claims(db_path, tag, content_id, item_id) VALUES(?, ?, ?, ?)",
-                    (db_key, tag, cid, item_id),
+                    (db_key, key, cid, item_id),
                 )
-        for tag, cid in stale_entries + removed_entries:
-            c.execute("DELETE FROM rb_entries WHERE db_path = ? AND tag = ? AND content_id = ?", (db_key, tag, cid))
-        for tag, cid, song_id, pl_id in new_entries:
+        for key, cid in stale_entries + removed_entries:
+            c.execute("DELETE FROM rb_entries WHERE db_path = ? AND tag = ? AND content_id = ?", (db_key, key, cid))
+        for key, cid, song_id, pl_id in new_entries:
             c.execute(
                 "INSERT INTO rb_entries(db_path, tag, content_id, song_id, playlist_id, created_at) VALUES(?, ?, ?, ?, ?, ?) "
                 "ON CONFLICT(db_path, tag, content_id) DO UPDATE SET song_id = excluded.song_id, "
                 "playlist_id = excluded.playlist_id, created_at = excluded.created_at",
-                (db_key, tag, cid, song_id, pl_id, ts),
+                (db_key, key, cid, song_id, pl_id, ts),
             )
     return diff
 
 
-def _tag_pos(tag: str, order: list[str]) -> int:
-    return order.index(tag) if tag in order else len(order)
+def _folder_row(tree: Tree, parts: tuple[str, ...]):
+    """The existing folder at ``parts`` (None for the root or if missing)."""
+    parent = "root"
+    node = None
+    for part in parts:
+        matches = [c for c in tree.children.get(parent, []) if unicodedata.normalize("NFC", c.Name or "") == part]
+        if len(matches) != 1 or matches[0].Attribute != 1:
+            return None
+        node = matches[0]
+        parent = str(node.ID)
+    return node
+
+
+def _agent_running() -> bool:
+    from pyrekordbox.utils import get_process_id
+
+    try:
+        return bool(get_process_id("rekordboxAgent"))
+    except Exception:  # noqa: BLE001
+        return False
 
 
 def _path_of(content_ids: dict[str, str], cid: str) -> str | None:
@@ -553,31 +699,46 @@ def _path_of(content_ids: dict[str, str], cid: str) -> str | None:
 # -- verification ----------------------------------------------------------------------------
 
 
-def read_back(db_path: str, folder_name: str) -> dict[str, Any]:
-    """Re-read the DB: folder -> playlists -> track paths (for verification and the CLI)."""
+def read_back(target: rbguard.Target | str | Path, folder_name: str, keys: list[str] | None = None) -> dict[str, Any]:
+    """Re-read the DB (main: a fresh snapshot): the folder's playlists, and the playlists at
+    ``keys``, with their track paths (for verification and the CLI)."""
     from pyrekordbox.masterdb.models import DjmdContent, DjmdPlaylist
     from sqlalchemy import func
 
-    db = rbguard.open_database(db_path, for_write=False)
+    if not isinstance(target, rbguard.Target):
+        target = rbguard.Target("test", str(target), {})
+    db = target.open_read()
+
+    def paths_of(playlist_id) -> list[str | None]:
+        out_paths = []
+        for s in playlist_songs(db, playlist_id):
+            c = db.query(DjmdContent).filter(DjmdContent.ID == s.ContentID).first()
+            out_paths.append(c.FolderPath if c is not None else None)
+        return out_paths
+
     try:
         folder = find_folder(db, folder_name)
         out: dict[str, Any] = {
-            "db_path": str(rbguard.resolve(db_path)),
+            "db_path": str(rbguard.resolve(target.db_path)),
             "content_count": db.get_content().count(),
             "folder": None,
             "playlists": {},
+            "mapped": {},
         }
+        if keys:
+            tree = Tree(db)
+            for key in keys:
+                node, _, error = tree.lookup(parts_of(key))
+                out["mapped"][key] = error or (paths_of(node.ID) if node is not None else None)
         if folder is None:
+            dup = db.query(DjmdContent.FolderPath).group_by(DjmdContent.FolderPath).having(func.count(DjmdContent.ID) > 1).all()
+            out["duplicate_content_paths"] = [d[0] for d in dup]
             return out
         out["folder"] = {"id": str(folder.ID), "name": folder.Name}
         for pl in (
             db.query(DjmdPlaylist).filter(DjmdPlaylist.ParentID == str(folder.ID)).order_by(DjmdPlaylist.Seq)
         ):
-            paths = []
-            for s in playlist_songs(db, pl.ID):
-                c = db.query(DjmdContent).filter(DjmdContent.ID == s.ContentID).first()
-                paths.append(c.FolderPath if c is not None else None)
-            out["playlists"][pl.Name] = paths
+            out["playlists"][pl.Name] = paths_of(pl.ID)
         dup = (
             db.query(DjmdContent.FolderPath)
             .group_by(DjmdContent.FolderPath)

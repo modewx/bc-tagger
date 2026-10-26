@@ -51,7 +51,9 @@ def ownership_status(store: Store, item: dict) -> dict[str, Any]:
     return {"status": "unknown", "source": None, "checked_at": None}
 
 
-def rekordbox_status(store: Store, item: dict, local: dict, db_path: str) -> dict[str, Any]:
+def rekordbox_status(store: Store, item: dict, local: dict, db_path: str, playlist_rule=None) -> dict[str, Any]:
+    """``playlists`` are playlist paths (``/bc-tagger/must``); ``exported`` means every located
+    track is in the library and in every playlist its tags map to (``playlist_rule``)."""
     tracks = located_tracks(local.get("best")) if local.get("status") == "located" else []
     paths = [t["path"] for t in tracks]
     content_ids: list[str] = []
@@ -66,12 +68,16 @@ def rekordbox_status(store: Store, item: dict, local: dict, db_path: str) -> dic
         (db_path, item["id"]),
     )
     playlists = sorted({r["tag"] for r in claims})
-    tags = item_tags(item)
-    wanted = len(paths) * len(tags) if tags else len(paths)
-    have = len(claims) if tags else len(content_ids)
+    if playlist_rule is not None:
+        expected = {k for t in item_tags(item) for k in playlist_rule(t)}
+    else:
+        expected = set(playlists)
+    complete = all(
+        {r["tag"] for r in claims if r["content_id"] == cid} >= expected for cid in content_ids
+    )
     if not content_ids:
         status = "none"
-    elif len(content_ids) == len(paths) and have >= wanted and set(playlists) == set(tags):
+    elif len(content_ids) == len(paths) and complete:
         status = "exported"
     else:
         status = "partial"
@@ -90,7 +96,7 @@ def local_hints(local: dict, owned: dict) -> list[str]:
     return []
 
 
-def item_view(store: Store, item: dict, db_path: str) -> dict[str, Any]:
+def item_view(store: Store, item: dict, db_path: str, playlist_rule=None) -> dict[str, Any]:
     local = local_status(store, item["id"])
     owned = ownership_status(store, item)
     local["hints"] = local_hints(local, owned)
@@ -99,5 +105,5 @@ def item_view(store: Store, item: dict, db_path: str) -> dict[str, Any]:
         "is_album": is_album(item),
         "local": local,
         "owned": owned,
-        "rekordbox": rekordbox_status(store, item, local, db_path),
+        "rekordbox": rekordbox_status(store, item, local, db_path, playlist_rule),
     }
