@@ -1530,6 +1530,40 @@ test("Download owned missing (import): the selected rows are downloaded and loca
   }
 });
 
+test("import preview: the Notes icons open a popover with the flags in plain words, the note and the line (stubbed API)", async () => {
+  const stub = importStub(JSON.parse(fs.readFileSync(IMPORT_SAMPLE, "utf8")));
+  const page = await context.newPage();
+  await stub.install(page);
+  try {
+    await page.goto(SERVER + "/import/?batch=e2e-b1");
+    await page.waitForFunction(() => document.querySelectorAll("#collectionTable tbody tr").length === 7);
+    const popText = () => page.textContent(".popover");
+    // The row to confirm: its ⚑ and its "confirm" chip open the same notes.
+    assert.match(await page.getAttribute("tr[data-key='r2'] .flag-icon", "title"), /Flags: needs_user_confirmation/, "the tooltip stays");
+    await page.click("tr[data-key='r2'] .flag-icon");
+    let t = await popText();
+    assert.match(t, /Notes · please confirm/);
+    assert.match(t, /Your reading and the files disagree: please confirm\./);
+    assert.match(t, /Note: The file says Nobody Known, the drive says Nobody Knows\./);
+    assert.match(t, /Line 3: slow one by Nobody Known \(chill\)/);
+    await page.keyboard.press("Escape");
+    await page.click("tr[data-key='r2'] .confirm-chip");
+    assert.match(await popText(), /Your reading and the files disagree/);
+    await page.keyboard.press("Escape");
+    // A vinyl-position row.
+    await page.click("tr[data-key='r3'] .flag-icon");
+    t = await popText();
+    assert.match(t, /Only a side or position is known \(e\.g\. B1\)\./);
+    assert.match(t, /Untitled or generic track: matched on album \+ track number\./);
+    await page.keyboard.press("Escape");
+    // A duplicate.
+    await page.click("tr[data-key='r0'] .dup-icon");
+    assert.match(await popText(), /⧉ Already in your collection as Buma II — Joaquín Cornejo \(tags: must, drums, build\): its tags are merged on import\./);
+  } finally {
+    await page.close();
+  }
+});
+
 // --- An open import survives navigation and reloads ---------------------------------
 
 test("import: a reload during lookups follows the same job on to the mapping step (stubbed API)", async () => {

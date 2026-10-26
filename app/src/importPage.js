@@ -751,27 +751,81 @@ function locatedColumn() {
   };
 }
 
+// What the import file's flags mean (annotations-import-rules.md, §5).
+const FLAGS = {
+  artist_missing: "No artist in the text (left empty unless guessed).",
+  artist_guessed: "The artist was inferred from context.",
+  artist_corrected: "The artist was changed from what was written (a typo, or a label instead of the artist).",
+  no_separator: "The artist/title split was inferred (no separator in the line).",
+  order_ambiguous: "Could be title/artist either way.",
+  title_corrected: "The title was changed to the release's spelling (from the local files).",
+  needs_user_confirmation: "Your reading and the files disagree: please confirm.",
+  match_by_track_num: "Untitled or generic track: matched on album + track number.",
+  title_generic: "A real but generic title (e.g. “Untitled 4”).",
+  title_unknown: "Only a side or position is known (e.g. B1).",
+  split_release: "One “A / B” line split into two tracks.",
+  possible_typo: "Kept as written, but probably misspelled.",
+  low_confidence: "A weak reading: check it.",
+  duplicate_existing: "Already in your collection: its tags are merged on import.",
+  tag_unknown: "Has tags that aren't in your vocabulary.",
+};
+
+// The row's notes: what's flagged (in plain words), the note, the duplicate
+// and the original line from the file.
+function notesPopover(anchor, row) {
+  openPopover(anchor, (pop) => {
+    pop.classList.add("notes-pop");
+    pop.appendChild(el("div", "pop-head", row.needsConfirmation ? "Notes · please confirm" : "Notes"));
+    if (row.duplicate) {
+      const d = row.duplicate;
+      const what = [d.title, d.artist].filter(Boolean).join(" — ") || d.of;
+      pop.appendChild(el("div", "pop-meta note-dup", `⧉ Already in your collection as ${what}${d.tags.length ? ` (tags: ${d.tags.join(", ")})` : ""}: its tags are merged on import.`));
+    }
+    if (row.flags.length) {
+      const list = el("ul", "note-flags");
+      row.flags.forEach((f) => {
+        const li = el("li", f === "needs_user_confirmation" ? "flag-confirm" : "", FLAGS[f] || f.replace(/_/g, " "));
+        li.dataset.flag = f;
+        li.title = f;
+        list.appendChild(li);
+      });
+      pop.appendChild(list);
+    }
+    if (row.note) pop.appendChild(el("div", "pop-meta note-text", `Note: ${row.note}`));
+    if (row.raw) pop.appendChild(el("div", "pop-meta note-line", `Line ${row.line ?? "?"}: ${row.raw}`));
+  });
+}
+
 function notesColumn() {
   return {
     id: "notes",
     label: "Notes",
     after: "located",
     render(cell, key, item) {
-      cell.classList.add("status-cell", "notes-cell");
+      cell.classList.add("status-cell", "notes-cell", "no-row-play");
       const row = rowOf(item);
+      const open = (e) => notesPopover(e.currentTarget, rowNow(item));
+      const clickable = (node) => {
+        node.classList.add("note-open");
+        node.setAttribute("role", "button");
+        node.tabIndex = 0;
+        node.addEventListener("click", open);
+        node.addEventListener("keydown", (e) => (e.key === "Enter" || e.key === " ") && (e.preventDefault(), open(e)));
+        return node;
+      };
       if (row.duplicate) {
         const dup = row.duplicate;
-        const d = el("span", "note-icon dup-icon", "⧉");
+        const d = clickable(el("span", "note-icon dup-icon", "⧉"));
         d.title = `Already in your collection (${[dup.title, dup.artist].filter(Boolean).join(" — ") || dup.of}): its tags will be merged.`;
         cell.appendChild(d);
       }
       if (row.needsConfirmation) {
-        const c = el("span", "chip confirm-chip", "confirm");
+        const c = clickable(el("span", "chip confirm-chip", "confirm"));
         c.title = `Needs your confirmation: the reading and the files disagree.${row.note ? `\n${row.note}` : ""}`;
         cell.appendChild(c);
       }
       if (row.flags.length || row.note) {
-        const f = el("span", "note-icon flag-icon", "⚑");
+        const f = clickable(el("span", "note-icon flag-icon", "⚑"));
         f.title = [row.flags.length ? `Flags: ${row.flags.join(", ")}` : "", row.note ? `Note: ${row.note}` : "", row.raw ? `Line ${row.line}: ${row.raw}` : ""]
           .filter(Boolean)
           .join("\n");

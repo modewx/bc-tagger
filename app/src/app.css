@@ -203,3 +203,10 @@ button.chip:hover { filter: brightness(0.95); border-color: #bbb; }
 .folder-browser .fb-entry:hover, .folder-browser .fb-entry:focus { background: #eef3ff; outline: none; }
 .folder-browser .fb-up { color: #666; }
 .fb-msg:empty { display: none; }
+/* Notes popover (import preview). */
+.note-open { cursor: pointer; }
+.note-open:hover, .note-open:focus { filter: brightness(0.9); outline: none; }
+.notes-pop .note-flags { margin: 6px 0; padding-left: 18px; font-size: 13px; }
+.notes-pop .note-flags li { margin: 2px 0; }
+.notes-pop .note-flags li.flag-confirm { color: #9a4a00; font-weight: 600; }
+.notes-pop .note-line { font-family: ui-monospace, Menlo, monospace; font-size: 11px; }
