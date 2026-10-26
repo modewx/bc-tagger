@@ -6,6 +6,7 @@ import { openPopover, closePopover } from "./popover";
 import { progressText, resultText } from "./jobs";
 import { runExport } from "./exportFlow";
 import { sourceOf } from "./statusFilter";
+import { downloadFlow, stateLabel, trackDownloads } from "./downloads";
 
 const LOCAL_RANK = { located: 0, candidates: 1, missing: 2, unknown: 3 };
 const OWNED_RANK = { owned: 0, not_owned: 1, unknown: 2 };
@@ -102,11 +103,38 @@ export function sourceColumn() {
   };
 }
 
+// Owned on Bandcamp, but not on the drive: something to download.
+export const downloadable = (item) =>
+  !!item && (item.owned || {}).status === "owned" && localOf(item).status !== "located" && sourceOf(item) !== "other";
+
 /**
- * @param {object} ctx  {jobs, page(), statusEl()}
+ * @param {object} ctx  {jobs, events, page(), statusEl()}
  */
 export function appColumns(ctx) {
   const busy = {}; // item id -> label while a per-item job runs
+  const failedDownload = {}; // item id -> why its download failed (until the next one)
+
+  // Downloads: each item's state, live in its row (the server locates it after).
+  if (ctx.events) {
+    trackDownloads(ctx.events, (d) => {
+      const key = d.ref;
+      if (!ctx.page() || !ctx.page().getItems()[key]) return;
+      if (d.state === "queued" || d.state === "downloading") busy[key] = stateLabel(d);
+      else delete busy[key];
+      if (d.state === "failed") failedDownload[key] = stateLabel(d);
+      else delete failedDownload[key];
+      ctx.page().refreshRow(key);
+    });
+  }
+  // After the job, re-read the items too (like the other row jobs): rows show
+  // what the server located even if a live update was missed.
+  const download = async (keys) => {
+    const job = await downloadFlow(keys, "collection", { jobs: ctx.jobs, statusEl: ctx.statusEl() });
+    if (!job) return;
+    keys.forEach((k) => delete busy[k]);
+    await ctx.page().reload();
+    keys.forEach((k) => ctx.page().refreshRow(k));
+  };
 
   // Run a job for one row (start(onProgress) -> finished job), showing its
   // progress in the row.
@@ -197,6 +225,7 @@ export function appColumns(ctx) {
         pop.appendChild(fileRow(c, key, [["Confirm", "confirm", "primary"], ["Reject", "reject", "danger"]]))
       );
       if (local.located_at) pop.appendChild(el("div", "pop-meta", `checked ${fmtWhen(local.located_at)}`));
+      if (failedDownload[key]) pop.appendChild(el("div", "pop-meta pop-err", failedDownload[key]));
       const foot = el("div", "pop-actions");
       const again = el("button", "primary", local.status === "unknown" ? "Locate" : "Locate again");
       again.addEventListener("click", () => {
@@ -204,6 +233,16 @@ export function appColumns(ctx) {
         locate(key);
       });
       foot.appendChild(again);
+      if (downloadable(item)) {
+        const dl = el("button", "", "Download");
+        dl.id = "downloadItem";
+        dl.title = "Download this release from your Bandcamp collection into the downloads folder, then locate it";
+        dl.addEventListener("click", () => {
+          closePopover();
+          download([key]);
+        });
+        foot.appendChild(dl);
+      }
       pop.appendChild(foot);
     });
   }
@@ -231,6 +270,7 @@ export function appColumns(ctx) {
     chip.title = title;
     chip.addEventListener("click", () => locatedPopover(chip, key, item));
     cell.appendChild(chip);
+    if (failedDownload[key]) cell.appendChild(el("span", "busy-note err-note", failedDownload[key]));
   }
 
   // ---- Owned -----------------------------------------------------------------

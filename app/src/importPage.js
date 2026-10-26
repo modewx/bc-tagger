@@ -16,6 +16,7 @@ import { openPopover, closePopover } from "./popover";
 import { getBatch, updateRow, commitBatch, discardBatch, resumeLookups, setDefaultTags, relocateRows, relocateRow, searchFiles, listFolder, rowToItem, matchSource, bandcampSearchUrl, openOnBandcampUrl, cleanBandcampUrl } from "./importApi";
 import { statsLine } from "./importTab";
 import { rememberImport } from "./openImport";
+import { downloadFlow, stateLabel, trackDownloads } from "./downloads";
 import { playableItem } from "./statusFilter";
 
 const batchId = new URLSearchParams(location.search).get("batch");
@@ -492,6 +493,23 @@ function matchColumn() {
   };
 }
 
+// --- Downloads (owned releases) ---------------------------------------------------------
+// Rows have no ownership of their own: Download is offered for missing rows
+// with a Bandcamp item, and the dry run lists any that aren't owned.
+
+const refOf = (row) => `${batchId}:${row.n}`;
+const downloadableRow = (row) => row.source === "bandcamp" && !!row.item && !(row.local && row.local.status === "located") && row.owned !== false;
+const dlState = trackDownloads(events, (d) => {
+  if (!String(d.ref).startsWith(`${batchId}:`)) return;
+  page.refreshRow(`r${String(d.ref).split(":").pop()}`);
+});
+const downloadRows = async (rows) => {
+  if (!(await downloadFlow(rows.map(refOf), "import", { jobs, statusEl: page.statusEl }))) return;
+  await page.reload(); // what the server located, even if a live update was missed
+  rows.forEach((r) => page.refreshRow(`r${r.n}`));
+  renderInfo();
+};
+
 // --- Located: where the row's file is; locate again, pick, or set it by hand -----------
 
 const fmtSize = (f) => [String(f.format || "").toUpperCase(), f.root_kind === "owned" ? "owned folder" : null].filter(Boolean).join(" · ");
@@ -681,6 +699,16 @@ function locatedPopover(anchor, row) {
       setFileForm(pop, row);
     });
     foot.append(again, setFile);
+    if (downloadableRow(row)) {
+      const dl = el("button", "", "Download");
+      dl.id = "downloadRow";
+      dl.title = "Download this release from your Bandcamp collection into the downloads folder, then locate it";
+      dl.addEventListener("click", () => {
+        closePopover();
+        downloadRows([row]);
+      });
+      foot.appendChild(dl);
+    }
     if (local.manual) {
       const auto = el("button", "", "Back to automatic");
       auto.addEventListener("click", () => patchRow(row, { path: null }, "Locating…"));
@@ -717,6 +745,8 @@ function locatedColumn() {
       chip.title = local.manual ? `Set manually: ${best.path}` : files.map((f) => f.path).join("\n") || "Not found in your music folders: click to locate again or set the file";
       chip.addEventListener("click", () => locatedPopover(chip, rowNow(item)));
       cell.appendChild(chip);
+      const d = dlState[refOf(rowOf(item))];
+      if (d && d.state !== "done") cell.appendChild(el("span", `busy-note${d.state === "failed" ? " err-note" : ""}`, stateLabel(d)));
     },
   };
 }
@@ -837,6 +867,18 @@ async function discard(statusEl) {
     extraToolbarButtons: [
       { id: "importSelected", label: "Import selected", className: "job-btn", run: importSelected },
       { id: "locateAgain", label: "Locate again", run: locateAgain },
+      {
+        id: "downloadOwnedMissing",
+        label: "Download owned missing",
+        title: "Download the selected rows you own on Bandcamp that aren't on your drive (shows the releases first)",
+        run: async (statusEl, button) => {
+          button.disabled = true;
+          await downloadRows(batch.rows.filter((r) => r.checked && downloadableRow(r)));
+          button.disabled = false;
+          await page.reload();
+          renderInfo();
+        },
+      },
       { id: "discardImport", label: "Discard", run: discard },
     ],
     localPlayUrl,

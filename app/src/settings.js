@@ -29,6 +29,7 @@ const SECTIONS = [
   ["folders", "general", "Music folders", "Where the indexer looks for your files. Files are referenced in place, never moved."],
   ["matching", "general", "Matching", "How tagged Bandcamp items are matched to local files."],
   ["bandcamp", "general", "Bandcamp", "Ownership normally comes from the extension's live session; these are the fallback."],
+  ["downloads", "general", "Downloads", "Download (in the Located column) gets releases you own from your Bandcamp collection."],
   ["bandcamp_requests", "general", "Bandcamp requests", "Lower values are faster, but can trigger Bandcamp's rate limiting (HTTP 429); then the server backs off and waits."],
   ["server", "general", "Server", ""],
   ["advanced", "general", "Advanced", ""],
@@ -145,7 +146,19 @@ const FIELDS = {
   },
   seed_export_json: { section: "advanced", type: "path", label: "Seed export JSON" },
   app_dist_dir: { section: "advanced", type: "path", label: "App build folder", placeholder: "default: bc-tagger/app/dist" },
-  downloads_dir: { section: "advanced", type: "path", label: "Downloads folder" },
+  downloads_dir: {
+    section: "downloads",
+    type: "path",
+    label: "Download into",
+    placeholder: "default: the owned folder",
+    help: "Must be inside your owned folder. Each release gets its own <artist>/<year> - <release>/ folder.",
+  },
+  download_format: {
+    section: "downloads",
+    type: "select",
+    label: "Audio format",
+    options: ["aiff-lossless", "flac", "wav", "alac", "mp3-320", "mp3-v0", "aac-hi", "vorbis"],
+  },
   downloader_dir: { section: "advanced", type: "path", label: "Downloader folder" },
   dev_extension_build_dir: { section: "advanced", type: "path", label: "Dev extension build folder" },
 };
@@ -210,6 +223,19 @@ function textEditor(key, def, numeric) {
     node: input,
     get: () => (numeric ? Number(input.value) : input.value),
     set: (v) => (input.value = v == null ? "" : v),
+  };
+}
+
+function selectEditor(key, def) {
+  const sel = el("select", { id: `f_${key}`, onchange: () => changed() });
+  (def.options || []).forEach((o) => sel.appendChild(new Option(o, o)));
+  return {
+    node: sel,
+    get: () => sel.value,
+    set: (v) => {
+      if (v && ![...sel.options].some((o) => o.value === v)) sel.appendChild(new Option(v, v));
+      sel.value = v || "";
+    },
   };
 }
 
@@ -496,6 +522,7 @@ function makeEditor(key, def, value) {
     case "ratio": return ratioEditor(key);
     case "int":
     case "number": return textEditor(key, def, true);
+    case "select": return selectEditor(key, def);
     case "path":
     case "text": return textEditor(key, def, false);
     default: return genericEditor(key, value);

@@ -53,6 +53,7 @@ button.chip:hover { filter: brightness(0.95); border-color: #bbb; }
 }
 .mini-btn:disabled { border-color: #ddd; color: #bbb; cursor: default; }
 .busy-note { font-size: 11px; color: #8a5a00; white-space: normal; }
+.busy-note.err-note { display: block; color: #b42318; }
 
 .toolbar-btn.job-btn { background: #1f7a4d; border-color: #1f7a4d; }
 /* File index status next to "Rescan drive" */

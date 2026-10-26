@@ -7,7 +7,8 @@ import { ExtensionBridge } from "../../shared/datasource/extensionBridge";
 import { ServerEvents } from "../../shared/datasource/serverEvents";
 import { Jobs, progressText, resultText } from "./jobs";
 import { buildNav } from "./nav";
-import { appColumns, localPlayUrl } from "./columns";
+import { appColumns, downloadable, localPlayUrl } from "./columns";
+import { downloadFlow } from "./downloads";
 import { startDevReload } from "./devReload";
 import { createStatusFilter, createSourceFilter, sourceOf, playableItem } from "./statusFilter";
 import { runExport } from "./exportFlow";
@@ -125,6 +126,7 @@ async function refreshHealth() {
     colWidthKey: "bc_app_col_widths_v2",
     extraColumns: appColumns({
       jobs,
+      events,
       page: () => page,
       statusEl: () => page.statusEl,
     }),
@@ -158,6 +160,22 @@ async function refreshHealth() {
         "Add the located items shown below to rekordbox (previews the changes first)",
         exportShown
       ),
+      {
+        id: "downloadOwnedMissing",
+        label: "Download owned missing",
+        title: "Download the shown items you own on Bandcamp that aren't on your drive (shows the releases first)",
+        className: "job-btn",
+        run: async (statusEl, button) => {
+          button.disabled = true;
+          const view = page.getView();
+          const keys = Object.keys(view).filter((k) => downloadable(view[k]));
+          if (await downloadFlow(keys, "collection", { jobs, statusEl })) {
+            await page.reload();
+            keys.forEach((k) => page.refreshRow(k));
+          }
+          button.disabled = false;
+        },
+      },
     ],
     localPlayUrl,
     playable: playableItem,

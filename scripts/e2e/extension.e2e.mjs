@@ -28,6 +28,7 @@ const EXT_DIR = path.join(E2E, "extension");
 const PROFILE = path.join(E2E, "profile");
 const SERVER_DATA = path.join(E2E, "server-data");
 const APP_DIST = path.join(E2E, "app-dist"); // the app under test (not app/dist)
+const STUB_RELEASES = path.join(E2E, "stub-releases.json"); // what the stub downloader "downloads"
 const PORT = Number(process.env.E2E_PORT || 8767);
 const SERVER = `http://127.0.0.1:${PORT}`;
 const EXPORT_JSON =
@@ -168,7 +169,15 @@ before(async () => {
   // go to a closed local port, so nothing can reach Bandcamp.
   server = spawn(path.join(ROOT, "server/bct"), ["serve", "--port", String(PORT)], {
     cwd: ROOT,
-    env: { ...process.env, BC_TAGGER_DATA_DIR: SERVER_DATA, BC_TAGGER_BANDCAMP_FIXTURES: RECORDED_RESOLVER, ...NO_LIVE_PROXY },
+    env: {
+      ...process.env,
+      BC_TAGGER_DATA_DIR: SERVER_DATA,
+      BC_TAGGER_BANDCAMP_FIXTURES: RECORDED_RESOLVER,
+      // Downloads run Session A's stub downloader (writes small tagged AIFFs; no network).
+      BC_TAGGER_DOWNLOADER_STUB: path.join(ROOT, "server/tests/fixtures/stub_downloader.py"),
+      BC_TAGGER_STUB_RELEASES: STUB_RELEASES,
+      ...NO_LIVE_PROXY,
+    },
     stdio: "ignore",
   });
   await waitFor(() => api("/api/health").then((h) => h.ok && h.items > 0).catch(() => false), {
@@ -1375,6 +1384,107 @@ test("import preview: Set file → Browse from the music folders to a file; the 
     await api(`/api/import/${batchId}`, { method: "DELETE" });
     await put({ extra_roots: [], ...("last_browse_dir" in before ? { last_browse_dir: before.last_browse_dir || "" } : {}) });
     fs.rmSync(E2E_MUSIC, { recursive: true, force: true });
+    await page.close();
+  }
+});
+
+// --- Phase 4: downloading owned releases (Session A's stub downloader) ----------------
+// The test server's owned folder is .e2e/owned (downloads go there) and its
+// cookies file a dummy; both are restored afterwards. No real downloads.
+
+const OWNED = path.join(E2E, "owned");
+const DL = {
+  collection: { id: "a2225096452", artist: "Reptant", title: "Halls Of Perception" },
+  import: { id: "a3484490386", artist: "Bjarki", title: "Look at yourself" },
+  refused: { id: "a2773973352", artist: "Earthman", title: "[TerraFirm 3] Earthman - Orogenesis" },
+};
+
+async function downloadSetup() {
+  fs.rmSync(OWNED, { recursive: true, force: true });
+  fs.mkdirSync(OWNED, { recursive: true });
+  const cookies = path.join(E2E, "cookies-dummy.txt");
+  fs.writeFileSync(cookies, "# e2e: a dummy cookies file (the stub never uses it)\n");
+  const release = (r, extra = {}) => ({ artist: r.artist, title: r.title, year: 2024, tracks: ["One", "Two"], ...extra });
+  fs.writeFileSync(
+    STUB_RELEASES,
+    JSON.stringify({
+      [DL.collection.id]: release(DL.collection),
+      [DL.import.id]: release(DL.import),
+      [DL.refused.id]: release(DL.refused, { fail: "not_in_collection" }),
+    })
+  );
+  const before = await api("/api/settings").then((d) => d.settings || d);
+  const saved = await put({ owned_root: OWNED, cookies_file: cookies, downloads_dir: "", download_format: "aiff-lossless" });
+  assert.ok(!saved.detail, `settings: ${JSON.stringify(saved.detail)}`);
+  await post("/api/ownership", { owned_ids: Object.values(DL).map((r) => r.id), source: "e2e", full: false });
+  return async () => {
+    await put({ owned_root: before.owned_root, cookies_file: before.cookies_file, downloads_dir: before.downloads_dir || "" });
+    fs.rmSync(OWNED, { recursive: true, force: true });
+  };
+}
+
+test("Download (collection): an owned album not on the drive is downloaded (stub) and located; the confirm lists the release", async () => {
+  const restore = await downloadSetup();
+  const { id } = DL.collection;
+  const app = await context.newPage();
+  let dialog = "";
+  app.on("dialog", (d) => {
+    dialog = d.message();
+    d.accept();
+  });
+  try {
+    await app.goto(SERVER + "/");
+    await app.waitForFunction(() => document.querySelectorAll("#collectionTable tbody tr").length > 0);
+    await app.fill("#searchInput", "Halls Of Perception");
+    await app.waitForFunction((id) => document.querySelectorAll("#collectionTable tbody tr").length === 1 && document.querySelector(`tr[data-key="${id}"]`), id);
+    await app.waitForFunction((id) => /owned/.test(document.querySelector(`tr[data-key="${id}"] .col-owned`).textContent), id);
+    await app.click(`tr[data-key="${id}"] .col-located .chip`);
+    await app.click(".popover #downloadItem");
+    await app.waitForFunction(() => /^Download: 1 of 1 releases downloaded/.test(document.getElementById("refreshStatus").textContent), null, { timeout: 60000 });
+    assert.match(dialog, /^Download 1 release → .*\(aiff-lossless\):\n• Reptant – Halls Of Perception {2}\[a2225096452\]/);
+    assert.ok(dialog.includes(OWNED), dialog);
+    await waitFor(() => api(`/api/items/${id}`).then((it) => it.local && it.local.status === "located"), { what: "the item located on the server", timeout: 30000 });
+    const item = await api(`/api/items/${id}`);
+    assert.ok(item.local.best.path.startsWith(OWNED), item.local.best.path);
+    try {
+      await app.waitForFunction((id) => /^✓/.test((document.querySelector(`tr[data-key="${id}"] .col-located .chip`) || {}).textContent || ""), id, { timeout: 15000 });
+    } catch (e) {
+      const cell = await app.$eval(`tr[data-key="${id}"] .col-located`, (c) => c.outerHTML).catch((x) => String(x));
+      throw new Error(`the row didn't show it located: ${cell}`);
+    }
+  } finally {
+    await restore();
+    await app.close();
+  }
+});
+
+test("Download owned missing (import): the selected rows are downloaded and located; a refused one shows why in its row", async () => {
+  const restore = await downloadSetup();
+  const items = [
+    { line: 1, raw: "Bjarki - Look at yourself", artist: "Bjarki", title: "Look at yourself", existing_id: DL.import.id, tags: ["must"] },
+    { line: 2, raw: "Earthman - Orogenesis", artist: "Earthman", title: "Orogenesis", existing_id: DL.refused.id, tags: ["must"] },
+  ];
+  const { batch_id: batchId } = await post("/api/import", { file: { format: "bc-tagger-import/1", source: "e2e-download.txt", items }, default_tags: [], name: "e2e-download" });
+  const page = await context.newPage();
+  let dialog = "";
+  page.on("dialog", (d) => {
+    dialog = d.message();
+    d.accept();
+  });
+  try {
+    await waitFor(() => api(`/api/import/${batchId}`).then((b) => b.status === "ready"), { what: "the batch", timeout: 30000 });
+    await page.goto(`${SERVER}/import/?batch=${batchId}`);
+    await page.waitForFunction(() => document.querySelectorAll("#collectionTable tbody tr").length === 2);
+    await page.click("#downloadOwnedMissing");
+    await page.waitForFunction(() => /^Download: 1 of 2 releases downloaded, 1 failed/.test(document.getElementById("refreshStatus").textContent), null, { timeout: 60000 });
+    assert.match(dialog, /^Download 2 releases → /);
+    assert.match(dialog, /• Bjarki – Look at yourself {2}\[a3484490386\]/);
+    await page.waitForFunction(() => document.querySelector("tr[data-key='r0'] .located-cell .chip").dataset.status === "located", null, { timeout: 30000 });
+    await page.waitForFunction(() => /download failed: not in your Bandcamp collection/.test(document.querySelector("tr[data-key='r1'] .located-cell").textContent));
+    assert.equal((await api(`/api/import/${batchId}`)).rows[0].located.status, "located");
+  } finally {
+    await api(`/api/import/${batchId}`, { method: "DELETE" });
+    await restore();
     await page.close();
   }
 });
