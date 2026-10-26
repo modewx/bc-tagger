@@ -43,12 +43,16 @@ export function diffView(d, target) {
     wrap.appendChild(box);
   }
   (Array.isArray(d.warnings) ? d.warnings : []).forEach((w) => wrap.appendChild(el("p", "⚠ " + w, "muted")));
+  // Entry totals: from per_playlist when the server sends it.
+  const per = Array.isArray(d.per_playlist) && d.per_playlist.length ? d.per_playlist : null;
+  const added = per ? per.reduce((n, p) => n + count(p.add), 0) : count(d.entries_added);
+  const removed = per ? per.reduce((n, p) => n + count(p.remove), 0) : count(d.entries_removed);
   const ul = el("ul");
   [
     `${count(d.content_added)} tracks added to the collection (${count(d.content_existing)} already there)`,
     `${count(d.playlists_created)} new playlists` +
       (count(d.folders_created) ? `, ${count(d.folders_created)} new folders` : d.folder && d.folder.created ? ` and the folder "${d.folder.name}"` : ""),
-    `${count(d.entries_added)} playlist entries added, ${count(d.entries_removed)} removed`,
+    `${added} playlist entries added, ${removed} removed`,
   ].forEach((t) => ul.appendChild(el("li", t)));
   if (count(d.skipped_items)) ul.appendChild(el("li", `${count(d.skipped_items)} items skipped (not located)`));
   if (count(d.failed_files)) ul.appendChild(el("li", `${count(d.failed_files)} files rekordbox can't take`));
@@ -66,28 +70,32 @@ export function diffView(d, target) {
     );
   }
   // Entries per playlist (+added / −removed); the server's per_playlist when present.
-  if (Array.isArray(d.per_playlist) && d.per_playlist.length) {
+  if (per) {
     wrap.appendChild(
       listBlock(
         "Entries per playlist",
-        d.per_playlist,
+        per,
         (p) => `${p.playlist}: +${count(p.add)}${count(p.remove) ? ` / −${count(p.remove)}` : ""}${p.exists === false ? " (new)" : ""}`,
         200
       )
     );
     return wrap;
   }
-  const per = {};
+  const byPlaylist = {};
   const key = (e) => e.playlist || e.playlist_path || e.tag || "?";
-  (Array.isArray(d.entries_added) ? d.entries_added : []).forEach((e) => ((per[key(e)] = per[key(e)] || { add: [], rem: [] }).add.push(e)));
-  (Array.isArray(d.entries_removed) ? d.entries_removed : []).forEach((e) => ((per[key(e)] = per[key(e)] || { add: [], rem: [] }).rem.push(e)));
-  const names = Object.keys(per).sort();
+  (Array.isArray(d.entries_added) ? d.entries_added : []).forEach((e) =>
+    (byPlaylist[key(e)] = byPlaylist[key(e)] || { add: [], rem: [] }).add.push(e)
+  );
+  (Array.isArray(d.entries_removed) ? d.entries_removed : []).forEach((e) =>
+    (byPlaylist[key(e)] = byPlaylist[key(e)] || { add: [], rem: [] }).rem.push(e)
+  );
+  const names = Object.keys(byPlaylist).sort();
   if (names.length) {
     const d2 = el("details");
     d2.appendChild(el("summary", `Entries per playlist (${names.length} playlists)`));
     const ul2 = el("ul");
     names.forEach((n) => {
-      const { add, rem } = per[n];
+      const { add, rem } = byPlaylist[n];
       const li = el("li", `${n}: +${add.length}${rem.length ? ` / −${rem.length}` : ""}`);
       li.title = [...add.map((e) => "+ " + base(e.path)), ...rem.map((e) => "− " + base(e.path))].join("\n");
       ul2.appendChild(li);
