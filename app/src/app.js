@@ -17,7 +17,6 @@ const jobs = new Jobs(events);
 const nav = buildNav("collection");
 
 let page = null;
-let settings = null;
 
 // A toolbar button that runs a server job and reports progress in the status line.
 function jobButton(id, label, title, start) {
@@ -64,9 +63,7 @@ async function refreshHealth() {
 (async () => {
   // Ask the extension bridge first: it decides whether page fetches and
   // direct tag writes are available.
-  const connecting = bridge.connect(1000);
-  settings = await apiJson("/api/settings").catch(() => null);
-  await connecting;
+  await bridge.connect(1000);
   nav.setExtension(bridge.info);
   bridge.on("connect", (info) => nav.setExtension(info));
 
@@ -77,7 +74,6 @@ async function refreshHealth() {
     extraColumns: appColumns({
       jobs,
       page: () => page,
-      settings: () => settings,
       statusEl: () => page.statusEl,
     }),
     extraToolbarButtons: [

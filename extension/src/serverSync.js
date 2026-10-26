@@ -75,7 +75,7 @@ async function api(path, { method = "GET", body, timeoutMs = 15000 } = {}) {
 export async function probeServer(timeoutMs = 800) {
   try {
     const health = await api("/api/health", { timeoutMs });
-    return health && health.ok ? health : null;
+    return health && health.ok && health.name === "bc-tagger" ? health : null;
   } catch (e) {
     return null;
   }

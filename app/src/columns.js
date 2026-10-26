@@ -54,7 +54,7 @@ function dirname(p) {
 }
 
 /**
- * @param {object} ctx  {jobs, page(), settings(), statusEl()}
+ * @param {object} ctx  {jobs, page(), statusEl()}
  */
 export function appColumns(ctx) {
   const busy = {}; // item id -> label while a per-item job runs
@@ -183,22 +183,19 @@ export function appColumns(ctx) {
 
   // ---- Owned -----------------------------------------------------------------
 
-  // Owned on Bandcamp but the only local copy is in a not-owned (e.g. Soulseek)
-  // folder: worth re-downloading in better quality. And the reverse.
+  // Mismatches the server flags (local.hints), e.g. owned on Bandcamp but the
+  // only local copy is in the not-owned (Soulseek) folder.
+  const HINTS = {
+    owned_but_only_in_not_owned_root:
+      "Owned on Bandcamp, but the local copy is in a not-owned folder: re-download for better quality?",
+    in_owned_root_but_not_owned: "Not owned on Bandcamp, but found in the owned folder.",
+    owned_not_located: "Owned on Bandcamp but not found locally: download it?",
+  };
+
   function ownershipHint(item) {
-    const o = item.owned || {};
     const local = localOf(item);
-    if (local.status !== "located") return null;
-    const s = ctx.settings() || {};
-    const paths = locatedFiles(local).map((f) => f.path || "");
-    const inOwnedRoot = s.owned_root && paths.some((p) => p.startsWith(s.owned_root));
-    const notOwnedRoots = (s.not_owned_roots || []).map((r) => r.path).filter(Boolean);
-    const onlyNotOwned = paths.length && paths.every((p) => notOwnedRoots.some((r) => p.startsWith(r)));
-    if (o.status === "owned" && onlyNotOwned) {
-      return "Owned on Bandcamp, but the local copy is in a not-owned folder: re-download for better quality?";
-    }
-    if (o.status === "not_owned" && inOwnedRoot) return "Not owned on Bandcamp, but found in the owned folder.";
-    return null;
+    const hints = (local.hints || []).filter((h) => h !== "owned_not_located" || local.status === "missing");
+    return hints.length ? hints.map((h) => HINTS[h] || h).join("\n") : null;
   }
 
   function renderOwned(cell, key, item) {
