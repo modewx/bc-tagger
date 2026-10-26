@@ -43,6 +43,14 @@ class Challenged(Unavailable):
     """The site answered with its bot check. Stop; don't retry, don't work around it."""
 
 
+class NotCached(Unavailable):
+    """Offline and not in the cache: ``request`` is what would have been sent (``{method, url, body}``)."""
+
+    def __init__(self, message: str, request: dict[str, Any]):
+        super().__init__(message)
+        self.request = request
+
+
 class RateLimited(Unavailable):
     """Still HTTP 429 after waiting (Retry-After, else 30/60/120 s): pause, let the user resume later."""
 
@@ -123,7 +131,8 @@ class Fetcher:
         if hit is not None:
             return hit
         if self.offline:
-            raise Unavailable(f"not in the recorded responses: {method} {full_url} {json_body}")
+            raise NotCached(f"not in the recorded responses: {method} {full_url} {json_body}",
+                            {"method": method, "url": full_url, "body": json_body})
         status, body = self._fetch(method, full_url, json_body)
         if is_challenge(body):
             log.warning("bot check (Client Challenge) from %s: stopping", full_url)
@@ -137,6 +146,19 @@ class Fetcher:
                     (key, full_url, status, body, now_iso()),
                 )
         return status, body
+
+    def remember(self, method: str, url: str, json_body: Any, status: int, body: str) -> bool:
+        """Cache an answer fetched elsewhere (the user's browser). Bot-check pages and errors aren't kept."""
+        if is_challenge(body) or status not in (200, 404):
+            return False
+        with self.store.tx() as c:
+            c.execute(
+                "INSERT INTO http_cache(key, url, status, body, fetched_at) VALUES(?, ?, ?, ?, ?) "
+                "ON CONFLICT(key) DO UPDATE SET status = excluded.status, body = excluded.body, "
+                "fetched_at = excluded.fetched_at",
+                (self.cache_key(method, url, json_body), url, status, body, now_iso()),
+            )
+        return True
 
     def is_cached(self, method: str, url: str, json_body: Any = None) -> bool:
         return self._cached(self.cache_key(method, url, json_body)) is not None

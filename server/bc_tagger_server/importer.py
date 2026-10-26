@@ -26,7 +26,7 @@ from .collection import (
     DuplicateIndex, by_number, merge_pending_item_tags, now_ms_iso, other_get, other_id, other_put, queue_add,
     search_links,
 )
-from .fetcher import Challenged, RateLimited, Unavailable
+from .fetcher import Challenged, Fetcher, NotCached, RateLimited, Unavailable, is_challenge
 from .rowmatch import score_row
 from .store import now_iso
 
@@ -369,9 +369,11 @@ def _with_defaults(own: list[str], defaults: list[str], to_all: bool) -> tuple[l
 
 
 def create_batch(svc, file_obj: dict, default_tags: list[str], name: str | None = None,
-                 default_tags_all: bool = False) -> dict:
+                 default_tags_all: bool = False, lookup: str = "server") -> dict:
     if not isinstance(file_obj, dict) or file_obj.get("format") != FORMAT:
         raise ImportError_(f"not a {FORMAT} file")
+    if lookup not in ("server", "browser"):
+        raise ImportError_("lookup must be 'server' or 'browser'")
     items = file_obj.get("items")
     if not isinstance(items, list) or not items:
         raise ImportError_("the file has no items")
@@ -401,7 +403,7 @@ def create_batch(svc, file_obj: dict, default_tags: list[str], name: str | None 
     batch = {
         "batch_id": "imp-" + secrets.token_hex(4), "name": name or file_obj.get("source") or "import",
         "created_at": now_iso(), "status": "resolving", "error": None, "default_tags": default_tags,
-        "default_tags_all": bool(default_tags_all),
+        "default_tags_all": bool(default_tags_all), "lookup": lookup,
         "unknown_tags": unknown, "new_tags": [], "tag_mapping": None, "source_file": file_obj.get("source"),
         "revision": file_obj.get("revision"), "pending_releases": list(file_obj.get("pending_releases") or []),
         "job_id": None, "job_kind": None, "job_boot": svc.boot_id, "phase": "resolving", "stats": {},
@@ -426,6 +428,8 @@ def run_batch(svc, batch_id: str, ctx=None) -> dict:
         if ctx:
             ctx.progress(current, total, f"{phase} {current}/{total}")
 
+    if batch.get("lookup") == "browser":
+        return _start_browser(svc, batch, rows)
     fetcher = None
     try:
         batch["phase"] = "resolving"
@@ -465,7 +469,8 @@ def prepare_job(svc, batch_id: str, what: str) -> dict[str, Any]:
     batch = load_batch(svc.store, batch_id)
     _live(svc, batch)  # a restart may have interrupted it
     interrupted = batch["status"] == "interrupted"
-    if batch["status"] != "ready" and not (what == "resume" and interrupted):
+    browser_paused = batch.get("lookup") == "browser" and (batch.get("bandcamp_lookups") or {}).get("state") == "paused"
+    if batch["status"] != "ready" and not (what == "resume" and (interrupted or browser_paused)):
         raise ImportError_(f"the batch isn't ready ({batch['status']})")
     lookups = batch.get("bandcamp_lookups") or {}
     if what == "resume":
@@ -503,6 +508,14 @@ def resume_batch(svc, batch_id: str, ctx=None) -> dict:
     batch = load_batch(store, batch_id)
     rows = load_rows(store, batch_id)
     interrupted = batch["status"] == "resolving"  # prepare_job reopened an interrupted batch
+    if batch.get("lookup") == "browser":  # the browser goes on; the server only clears the pause
+        for r in rows:
+            if _paused(r):
+                r["match"] = _empty_match()
+        batch.update(status="resolving", phase="browser")
+        _save_rows(store, batch_id, rows)
+        _refresh_stats(store, batch, rows)
+        return {"batch_id": batch_id, "browser": browser_state(svc, batch_id)["state"]}
     targets = [r for r in rows if _resumable_row(r)]
     for r in targets:
         r["match"] = _empty_match()
@@ -559,6 +572,139 @@ def fetch_details(svc, batch_id: str, ctx=None) -> dict:
     return {"batch_id": batch_id, "fetched": done, "of": len(targets), "stopped": stop[1] if stop else None}
 
 
+# -- lookups in the user's browser -------------------------------------------------------------------
+#
+# The batch's lookups run through the same code with a cache-only fetcher: whatever isn't cached
+# becomes a pending request; the extension runs those in the user's Chrome session (its own pacing)
+# and posts the answers back, which are cached under the same key, so the next pass resolves them.
+
+
+def _needs_browser(row: dict) -> bool:
+    return row["source"] != "bandcamp" and (row.get("match") or {}).get("status") in ("pending", None) \
+        and not row.get("committed")
+
+
+def _start_browser(svc, batch: dict, rows: list[dict]) -> dict:
+    dups = DuplicateIndex(svc.store)
+    for row in rows:
+        _check_duplicate(dups, row)
+        if (row.get("bandcamp") or {}).get("via") == "collection":
+            row["match"] = {**_empty_match(), "status": "in_collection", "source": "collection"}
+        _refresh(row)
+    batch.update(phase="browser", bandcamp_lookups={"state": "on"})
+    _save_rows(svc.store, batch["batch_id"], rows)
+    _refresh_stats(svc.store, batch, rows)
+    state = browser_state(svc, batch["batch_id"])
+    return {"batch_id": batch["batch_id"], "stats": batch["stats"], "browser": {k: state[k] for k in (
+        "state", "pending_count", "done", "total")}}
+
+
+def _browser_pass(svc, batch: dict, rows: list[dict]) -> list[dict]:
+    """Resolve what the cache can answer; return the requests still needed (deduped)."""
+    fetcher = Fetcher(svc.store, "browser", offline=True)
+    dups = DuplicateIndex(svc.store)
+    lookups = batch.get("bandcamp_lookups") or {}
+    stop = (lookups["reason"], lookups["error"]) if lookups.get("state") in ("stopped", "paused") else None
+    pending: dict[str, dict] = {}
+    for row in rows:
+        if not _needs_browser(row):
+            continue
+        if stop:
+            row["match"] = _unavailable(*stop)
+        else:
+            try:
+                _lookup(fetcher, row)
+            except NotCached as e:
+                key = Fetcher.cache_key(e.request["method"], e.request["url"], e.request["body"])
+                pending.setdefault(key, {"key": key, **e.request, "rows": []})["rows"].append(row["n"])
+                continue
+            except Unavailable as e:
+                row["match"], row["bandcamp"] = _unavailable("error", f"Bandcamp lookup unavailable: {e}"), None
+        _check_duplicate(dups, row)
+        _refresh(row)
+    return list(pending.values())
+
+
+def browser_state(svc, batch_id: str, limit: int = 20) -> dict[str, Any]:
+    """``{state: "waiting"|"done"|"stopped"|"paused"|"server", reason?, error?, pending: [{key, method, url,
+    body, rows}], pending_count, done, total}``. Rows the cache can answer are resolved on the way; once
+    nothing is pending the batch is located and becomes ready (a job)."""
+    store = svc.store
+    batch = load_batch(store, batch_id)
+    if batch.get("lookup") != "browser":
+        return {"state": "server", "pending": [], "pending_count": 0, "done": 0, "total": 0}
+    rows = load_rows(store, batch_id)
+    pending = _browser_pass(svc, batch, rows) if batch.get("phase") == "browser" else []
+    batch["browser_pending"] = [p["key"] for p in pending]
+    _save_rows(store, batch_id, rows)
+    _refresh_stats(store, batch, rows)
+    looked_up = [r for r in rows if r["source"] != "bandcamp" or (r.get("bandcamp") or {}).get("via") != "collection"]
+    waiting = sum(_needs_browser(r) for r in rows)
+    lookups = batch.get("bandcamp_lookups") or {}
+    if lookups.get("state") in ("stopped", "paused"):
+        state = lookups["state"]
+    elif batch.get("phase") == "browser" and not pending:
+        state = "done"
+        _finish_browser(svc, batch)
+    else:
+        state = "waiting" if batch.get("phase") == "browser" else "done"
+    svc.jobs.bus.publish("import", {"batch_id": batch_id, "phase": "browser", "current": len(looked_up) - waiting,
+                                    "total": len(looked_up), "pending": len(pending)})
+    return {"state": state, "reason": lookups.get("reason"), "error": lookups.get("error"),
+            "pending": pending[:limit], "pending_count": len(pending), "done": len(looked_up) - waiting,
+            "total": len(looked_up)}
+
+
+def browser_results(svc, batch_id: str, results: list[dict], limit: int = 20) -> dict[str, Any]:
+    """Answers the extension fetched: ``[{key?, method, url, body, status, text}]``. Only requests the server
+    asked for are taken. A bot-check page stops the batch's browser lookups; HTTP 429 pauses them."""
+    store = svc.store
+    batch = load_batch(store, batch_id)
+    if batch.get("lookup") != "browser" or batch.get("phase") != "browser":
+        raise ImportError_("this batch isn't waiting for browser lookups")
+    asked = set(batch.get("browser_pending") or [])
+    fetcher = Fetcher(store, "browser", offline=True)
+    taken = ignored = 0
+    for r in results or []:
+        key = Fetcher.cache_key(r.get("method", "GET"), r.get("url", ""), r.get("body"))
+        if key not in asked:
+            ignored += 1
+            continue
+        text, status = r.get("text") or "", int(r.get("status") or 0)
+        if is_challenge(text):
+            batch["bandcamp_lookups"] = {"state": "stopped", "reason": "challenge", "at": now_iso(),
+                                         "error": "Bandcamp answered your browser with its bot check; lookups stopped"}
+            break
+        if status in (429, 503):
+            batch["bandcamp_lookups"] = {"state": "paused", "reason": "rate_limited", "at": now_iso(),
+                                         "error": RATE_LIMITED}
+            break
+        taken += fetcher.remember(r["method"], r["url"], r.get("body"), status, text)
+    _save_batch(store, batch)
+    return {**browser_state(svc, batch_id, limit), "taken": taken, "ignored": ignored}
+
+
+def _finish_browser(svc, batch: dict) -> None:
+    """All looked up: quick scan + locate as a job, then the batch is ready."""
+    batch_id = batch["batch_id"]
+    batch["phase"] = "locating"
+    _save_batch(svc.store, batch)
+
+    def finish(ctx):
+        b = load_batch(svc.store, batch_id)
+        rows = load_rows(svc.store, batch_id)
+        b["scan"] = _refresh_index(svc, ctx, b)
+        _locate(svc, rows)
+        _save_rows(svc.store, batch_id, rows)
+        b.update(status="ready", phase=None)
+        _refresh_stats(svc.store, b, rows)
+        svc.jobs.bus.publish("import", {"batch_id": batch_id, "phase": "done", "current": len(rows), "total": len(rows)})
+        return {"batch_id": batch_id, "stats": b["stats"]}
+
+    job = svc.jobs.submit("import-locate", finish)
+    set_job(svc, batch_id, job)
+
+
 # -- review ----------------------------------------------------------------------------------------
 
 
@@ -574,7 +720,7 @@ def _live(svc, batch: dict) -> dict:
     caught mid-lookup or mid-commit by a server restart is marked here (and saved)."""
     ours = batch.get("job_boot") == svc.boot_id
     job = svc.jobs.get(batch["job_id"]) if ours and batch.get("job_id") else None
-    if batch["status"] == "resolving" and not ours:
+    if batch["status"] == "resolving" and not ours and batch.get("phase") != "browser":
         batch.update(status="interrupted", error="The server restarted during the lookups. Resume to continue "
                                                  "(answers already fetched come from the cache).")
         _save_batch(svc.store, batch)
@@ -595,7 +741,7 @@ def _live(svc, batch: dict) -> dict:
         "step": step,
         "progress": dict(job.progress) if running else None,
         "job": {"id": job.id, "kind": job.kind, "status": job.status} if running else None,
-        "resumable": status == "interrupted" or (status == "ready" and lookups.get("state") == "paused"),
+        "resumable": status == "interrupted" or (status in ("ready", "resolving") and lookups.get("state") == "paused"),
     }
 
 
