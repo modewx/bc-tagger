@@ -1971,6 +1971,7 @@ test("import end to end (real server): resolve, map tags, paste a URL, link from
   assert.equal(await page.$$eval("tr.row-duplicate", (r) => r.length), 2);
   assert.equal(src["Take It As A Game (Super Drama Mix)"], "file", "resolved from the file's link (recorded)");
   assert.equal(src.Astika, "search", "found by the Bandcamp search (recorded)");
+  assert.equal(src["The Human Being Disgusts"], "none", "searched, not found: unmatched (not \"search\")");
   // Not recorded: no lookup goes out; the row says why.
   assert.equal(src["Holo Law"], "unavailable");
   assert.match(await page.textContent("#lookupUnavailable"), /Bandcamp lookup unavailable for \d+ rows?: the lookup failed/);

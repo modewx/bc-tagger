@@ -171,11 +171,14 @@ export function matchSource(row) {
   const m = row.match;
   if (row.via) return VIA[row.via] || (m.source === "file" || m.source === "file_url" ? "file" : "search");
   if (row.lookupUnavailable && row.source !== "bandcamp") return "unavailable";
-  if (m.source && m.source !== "file_url") return m.source;
   if (row.duplicate && row.duplicate.source !== "other" && row.source === "bandcamp") return "collection";
-  if (m.status === "manual") return m.url ? "url" : m.chosen ? "picked" : "notbc"; // chosen null: "not on Bandcamp"
-  if (m.status === "accepted") return "search";
-  if (m.status === "candidates") return "candidates";
+  // The server names where it looked even when nothing was found ("search"):
+  // only a match (accepted, chosen, candidates) takes its source.
+  const mb = m.source === "musicbrainz";
+  if (m.status === "manual") return m.url || m.source === "url" ? "url" : m.chosen ? (mb ? "musicbrainz" : "picked") : "notbc"; // chosen null: "not on Bandcamp"
+  if (m.status === "accepted") return mb ? "musicbrainz" : m.source === "file" || m.source === "file_url" ? "file" : m.source && m.source !== "search" ? m.source : "search";
+  if (m.status === "candidates") return mb ? "musicbrainz" : "candidates";
+  if (m.status === "in_collection") return "collection";
   if (m.status === "error") return "error";
   if (m.status === "pending") return "pending";
   return "none";
