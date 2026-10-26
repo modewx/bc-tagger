@@ -406,6 +406,9 @@ def _export(
         "entries_kept_user": 0,
         "per_playlist": [],
         "errors": [],
+        # [{code, message}] — blockers make a confirm fail (shown before the user confirms);
+        # warnings don't.
+        "blockers": [],
         "warnings": [],
         "skipped_items": selection.skipped,
         "missing_files": [],
@@ -415,17 +418,25 @@ def _export(
         "backup": None,
         "guard": None,
     }
+    def warn(code: str, message: str) -> None:
+        diff["warnings"].append({"code": code, "message": message})
+
     if selection.unmapped_tags:
-        diff["warnings"].append("not exported (no playlist mapped): " + ", ".join(selection.unmapped_tags))
+        warn("unmapped_tags", "not exported (no playlist mapped): " + ", ".join(selection.unmapped_tags))
     if not selection.playlist_order and selection.tracks:
-        diff["warnings"].append("no tag of the selected items maps to a playlist")
+        warn("no_mapped_playlists", "no tag of the selected items maps to a playlist")
     if target.is_main and _agent_running():
-        diff["warnings"].append(
-            "rekordboxAgent is running; if you use Cloud Library Sync, quit it before exporting"
-        )
+        warn("rekordbox_agent_running",
+             "rekordboxAgent is running; if you use Cloud Library Sync, quit it before exporting")
 
     if dry_run:
-        diff["guard"] = target.check().to_dict()
+        decision = target.check()
+        diff["guard"] = decision.to_dict()
+        if not decision.allowed:
+            message = decision.reason.removeprefix("refusing: ")
+            if decision.code == "rekordbox_running":
+                message = "rekordbox is running. Quit rekordbox before confirming."
+            diff["blockers"].append({"code": decision.code or "refused", "message": message})
         db = target.open_read()
     else:
         diff["guard"] = target.require().to_dict()
@@ -628,6 +639,9 @@ def _export(
             or diff["entries_removed"]
         )
         diff["changed"] = changed
+        if diff["errors"]:
+            diff["blockers"].append({"code": "playlist_errors", "message": "; ".join(diff["errors"])})
+        diff["can_confirm"] = changed and not diff["blockers"]
         if dry_run:
             db.rollback()
             if not record:

@@ -209,3 +209,28 @@ def test_restore_refuses_foreign_file_and_missing_marker(test_db, tmp_path):
     (test_db.parent / MARKER_NAME).unlink()
     with pytest.raises(WriteRefused, match="marker"):
         rbguard.restore(test_db, pristine, running=False)
+
+
+def test_db_path_in_options_json_is_not_trusted(tmp_path):
+    """rekordbox 6.7.4 rewrote options.json to a Caches path it doesn't use while it kept
+    ~/Library/Pioneer/rekordbox open: both count as possibly open."""
+    main = tmp_path / "Pioneer" / "rekordbox"
+    main_db = fake_db(main)  # even with a marker (test library switched in)
+    caches = tmp_path / "Caches" / "rekordbox" / "master.db"  # doesn't exist
+    test_db = fake_db(tmp_path / "rekordbox_test")
+    ok = check_write(test_db, running=True, options_db=caches, main_dir=main)
+    assert ok.allowed and ok.bypass_running_check
+    refused = check_write(main_db, running=True, options_db=caches, main_dir=main)
+    assert not refused.allowed and refused.code == "main_library_path"
+    open_elsewhere = fake_db(tmp_path / "Caches" / "rekordbox")
+    refused = check_write(open_elsewhere, running=True, options_db=open_elsewhere, main_dir=main)
+    assert not refused.allowed and refused.code == "rekordbox_has_db_open"
+
+
+def test_refusals_carry_codes(tmp_path):
+    db = fake_db(tmp_path / "lib", marker=False)
+    assert check_write(db, running=False).code == "not_test_library"
+    assert check_write(tmp_path / "nope" / "master.db", running=False).code == "db_missing"
+    main = fake_db(tmp_path / "main", marker=False)
+    assert rbguard.check_write_main(main, allow=False, configured=main, running=False).code == "main_writes_off"
+    assert rbguard.check_write_main(main, allow=True, configured=main, running=True).code == "rekordbox_running"
