@@ -2,20 +2,20 @@
 
 Each ref is an item id (``t123``/``a456``) or an import row (``<batch_id>:<n>``). Tracks map to their
 album when the album is owned (else the track itself if it was bought alone); releases are
-deduped and downloaded one at a time (one download job at a time, too), each by its exact title
-(``downloader.run_release``). After each release a quick scan picks up the new files and the
-affected items and rows are located again. Bandcamp's bot check or a rate limit stops the rest.
+deduped and downloaded one at a time (one download job at a time, too). After each release its
+folder is indexed and the affected items and rows are located again. Bandcamp's bot check or a
+rate limit stops the remaining releases.
 """
 
 from __future__ import annotations
 
 import threading
-from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from typing import Any
 
 from . import downloader
 from .downloader import DownloadRefused
-from .items import album_name, is_album
+from .tagread import AUDIO_EXTS
 
 _one_at_a_time = threading.Lock()
 
@@ -23,8 +23,7 @@ MESSAGES = {
     "downloaded": "downloaded",
     "on_disk": "already on disk",
     "cached": "downloaded before (the downloader's cache): nothing new; download again with force",
-    "not_in_collection": "not in your Bandcamp collection (nothing matched the title)",
-    "ambiguous": "not downloaded: the title matches another release first",
+    "not_in_collection": "not in your Bandcamp collection",
     "challenged": "Bandcamp answered with its bot check; downloads stopped",
     "rate_limited": "Bandcamp is rate-limiting; try again later",
     "failed": "the download failed",
@@ -47,12 +46,6 @@ def release_for(store, item: dict) -> str | None:
     if album in owned:
         return album
     return item["id"] if item["id"] in owned else None
-
-
-def release_title(item: dict) -> str | None:
-    """The title the downloader's filter uses for the item's release (the album; a single's own title)."""
-    return album_name(item) or item.get("album_title") or (item.get("title") if is_album(item) else None) \
-        or item.get("title")
 
 
 def _resolve(svc, ref: str, collection: dict[str, dict]) -> dict[str, Any]:
@@ -82,8 +75,8 @@ def _resolve(svc, ref: str, collection: dict[str, dict]) -> dict[str, Any]:
 
 
 def plan(svc, refs: list[str], force: bool = False) -> dict[str, Any]:
-    """What a download would do: ``{destination, format, releases: [{release, refs, title, artist, filter}],
-    items: [{ref, item_id, title, artist, release, filter, state: "queued"|"skipped"|"failed", message}]}``."""
+    """What a download would do: ``{destination, format, releases: [{release, refs, title, artist}], items:
+    [{ref, item_id, title, artist, release, state: "queued"|"skipped"|"failed", message}]}``."""
     folder = downloader.downloads_dir(svc.settings)
     collection = {it["id"]: it for it in svc.collection_items()}
     items, releases = [], {}
@@ -91,7 +84,7 @@ def plan(svc, refs: list[str], force: bool = False) -> dict[str, Any]:
         r = _resolve(svc, ref, collection)
         item = r.get("item") or {}
         entry = {"ref": ref, "item_id": item.get("id"), "title": item.get("title"), "artist": item.get("artist"),
-                 "release": None, "filter": None, "state": "failed", "message": r.get("error")}
+                 "release": None, "state": "failed", "message": r.get("error")}
         if item:
             release = release_for(svc.store, item)
             if release is None:
@@ -99,19 +92,27 @@ def plan(svc, refs: list[str], force: bool = False) -> dict[str, Any]:
             elif r["located"] and not force:
                 entry.update(release=release, state="skipped", message="already located")
             else:
-                title = release_title(item)
-                try:
-                    filt = downloader.check_filter(title)
-                except DownloadRefused as e:
-                    entry.update(release=release, message=f"can't download it by name: {e}")
-                else:
-                    entry.update(release=release, filter=filt, state="queued", message="queued")
-                    rel = releases.setdefault(release, {"release": release, "refs": [], "title": title,
-                                                        "artist": item.get("artist"), "filter": filt})
-                    rel["refs"].append(ref)
+                entry.update(release=release, state="queued", message="queued")
+                rel = releases.setdefault(release, {"release": release, "refs": [], "title": item.get(
+                    "album_title") if release.startswith("a") else item.get("title"), "artist": item.get("artist")})
+                rel["refs"].append(ref)
         items.append(entry)
     return {"destination": str(folder), "format": svc.settings.get("download_format"),
             "releases": list(releases.values()), "items": items}
+
+
+def _index_folder(svc, folder: str | None) -> int:
+    from .indexer import index_file
+
+    if not folder or not Path(folder).is_dir():
+        return 0
+    roots = svc.settings.roots()
+    n = 0
+    for p in sorted(Path(folder).rglob("*")):
+        if p.is_file() and p.suffix.lower() in AUDIO_EXTS and not p.name.startswith("."):
+            index_file(svc.store, p, roots)
+            n += 1
+    return n
 
 
 def _locate_refs(svc, entries: list[dict]) -> dict[str, bool]:
@@ -145,7 +146,7 @@ def run(svc, refs: list[str], force: bool = False, ctx=None) -> dict[str, Any]:
 
     def publish(entry: dict) -> None:
         svc.jobs.bus.publish("download", {"job_id": job_id, **{k: entry.get(k) for k in (
-            "ref", "item_id", "release", "filter", "state", "message", "located")}})
+            "ref", "item_id", "release", "state", "message", "located")}})
 
     for e in p["items"]:
         publish(e)
@@ -160,21 +161,19 @@ def run(svc, refs: list[str], force: bool = False, ctx=None) -> dict[str, Any]:
                     publish(e)
                 continue
             for e in entries:
-                e.update(state="downloading", message=f'downloading "{rel["filter"]}"')
+                e.update(state="downloading", message=f"downloading {rel['title'] or rel['release']}")
                 publish(e)
             if ctx:
-                ctx.progress(i - 1, len(p["releases"]), f'downloading {i}/{len(p["releases"])}: "{rel["filter"]}"')
-            started = datetime.now(timezone.utc)
+                ctx.progress(i - 1, len(p["releases"]), f"downloading {i}/{len(p['releases'])}: {rel['title']}")
             try:
-                res = downloader.run_release(svc.settings, rel["filter"], p["format"], force,
+                res = downloader.run_release(svc.settings, rel["release"], p["format"], force,
                                              on_line=lambda line: ctx.progress(i - 1, len(p["releases"]), line) if ctx else None)
             except (DownloadRefused, OSError) as err:
-                res = {"filter": rel["filter"], "outcome": "failed", "ok": False, "matched": [], "errors": [str(err)]}
+                res = {"release": rel["release"], "outcome": "failed", "ok": False, "folder": None, "files": [],
+                       "errors": [str(err)]}
             if res["outcome"] in ("challenged", "rate_limited"):
                 stop = MESSAGES[res["outcome"]]
-            scan = {}
-            if res["outcome"] == "downloaded":  # pick up the new files
-                scan = svc.prepare_index([], "quick", ctx, cutoff=started - timedelta(minutes=2))
+            indexed = _index_folder(svc, res.get("folder")) if res["ok"] else 0
             located = _locate_refs(svc, entries) if res["ok"] else {}
             for e in entries:
                 message = MESSAGES[res["outcome"]]
@@ -182,8 +181,8 @@ def run(svc, refs: list[str], force: bool = False, ctx=None) -> dict[str, Any]:
                     message = f"{message}: {res['errors'][-1]}"
                 e.update(state="done" if res["ok"] else "failed", message=message, located=located.get(e["ref"]))
                 publish(e)
-            results.append({**{k: v for k, v in res.items() if k != "log_tail"}, "release": rel["release"],
-                            "refs": rel["refs"], "scan": {k: v for k, v in scan.items() if k != "roots"}})
+            results.append({**{k: v for k, v in res.items() if k != "log_tail"}, "indexed": indexed,
+                            "refs": rel["refs"]})
     if ctx:
         ctx.progress(len(p["releases"]), len(p["releases"]), "downloads done")
     return {"destination": p["destination"], "releases": results, "items": p["items"], "stopped": stop}

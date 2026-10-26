@@ -1,13 +1,10 @@
-"""A stand-in for bandcamp-collection-downloader (tests and e2e; never the network).
+"""A stand-in for bandcamp-collection-downloader with ``--item-id`` (tests and e2e; never the network).
 
-Run by the server instead of the jar when ``BC_TAGGER_DOWNLOADER_STUB=<this file>``. Like the tool,
-``--string-filter`` keeps the collection entries whose artist or album title contains it (``;``
-separates several), logs ``Matched filter: [ItemMetadata(…), …]``, then ``--number`` keeps the first
-n, the cache file skips what was downloaded before (unless ``--force``), and each release is written
-as ``<folder>/<artist>/<year> - <album title>/NN <track>.aiff`` with tags.
+Run by the server instead of the jar when ``BC_TAGGER_DOWNLOADER_STUB=<this file>``. It prints the
+jar's lines and writes ``<folder>/<artist>/<year> - <title>/NN <track>.aiff`` with tags.
 
-``BC_TAGGER_STUB_RELEASES=<json file>``: the collection in order, ``[{"sale_item_id", "artist",
-"album_title", "year", "tracks": [..], "fail": "challenge"|"rate_limit"|"error"}]``.
+``BC_TAGGER_STUB_RELEASES=<json file>``: ``{"a123": {"artist", "title", "year", "tracks": [..],
+"fail": "not_in_collection"|"challenge"|"rate_limit"|"error"}}``; unknown ids get a generic release.
 ``BC_TAGGER_STUB_DELAY=<seconds>``: wait that long before writing (to see progress in a UI).
 """
 
@@ -46,57 +43,60 @@ def main() -> int:
     p = argparse.ArgumentParser()
     p.add_argument("--download-folder", required=True)
     p.add_argument("--audio-format", default="vorbis")
-    p.add_argument("--string-filter", default="*")
-    p.add_argument("--number", type=int, default=2**31 - 1)
+    p.add_argument("--item-id", action="append", default=[])
+    p.add_argument("--user-agent")
     p.add_argument("--force", action="store_true")
     p.add_argument("--cookies-file")
     args, rest = p.parse_known_args()
-    collection = []
+    releases = {}
     if os.environ.get("BC_TAGGER_STUB_RELEASES"):
-        collection = json.loads(Path(os.environ["BC_TAGGER_STUB_RELEASES"]).read_text())
+        releases = json.loads(Path(os.environ["BC_TAGGER_STUB_RELEASES"]).read_text())
     folder = Path(args.download_folder)
     log(f"Target bandcamp account: {rest[-1] if rest else '?'}")
     log(f"Target download folder: {folder}")
-    log(f"Name filter {args.string_filter}. To download {args.number} items")
-    if any(e.get("fail") == "challenge" for e in collection):
-        log("<!DOCTYPE html><html><head><title>Client Challenge</title></head></html>")
-        print("ERROR: Could not perform task", file=sys.stderr, flush=True)
-        return 0
-    if any(e.get("fail") == "rate_limit" for e in collection):
-        print("ERROR: HTTP error fetching URL. Status=429", file=sys.stderr, flush=True)
-        return 0
-    filters = [f.strip().lower() for f in args.string_filter.split(";")]
-    matched = collection if args.string_filter in ("*", "") else [
-        e for e in collection if any(f in e["artist"].lower() or f in e["album_title"].lower() for f in filters)]
-    log("Matched filter: [" + ", ".join(f"ItemMetadata(sale_item_id={e['sale_item_id']}, band_name={e['artist']}, "
-                                       f"album_title={e['album_title']})" for e in matched) + "].")
-    time.sleep(0.3)  # the tool goes on to fetch the download pages
-    chosen = matched[:args.number]
-    log(f'Found "herrasti" with {len(chosen)} items.')
+    log(f"User-Agent: {args.user_agent}")
+    ids = [i for raw in args.item_id for i in raw.split(",") if i]
+    log(f"Items: {', '.join(ids)}")
     cache_file = folder / "bandcamp-collection-downloader.cache"
     cache = set(cache_file.read_text().split()) if cache_file.exists() else set()
-    todo = chosen if args.force else [e for e in chosen if f"p{e['sale_item_id']}" not in cache]
-    if len(chosen) - len(todo):
-        log(f"Ignoring {len(chosen) - len(todo)} already downloaded items (based on '{cache_file}').")
-    for n, e in enumerate(todo, 1):
-        log(f"Managing item {n}/{len(todo)}")
-        name = f'"{e["album_title"]}" ({e["year"]}) by {e["artist"]}'
-        log(f"Found release {name} (Bandcamp ID: p{e['sale_item_id']}).")
-        if e.get("fail") == "error":
+    for item_id in ids:
+        rel = {"artist": "Stub Artist", "title": f"Stub Release {item_id}", "year": 2026, "tracks": ["Stub Track"],
+               **releases.get(item_id, {})}
+        fail = rel.get("fail")
+        if fail == "not_in_collection":
+            log(f"Not in the collection: {item_id}")
+            print(f"ERROR: None of the requested items are in the collection: {item_id}", file=sys.stderr, flush=True)
+            return 0
+        if fail == "challenge":
+            log("<!DOCTYPE html><html><head><title>Client Challenge</title></head></html>")
+            print("ERROR: Could not perform task", file=sys.stderr, flush=True)
+            return 0
+        if fail == "rate_limit":
+            print("ERROR: HTTP error fetching URL. Status=429", file=sys.stderr, flush=True)
+            return 0
+        sale_id = "p" + item_id[1:]
+        if sale_id in cache and not args.force:
+            log(f"Ignoring 1 already downloaded items (based on '{cache_file}').")
+            return 0
+        name = f'"{rel["title"]}" ({rel["year"]}) by {rel["artist"]}'
+        log(f"Found release {name} (Bandcamp ID: {sale_id}).")
+        if fail == "error":
             log("Could not download item: No URL found for item")
-            continue
-        release_folder = folder / e["artist"] / f'{e["year"]} - {e["album_title"]}'
+            return 0
+        release_folder = folder / rel["artist"] / f'{rel["year"]} - {rel["title"]}'
         log(f"Starting the download of {name}.")
+        log(f"Release folder: {release_folder}")
         time.sleep(float(os.environ.get("BC_TAGGER_STUB_DELAY", "0")))
         if release_folder.exists() and not args.force:
             log(f"{name} already exists on disk, skipping.")
         else:
             release_folder.mkdir(parents=True, exist_ok=True)
-            for i, track in enumerate(e["tracks"], 1):
-                write_aiff(release_folder / f"{i:02d} {track}.aiff", track, e["artist"], e["album_title"], i)
+            for n, track in enumerate(rel["tracks"], 1):
+                write_aiff(release_folder / f"{n:02d} {track}.aiff", track, rel["artist"], rel["title"], n)
             log(f"{name} successfully downloaded.")
-        with cache_file.open("a") as f:
-            f.write(f"p{e['sale_item_id']}\n")
+        if sale_id not in cache:
+            with cache_file.open("a") as f:
+                f.write(sale_id + "\n")
     return 0
 
 
