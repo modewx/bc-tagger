@@ -143,3 +143,58 @@ def test_destination_must_be_inside_an_owned_root(svc, tmp_path):
     with TestClient(create_app(svc)) as c:
         r = c.post("/api/download", json={"ids": ["t100"]})
         assert r.status_code == 400 and "inside an owned root" in r.json()["detail"]
+
+
+def test_progress_and_retry_reasons_in_plain_words(svc, monkeypatch):
+    monkeypatch.setenv("BC_TAGGER_STUB_RETRY", "1")
+    said = []
+    res = downloader.run_release(svc.settings, "t200", on_line=lambda message, percent=None: said.append((message, percent)))
+    assert res["outcome"] == "downloaded" and res["retries"] == ["SocketTimeoutException: Read timed out"]
+    messages = [m for m, _ in said]
+    assert "Bandcamp error: SocketTimeoutException: Read timed out" in messages
+    assert "retrying 1/3 after: SocketTimeoutException: Read timed out" in messages
+    percents = [p for m, p in said if m.startswith("downloading ") and m.endswith("%")]
+    assert percents == [0.0, 12.5, 50.0, 99.99]  # whole percents only: 12.9 is still 12 %
+    assert not any("Progress:" in line for line in res["log_tail"])  # not kept in the log
+    # the job reports it per row
+    events = []
+    monkeypatch.setattr(svc.jobs.bus, "publish", lambda kind, data: events.append((kind, data)))
+    downloads.run(svc, ["t100"])
+    pct = [d["percent"] for k, d in events if k == "download" and d["state"] == "downloading" and d.get("percent")]
+    assert pct and max(pct) == 100.0
+
+
+def test_download_file_vs_full_release(svc):
+    with svc.store.tx() as c:  # t300: a single bought alone (t200 too; its album a20 is not owned yet)
+        c.execute("INSERT INTO owned_ids(id, source, checked_at) VALUES('t300', 'test', 'x')")  # a single only
+    p = downloads.plan(svc, ["t100", "t200", "t300"])
+    assert {e["ref"]: e["release"] for e in p["items"]} == {"t100": "a10", "t200": "t200", "t300": "t300"}
+    full = downloads.plan(svc, ["t100", "t200", "t300"], full_release=True)
+    items = by_ref(full)
+    assert items["t100"]["release"] == "a10"  # the album either way
+    assert items["t300"]["state"] == "failed" and items["t300"]["message"] == "the full release isn't owned (only this track)"
+    assert items["t200"]["state"] == "failed"  # its album a20 isn't owned either
+    with svc.store.tx() as c:
+        c.execute("INSERT INTO owned_ids(id, source, checked_at) VALUES('a20', 'test', 'x')")
+    assert by_ref(downloads.plan(svc, ["t200"], full_release=True))["t200"]["release"] == "a20"
+    assert by_ref(downloads.plan(svc, ["t200"]))["t200"]["release"] == "t200"  # Download File: just the track
+    with TestClient(create_app(svc)) as c:
+        r = c.post("/api/download", json={"ids": ["t200"], "full_release": True, "dry_run": True}).json()
+        assert r["releases"][0]["release"] == "a20"
+        owned = c.get("/api/items/t200").json()["owned"]
+        assert owned["status"] == "owned" and owned["track_owned"] and owned["album_owned"] and owned["full_release"] == "a20"
+        owned = c.get("/api/items/t300").json()["owned"]
+        assert owned["track_owned"] and not owned["album_owned"] and owned["full_release"] is None
+        owned = c.get("/api/items/t400").json()["owned"]  # its album a40 is owned, the track not separately
+        assert not owned["track_owned"] and owned["album_owned"] and owned["full_release"] == "a40"
+
+
+def test_import_rows_say_what_can_be_downloaded(svc):
+    batch = importer.create_batch(svc, {"format": "bc-tagger-import/1", "items": [
+        {"line": 1, "artist": "Artist E", "title": "Row Song", "album": "Imported Release", "tags": []},
+        {"line": 2, "artist": "Nobody", "title": "Nothing Here", "tags": []}]}, ["must"])
+    importer.link_row(svc, batch["batch_id"], 0, {"item": {"id": "t500", "title": "Row Song", "artist": "Artist E",
+                                                            "album_id": "a50"}})
+    rows = importer.get_batch(svc, batch["batch_id"])["rows"]
+    assert rows[0]["owned"]["status"] == "owned" and rows[0]["owned"]["full_release"] == "a50"
+    assert rows[1]["owned"] is None  # not a Bandcamp row

@@ -37,20 +37,26 @@ def ownership_status(store: Store, item: dict) -> dict[str, Any]:
         return {"status": "unknown", "source": "other", "checked_at": None}
     ids = [item["id"]]
     album_id = item.get("album_id")
-    if isinstance(album_id, str) and album_id.startswith("a"):
+    if isinstance(album_id, int):
+        album_id = f"a{album_id}"
+    if isinstance(album_id, str) and album_id.startswith("a") and album_id != item["id"]:
         ids.append(album_id)
-    elif isinstance(album_id, int):
-        ids.append(f"a{album_id}")
+    else:
+        album_id = item["id"] if str(item["id"]).startswith("a") else None
     placeholders = ",".join("?" * len(ids))
-    row = store.query_one(
-        f"SELECT source, checked_at FROM owned_ids WHERE id IN ({placeholders}) LIMIT 1", ids
-    )
-    if row:
-        return {"status": "owned", "source": row["source"], "checked_at": row["checked_at"]}
+    rows = store.query(f"SELECT id, source, checked_at FROM owned_ids WHERE id IN ({placeholders})", ids)
+    owned = {r["id"]: r for r in rows}
+    # what a download can fetch: the track bought alone, and/or its whole release (album or EP)
+    detail = {"track_owned": item["id"] in owned and not str(item["id"]).startswith("a"),
+              "album_owned": album_id in owned if album_id else False,
+              "full_release": album_id if album_id in owned else None}
+    if owned:
+        row = next(iter(owned.values()))
+        return {"status": "owned", "source": row["source"], "checked_at": row["checked_at"], **detail}
     last_full = store.get_meta("ownership_last_full")
     if last_full:
-        return {"status": "not_owned", "source": last_full["source"], "checked_at": last_full["checked_at"]}
-    return {"status": "unknown", "source": None, "checked_at": None}
+        return {"status": "not_owned", "source": last_full["source"], "checked_at": last_full["checked_at"], **detail}
+    return {"status": "unknown", "source": None, "checked_at": None, **detail}
 
 
 def rekordbox_status(store: Store, item: dict, local: dict, db_path: str, playlist_rule=None) -> dict[str, Any]:

@@ -126,6 +126,7 @@ class DownloadBody(BaseModel):
     ids: Optional[list[str]] = None
     scope: Optional[str] = None  # "collection" | "import" (informational)
     force: bool = False
+    full_release: bool = False  # the whole album/EP each track is on ("Download Full Release")
     # A7 (agents, test-downloads only): a filtered set
     filter: Optional[str] = None
     number: int = 1
@@ -407,8 +408,8 @@ def create_app(service: Service | None = None) -> FastAPI:
         if body.ids is not None:  # Phase 4: exact releases, on the user's click
             try:
                 if body.dry_run:
-                    return downloads.plan(svc, body.ids, body.force)
-                return {"job_id": svc.start_download_items(body.ids, body.force).id}
+                    return downloads.plan(svc, body.ids, body.force, body.full_release)
+                return {"job_id": svc.start_download_items(body.ids, body.force, body.full_release).id}
             except DownloadRefused as e:
                 raise HTTPException(400, str(e)) from e
         if not body.filter:
