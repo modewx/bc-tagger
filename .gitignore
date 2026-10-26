@@ -13,3 +13,8 @@ npm-debug.log*
 
 # packed files
 /release
+
+# personal collection data / backups (do not publish)
+/db-backups
+taggedItems.json
+*.zip

@@ -3,6 +3,7 @@
   "name": "Bc Tagger",
   "version": "0.1.0",
   "description": "My Chrome Extension",
+  
   "icons": {
     "16": "icons/icon_16.png",
     "32": "icons/icon_32.png",
@@ -17,17 +18,54 @@
     "default_popup": "popup.html"
   },
   "permissions": [
-    "storage"
+    "storage",
+    "webRequest"
   ],
+  "host_permissions": [
+    "https://*.bandcamp.com/*",
+    "http://*.bandcamp.com/*",
+    "https://bandcamp.com/*",
+    "http://bandcamp.com/*"
+  ],
+  "content_security_policy": {
+    "extension_pages": "script-src 'self' 'wasm-unsafe-eval'; object-src 'self';"
+  },
   "content_scripts": [
     {
       "matches": [
-        "<all_urls>"
+        "https://*.bandcamp.com/*",
+        "http://*.bandcamp.com/*"
       ],
       "run_at": "document_idle",
       "js": [
+        "jquery_2.1.1_jquery.min.js",
+        "chosen_1.8.7.min.js",
         "contentScript.js"
+      ],
+      "css": [
+        "chosen.min.css",
+        "tagger.css"
       ]
+    },
+    {
+      "matches": [
+        "https://*.bandcamp.com/cart/checkout*",
+        "http://*.bandcamp.com/cart/checkout*",
+        "https://*.paypal.com/*"
+      ],
+      "run_at": "document_idle",
+      "js": [
+        "jquery_2.1.1_jquery.min.js",
+        "checkout.js"
+      ]
+
+    }
+  ],
+  "web_accessible_resources": [
+    {
+      "resources": [ "jquery_2.1.1_jquery.min.js", "chosen_1.8.7.min.js", "taggerTemplate.html", "chosen-sprite@2x.png", "chosen-sprite.png", "tags.json" ],
+      
+      "matches": [ "https://*/*" ]
     }
   ]
 }

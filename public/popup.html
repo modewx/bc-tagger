@@ -1,32 +1,194 @@
 <!DOCTYPE html>
-<html lang="en">
-  <head>
-    <meta charset="UTF-8" />
-    <title>My Chrome Extension</title>
-    <link rel="stylesheet" href="popup.css" />
-  </head>
-  <body>
-    <div class="app">
-      <p class="counter-label">Counter</p>
-      <div id="counter" class="counter"></div>
-      <div class="button-container">
-        <button id="decrementBtn" class="button">-</button>
-        <button id="incrementBtn" class="button">+</button>
-      </div>
-
-      <hr class="divider" />
-
-      <p class="title">Chrome Extension is Ready!</p>
-      <p class="subtitle">Start by updating <code>popup.html</code></p>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <script src="jquery_2.1.1_jquery.min.js"></script>
+  <style>
+    body {
+      font-family: -apple-system, system-ui, sans-serif;
+      width: 240px;
+      margin: 0;
+      padding: 12px;
+      font-size: 13px;
+    }
+    /* Create tag (always visible, at the top) */
+    #createTagSection {
+      margin-bottom: 12px;
+    }
+    .combo {
+      position: relative;
+    }
+    .combo input {
+      width: 100%;
+      box-sizing: border-box;
+      padding: 7px 8px;
+      border: 1px solid #aaa;
+      border-radius: 5px;
+      font-size: 13px;
+    }
+    .combo-list {
+      position: absolute;
+      left: 0;
+      right: 0;
+      top: 100%;
+      background: #fff;
+      border: 1px solid #aaa;
+      border-top: none;
+      max-height: 170px;
+      overflow-y: auto;
+      z-index: 10;
+      display: none;
+      box-shadow: 0 4px 8px rgba(0, 0, 0, 0.12);
+    }
+    .combo-list.open {
+      display: block;
+    }
+    .combo-list div {
+      padding: 6px 8px;
+      cursor: pointer;
+    }
+    .combo-list div:hover {
+      background: #3875d7;
+      color: #fff;
+    }
+    .combo-list .exists {
+      color: #999;
+      font-style: italic;
+    }
+    #createTag {
+      width: 100%;
+      margin-top: 8px;
+      padding: 8px;
+      border: 1px solid #3875d7;
+      border-radius: 5px;
+      background: #3875d7;
+      color: #fff;
+      cursor: pointer;
+      font-size: 13px;
+      font-weight: 600;
+    }
+    #createTag:hover {
+      background: #2f66c0;
+    }
+    /* Secondary actions */
+    .popup-actions {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px;
+      align-items: center;
+      border-top: 1px solid #eee;
+      padding-top: 10px;
+    }
+    .popup-actions button,
+    .popup-actions a {
+      font-size: 13px;
+      padding: 5px 8px;
+      border: 1px solid #bbb;
+      border-radius: 5px;
+      background: #f5f5f5;
+      cursor: pointer;
+      text-decoration: none;
+      color: #222;
+    }
+    .popup-actions button.active {
+      background: #3875d7;
+      border-color: #3875d7;
+      color: #fff;
+    }
+    .panel {
+      display: none;
+      margin-top: 12px;
+    }
+    .panel.open {
+      display: block;
+    }
+    #allTags {
+      max-height: 240px;
+      overflow-y: auto;
+      border: 1px solid #ccc;
+      border-radius: 5px;
+    }
+    .tag-row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 4px 4px 4px 8px;
+      border-bottom: 1px solid #f0f0f0;
+    }
+    .tag-row:last-child {
+      border-bottom: none;
+    }
+    .tag-name {
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .tag-delete {
+      border: none;
+      background: transparent;
+      color: #d9534f;
+      font-size: 16px;
+      line-height: 1;
+      cursor: pointer;
+      padding: 1px 6px;
+      border-radius: 3px;
+      flex: none;
+    }
+    .tag-delete:hover {
+      background: #d9534f;
+      color: #fff;
+    }
+    .tag-count {
+      color: #777;
+      margin-bottom: 6px;
+    }
+    /* toast */
+    #toast {
+      position: fixed;
+      left: 50%;
+      bottom: 14px;
+      transform: translateX(-50%);
+      background: #d9534f;
+      color: #fff;
+      padding: 8px 12px;
+      border-radius: 5px;
+      font-size: 12px;
+      opacity: 0;
+      transition: opacity 0.25s ease;
+      pointer-events: none;
+      white-space: nowrap;
+      max-width: 90%;
+    }
+    #toast.show {
+      opacity: 1;
+    }
+    #toast.success {
+      background: #5cb85c;
+    }
+  </style>
+</head>
+<body>
+  <div id="createTagSection">
+    <div class="combo">
+      <input type="text" id="tagName" placeholder="New tag (one word)" autocomplete="off" autofocus />
+      <div id="tagSuggestions" class="combo-list"></div>
     </div>
+    <button id="createTag">Create Tag</button>
+  </div>
 
-    <script src="popup.js"></script>
+  <div class="popup-actions">
+    <button id="seeCollection">See Collection</button>
+    <button id="seeTags">See Tags</button>
+    <a class="link-to-download" href="#" role="button">Export</a>
+  </div>
 
-    <!--
-      This HTML file opens when you click on icon from the toolbar.
+  <div id="seeTagsPanel" class="panel">
+    <div class="tag-count" id="tagCount"></div>
+    <div id="allTags"></div>
+  </div>
 
-      To begin the development, run `npm run watch`.
-      To create a production bundle, use `npm run build`.
-    -->
-  </body>
+  <div id="toast"></div>
+
+  <script src="popup.js"></script>
+</body>
 </html>

@@ -1,0 +1,32 @@
+tagger-input {
+    width: max-content;
+}
+
+.chosen-container {
+   /* width: 150px !important; /* or any value that fits your needs */
+}
+
+.chosen-container-multi {
+     /* width: 150px !important; /* or any value that fits your needs */
+}
+
+
+.tagger-container {
+    display: flex;
+    flex-direction: row;
+    align-items:center;
+    width: max-content;
+}
+
+.tagger-item {
+
+}
+
+/* .leftMiddleColumns {
+    width: 95% !important;
+} */
+
+.track_list .title {
+    width: 150px !important;
+
+} 
