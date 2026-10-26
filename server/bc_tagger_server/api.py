@@ -117,7 +117,12 @@ class PathBody(BaseModel):
 
 
 class DownloadBody(BaseModel):
-    filter: str
+    # Phase 4: exact releases for item ids ("t123"/"a456") or import rows ("<batch_id>:<n>")
+    ids: Optional[list[str]] = None
+    scope: Optional[str] = None  # "collection" | "import" (informational)
+    force: bool = False
+    # A7 (agents, test-downloads only): a filtered set
+    filter: Optional[str] = None
     number: int = 1
     format: str = "aiff-lossless"
     dry_run: bool = False
@@ -379,8 +384,18 @@ def create_app(service: Service | None = None) -> FastAPI:
 
     @app.post("/api/download")
     def download(body: DownloadBody) -> dict:
+        from . import downloads
         from .downloader import DownloadRefused, build_command
 
+        if body.ids is not None:  # Phase 4: exact releases, on the user's click
+            try:
+                if body.dry_run:
+                    return downloads.plan(svc, body.ids, body.force)
+                return {"job_id": svc.start_download_items(body.ids, body.force).id}
+            except DownloadRefused as e:
+                raise HTTPException(400, str(e)) from e
+        if not body.filter:
+            raise HTTPException(400, "send ids (or, for agents, a filter)")
         try:
             build_command(svc.settings, body.filter, body.number, body.format)
         except DownloadRefused as e:

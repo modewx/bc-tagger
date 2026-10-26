@@ -629,6 +629,13 @@ class Service:
 
         return self.jobs.submit("download", job)
 
+    def start_download_items(self, refs: list[str], force: bool = False):
+        """Download owned releases for items / import rows (``<batch_id>:<n>``) that aren't located."""
+        from . import downloads
+
+        downloads.plan(self, refs, force)  # refuse early (destination outside the owned roots)
+        return self.jobs.submit("download-items", lambda ctx: downloads.run(self, refs, force, ctx))
+
     def stream_file(self, request, path: str):
         from .stream import stream_response
 
