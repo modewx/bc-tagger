@@ -1,0 +1,89 @@
+"""Compose the API's item view: mirror fields + local / owned / rekordbox status."""
+
+from __future__ import annotations
+
+import json
+from typing import Any
+
+from .items import is_album, item_tags
+from .store import Store
+
+
+def located_tracks(best: dict | None) -> list[dict]:
+    """The concrete files an item resolves to (one for a track, several for an album)."""
+    if not best:
+        return []
+    if best.get("tracks"):
+        return list(best["tracks"])
+    if best.get("path"):
+        return [best]
+    return []
+
+
+def local_status(store: Store, item_id: str) -> dict[str, Any]:
+    row = store.query_one("SELECT * FROM locate_results WHERE item_id = ?", (item_id,))
+    if not row:
+        return {"status": "unknown", "best": None, "candidates": []}
+    return {
+        "status": row["status"],
+        "best": json.loads(row["best"]) if row["best"] else None,
+        "candidates": json.loads(row["candidates"]) if row["candidates"] else [],
+        "located_at": row["located_at"],
+    }
+
+
+def ownership_status(store: Store, item: dict) -> dict[str, Any]:
+    ids = [item["id"]]
+    album_id = item.get("album_id")
+    if isinstance(album_id, str) and album_id.startswith("a"):
+        ids.append(album_id)
+    elif isinstance(album_id, int):
+        ids.append(f"a{album_id}")
+    placeholders = ",".join("?" * len(ids))
+    row = store.query_one(
+        f"SELECT source, checked_at FROM owned_ids WHERE id IN ({placeholders}) LIMIT 1", ids
+    )
+    if row:
+        return {"status": "owned", "source": row["source"], "checked_at": row["checked_at"]}
+    last_full = store.get_meta("ownership_last_full")
+    if last_full:
+        return {"status": "not_owned", "source": last_full["source"], "checked_at": last_full["checked_at"]}
+    return {"status": "unknown", "source": None, "checked_at": None}
+
+
+def rekordbox_status(store: Store, item: dict, local: dict, db_path: str) -> dict[str, Any]:
+    tracks = located_tracks(local.get("best")) if local.get("status") == "located" else []
+    paths = [t["path"] for t in tracks]
+    content_ids: list[str] = []
+    for p in paths:
+        row = store.query_one(
+            "SELECT content_id FROM rb_content WHERE db_path = ? AND path = ?", (db_path, p)
+        )
+        if row:
+            content_ids.append(row["content_id"])
+    claims = store.query(
+        "SELECT DISTINCT tag, content_id FROM rb_claims WHERE db_path = ? AND item_id = ?",
+        (db_path, item["id"]),
+    )
+    playlists = sorted({r["tag"] for r in claims})
+    tags = item_tags(item)
+    wanted = len(paths) * len(tags) if tags else len(paths)
+    have = len(claims) if tags else len(content_ids)
+    if not content_ids:
+        status = "none"
+    elif len(content_ids) == len(paths) and have >= wanted and set(playlists) == set(tags):
+        status = "exported"
+    else:
+        status = "partial"
+    return {"status": status, "content_ids": content_ids, "playlists": playlists}
+
+
+def item_view(store: Store, item: dict, db_path: str) -> dict[str, Any]:
+    local = local_status(store, item["id"])
+    return {
+        **item,
+        "is_album": is_album(item),
+        "local": local,
+        "owned": ownership_status(store, item),
+        "rekordbox": rekordbox_status(store, item, local, db_path),
+    }
