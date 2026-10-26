@@ -64,7 +64,8 @@ const SHELL_HTML = `
  * @param {object} opts.dataSource          see shared/datasource/DataSource.js
  * @param {HTMLElement} [opts.mount]        where the page shell is inserted (prepended)
  * @param {HTMLElement} [opts.topBarStart]  extra element placed first in the sticky top bar
- * @param {string} [opts.colWidthKey]       localStorage key for the resized column widths
+ * @param {string} [opts.colWidthKey]       localStorage key for the resized column widths (by column id)
+ * @param {object} [opts.legacyColWidths]   {key, order}: older position-based widths to migrate once
  * @param {Array}  [opts.extraColumns]      [{id, label, after, sortKey?, compare?(a,b), render(cell,key,item)}]
  * @param {Array}  [opts.extraToolbarButtons] [{id, label, run(statusEl, button)}] after the base buttons
  * @param {function} [opts.localPlayUrl]    (item, key) -> url of a local file to play, or null
@@ -82,7 +83,7 @@ const SHELL_HTML = `
 export function createCollectionPage(opts) {
   const ds = opts.dataSource;
   const mount = opts.mount || document.body;
-  const colWidthKey = opts.colWidthKey || "bc_collection_col_widths_v3";
+  const colWidthKey = opts.colWidthKey || "bc_collection_col_widths_by_id";
   const bc = createBandcampFetcher((url, o) => ds.fetchPage(url, o));
   const { fetchFreshStream, resolveAlbumDoc, resolveItemArt, resolveTrackTralbum, resolveTrackPlayerData } = bc;
 
@@ -814,7 +815,7 @@ export function createCollectionPage(opts) {
       }
     });
 
-    setupColumnResizing(collectionTable, colWidthKey);
+    setupColumnResizing(collectionTable, colWidthKey, columns.map((c) => c.id), opts.legacyColWidths);
 
     if (globalMode) {
       highlightPlayingRow(); // live audio survives re-render

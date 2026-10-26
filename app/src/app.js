@@ -120,7 +120,8 @@ async function refreshHealth() {
   page = createCollectionPage({
     dataSource: ds,
     topBarStart: nav.el,
-    colWidthKey: "bc_app_col_widths_v1",
+    // By column id (v1 was by position and got shifted when Src was added).
+    colWidthKey: "bc_app_col_widths_v2",
     extraColumns: appColumns({
       jobs,
       page: () => page,

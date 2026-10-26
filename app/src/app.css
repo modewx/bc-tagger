@@ -12,7 +12,7 @@ html { background: #fff; color: #222; color-scheme: light; }
 #collectionTable .col-owned { width: 64px; }
 #collectionTable .col-located { width: 80px; }
 #collectionTable .col-rekordbox { width: 88px; }
-#collectionTable .col-player { width: 240px; }
+#collectionTable .col-player { width: 380px; } /* room for the seek bar */
 #collectionTable .col-title,
 #collectionTable .col-artist { width: auto; }
 #collectionTable .col-tags { width: 210px; }
@@ -112,8 +112,8 @@ button.chip:hover { filter: brightness(0.95); border-color: #bbb; }
 
 /* Narrow screens: wrap the controls, scroll the table sideways. */
 #tableScroll { overflow-x: auto; }
-@media (max-width: 1250px) {
-  #collectionTable { min-width: 1240px; }
+@media (max-width: 1390px) {
+  #collectionTable { min-width: 1380px; }
 }
 @media (max-width: 640px) {
   #topBar { padding: 8px; gap: 8px; }

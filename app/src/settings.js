@@ -143,7 +143,9 @@ function changed() {
   document.getElementById("saveBtn").disabled = !dirty.length;
   document.getElementById("revertBtn").disabled = !dirty.length;
   document.getElementById("saveState").textContent = dirty.length ? `${dirty.length} unsaved change${dirty.length > 1 ? "s" : ""}` : "";
-  document.querySelectorAll(".field").forEach((f) => f.classList.toggle("dirty", dirty.some((k) => (f.dataset.keys || f.dataset.key).split(" ").includes(k))));
+  document
+    .querySelectorAll(".field[data-key]") // settings fields only (the Import tab has others)
+    .forEach((f) => f.classList.toggle("dirty", dirty.some((k) => (f.dataset.keys || f.dataset.key).split(" ").includes(k))));
   document.querySelectorAll("#tabs [data-tab]").forEach((b) =>
     b.classList.toggle("dirty", dirty.some((k) => tabOf(k) === b.dataset.tab))
   );

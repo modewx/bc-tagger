@@ -7,5 +7,10 @@ console.log("----- collection.js");
 
 createCollectionPage({
   dataSource: new ExtensionDataSource(),
-  colWidthKey: "bc_collection_col_widths_v3",
+  colWidthKey: "bc_collection_col_widths_by_id",
+  // Widths saved by position before columns had ids (this page's order then).
+  legacyColWidths: {
+    key: "bc_collection_col_widths_v3",
+    order: ["index", "date", "thumb", "title", "artist", "player", "tags"],
+  },
 }).start();

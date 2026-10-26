@@ -348,7 +348,7 @@ async function discard(statusEl) {
   page = createCollectionPage({
     dataSource: ds,
     topBarStart: top,
-    colWidthKey: "bc_import_col_widths_v1",
+    colWidthKey: "bc_import_col_widths_v2",
     baseToolbar: false,
     extraColumns: [selectColumn(), sourceColumn(), matchColumn(), locatedColumn(), notesColumn()],
     extraToolbarButtons: [

@@ -939,3 +939,41 @@ test("extension page: re-clicking a row and switching tracks keeps one player pe
   await page.evaluate(() => document.querySelectorAll("audio").forEach((x) => x.pause()));
   await page.close();
 });
+
+// --- Column widths ------------------------------------------------------------------
+// Widths used to be saved by position: adding the Src column shifted them, and
+// Artist (no width of its own) collapsed to a sliver.
+
+const colWidth = (page, id) => page.$eval(`#collectionTable thead th.col-${id}`, (th) => th.offsetWidth);
+
+test("local app: saved widths that would squeeze a column are dropped (self-heal)", async () => {
+  const app = await context.newPage();
+  await app.goto(SERVER + "/");
+  await app.evaluate(() =>
+    localStorage.setItem(
+      "bc_app_col_widths_v2",
+      JSON.stringify({ index: 40, date: 120, source: 80, thumb: 300, title: 420, owned: 120, located: 140, rekordbox: 380, player: 360, tags: 300 })
+    )
+  );
+  await app.reload();
+  await app.waitForSelector("#collectionTable thead th.col-artist", { state: "attached" });
+  await app.waitForFunction(() => localStorage.getItem("bc_app_col_widths_v2") === "{}");
+  assert.ok((await colWidth(app, "artist")) >= 60, `artist width ${await colWidth(app, "artist")}`);
+  assert.ok((await colWidth(app, "player")) >= 380, `player width ${await colWidth(app, "player")}`);
+  await app.close();
+});
+
+test("extension page: old position-based widths move to the right columns", async () => {
+  const page = await context.newPage();
+  await page.goto(extPage("collection.html"));
+  await page.evaluate(() => {
+    localStorage.removeItem("bc_collection_col_widths_by_id");
+    localStorage.setItem("bc_collection_col_widths_v3", JSON.stringify({ 3: 333 })); // the Title column, by position
+  });
+  await page.reload();
+  await page.waitForSelector("#collectionTable thead th.col-title");
+  assert.equal(await page.$eval("#collectionTable thead th.col-title", (th) => th.style.width), "333px");
+  assert.deepEqual(JSON.parse(await page.evaluate(() => localStorage.getItem("bc_collection_col_widths_by_id"))), { title: 333 });
+  await page.evaluate(() => localStorage.removeItem("bc_collection_col_widths_by_id"));
+  await page.close();
+});
