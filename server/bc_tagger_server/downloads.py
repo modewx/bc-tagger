@@ -174,13 +174,17 @@ def run(svc, refs: list[str], force: bool = False, ctx=None) -> dict[str, Any]:
             except (DownloadRefused, OSError) as err:
                 res = {"release": rel["release"], "outcome": "failed", "ok": False, "folder": None, "files": [],
                        "errors": [str(err)]}
+                if "not mounted" in str(err):
+                    stop = str(err)  # the drive went away: don't try the rest
             if res["outcome"] in ("challenged", "rate_limited"):
                 stop = MESSAGES[res["outcome"]]
             indexed = _index_folder(svc, res.get("folder")) if res["ok"] else 0
             located = _locate_refs(svc, entries) if res["ok"] else {}
             for e in entries:
                 message = MESSAGES[res["outcome"]]
-                if res["outcome"] == "failed" and res.get("errors"):
+                if res["outcome"] == "failed" and stop and "not mounted" in stop:
+                    message = stop
+                elif res["outcome"] == "failed" and res.get("errors"):
                     message = f"{message}: {res['errors'][-1]}"
                 e.update(state="done" if res["ok"] else "failed", message=message, located=located.get(e["ref"]))
                 publish(e)

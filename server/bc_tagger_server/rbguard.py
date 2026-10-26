@@ -43,6 +43,7 @@ from .config import (
     REKORDBOX_OPTIONS_JSON,
     data_dir,
 )
+from .fsguard import require_mounted
 
 log = logging.getLogger(__name__)
 
@@ -175,6 +176,7 @@ def require_write(db_path: str | Path, **kwargs: Any) -> GuardDecision:
 
 def backup(db_path: str | Path, keep: int = KEEP_BACKUPS, **guard_kwargs: Any) -> Path:
     """Copy ``master.db`` (and any -wal/-shm) to ``<db dir>/backups/master_<ts>.db``."""
+    require_mounted(db_path)  # never write onto an unplugged drive
     require_write(db_path, **guard_kwargs)
     src = resolve(db_path)
     bdir = src.parent / BACKUP_DIRNAME
@@ -221,6 +223,7 @@ def open_by_other_process(path: Path) -> list[str]:
 
 def restore(db_path: str | Path, backup_path: str | Path, **guard_kwargs: Any) -> dict[str, Any]:
     """Replace the test DB with one of its backups (backing up the current DB first)."""
+    require_mounted(db_path)  # never write onto an unplugged drive
     target = resolve(db_path)
     src = resolve(backup_path)
     require_write(target, **guard_kwargs)
@@ -306,6 +309,7 @@ def _copy_db_files(src: Path, dest_dir: Path) -> None:
 
 def backup_main(db_path: str | Path, root: Path | None = None, keep: int = KEEP_MAIN_BACKUPS, **guard_kwargs: Any) -> Path:
     """Copy master.db (+ -wal/-shm) and masterPlaylists6.xml outside the rekordbox folder."""
+    require_mounted(db_path)  # never write onto an unplugged drive
     require_write_main(db_path, **guard_kwargs)
     src = resolve(db_path)
     root = root or data_dir() / "backups" / "main"
@@ -418,6 +422,7 @@ def guarded_commit(db: Any, db_path: str | Path, mode: str = "test", **guard_kwa
     Test mode: if rekordbox is running on a different library, pyrekordbox's own running
     check is patched out for the duration of this one commit. Main mode never bypasses it.
     """
+    require_mounted(db_path)  # never write onto an unplugged drive
     import pyrekordbox.masterdb.database as rbdb
 
     with _commit_lock:
