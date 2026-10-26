@@ -4,8 +4,9 @@
 // from the file is this page or its album, or artist + title agree). Items with
 // fitting rows get a "Link to import" button: pick the row, and the page's item
 // (the same data the ☆ saves) goes to the server (POST …/rows/<n>/link).
-// A row whose file link is this page, with no Bandcamp item yet and clearly
-// fitting one item here, is linked as soon as the page opens.
+// Linked as soon as the page opens: a row whose pasted URL is this page
+// (GET /api/import/open-rows), and a row whose file link is this page, when
+// it has no Bandcamp item yet and clearly fits one item here.
 // Nothing here fetches from Bandcamp: it only reads the page the user is on.
 
 const AUTO_SCORE = 0.8;
@@ -21,6 +22,24 @@ function send(msg) {
 }
 
 const rowKey = (row) => `${row.batch_id}/${row.n}`;
+
+const norm = (s) =>
+  String(s || "")
+    .toLowerCase()
+    .normalize("NFKD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .replace(/\([^)]*\)|\[[^\]]*\]/g, " ")
+    .replace(/[^a-z0-9]+/g, " ")
+    .trim();
+
+function pageKey(u) {
+  try {
+    const x = new URL(u, location.href);
+    return `${x.host}${x.pathname.replace(/\/$/, "")}`;
+  } catch (e) {
+    return null;
+  }
+}
 
 function rowLabel(row) {
   const what = [row.artist, row.title].filter(Boolean).join(" – ") || `row ${row.n + 1}`;
@@ -46,6 +65,8 @@ export async function setupImportLinks(targets) {
   const pageUrl = location.href.split(/[?#]/)[0];
   const usable = targets.filter(({ container, item }) => container && item && /^[at]\d+$/.test(String(item.id || "")));
   if (!usable.length) return;
+  const open = await send({ type: "importOpenRows" });
+  const pasted = (open.ok && Array.isArray(open.rows) ? open.rows : []).filter((r) => r.match_url && pageKey(r.match_url) === pageKey(pageUrl));
   const asked = await Promise.all(
     usable.map(async (t) => {
       const res = await send({ type: "importLinkCandidates", item: t.item, page_url: pageUrl });
@@ -53,7 +74,7 @@ export async function setupImportLinks(targets) {
     })
   );
   const withRows = asked.filter((t) => t.rows.length);
-  if (!withRows.length) return;
+  if (!withRows.length && !pasted.length) return;
   const linked = new Set();
 
   async function link(row, item, button) {
@@ -106,6 +127,15 @@ export async function setupImportLinks(targets) {
     button.after(m);
   }
 
+  // Pasted URLs: the one track here with the row's title (or the page's only item).
+  for (const row of pasted) {
+    const tracks = usable.filter(({ item }) => item.tralbum_type === "t");
+    const fits = tracks.filter(({ item }) => norm(item.title) && norm(item.title) === norm(row.title));
+    const only = fits.length === 1 ? fits[0] : usable.length === 1 ? usable[0] : null;
+    if (only) await link(row, only.item, null);
+    else notice(`bc-tagger: the import row ${rowLabel(row)} has this page's URL: use “Link to import” on its track.`);
+  }
+
   // Rows whose file link is this page: link the one item that clearly fits.
   const autoFor = new Map(); // row key -> [{row, target}]
   withRows.forEach((t) =>
@@ -114,7 +144,7 @@ export async function setupImportLinks(targets) {
       .forEach((row) => autoFor.set(rowKey(row), [...(autoFor.get(rowKey(row)) || []), { row, target: t }]))
   );
   for (const hits of autoFor.values()) {
-    if (hits.length === 1) await link(hits[0].row, hits[0].target.item, null);
+    if (hits.length === 1 && !linked.has(rowKey(hits[0].row))) await link(hits[0].row, hits[0].target.item, null);
   }
 
   withRows.forEach(({ container, item, rows }) => {

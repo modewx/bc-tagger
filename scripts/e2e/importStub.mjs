@@ -114,8 +114,10 @@ export function importStub(file, { located = [], unavailable = [] } = {}) {
       if (m) {
         const r = rows[Number(m[1])];
         ["tags", "checked", "artist", "title", "album"].forEach((k) => k in body && (r[k] = body[k]));
-        // Requested of A (contract request 19): a pasted URL becomes the row's hint.
-        if ("bandcamp_url" in body) r.hints.bandcamp_url = body.bandcamp_url;
+        if ("match_url" in body) {
+          Object.assign(r.match, { status: "manual", source: "url", url: body.match_url, chosen: null });
+          r.hints.bandcamp_url = body.match_url; // as A's server: the URL the user set is the row's link hint
+        }
         if (body.re_resolve) {
           if (r.hints.bandcamp_url) resolveFromHint(r);
           else Object.assign(r, { source: "other", bandcamp: null, match: { ...r.match, status: "none", source: null, chosen: null, candidates: [] } });

@@ -10,11 +10,16 @@ import { listBatches, getBatch, startImport, applyTagMap, discardBatch } from ".
 const STAT_LABELS = [
   ["total", "rows"],
   ["bandcamp", "on Bandcamp"],
+  ["found", "found", true],
+  ["in_collection", "in your collection", true],
+  ["picked", "picked", true],
+  ["linked", "linked", true],
+  ["needs_pick", "to pick", true],
   ["other", "other"],
   ["located", "located"],
   ["duplicates", "duplicates"],
   ["flagged", "flagged"],
-  ["unknown_tags", "unknown tags"],
+  ["unknown_tags", "unknown tags", true],
 ];
 
 function el(tag, attrs, ...children) {
@@ -28,9 +33,11 @@ function el(tag, attrs, ...children) {
   return e;
 }
 
+// The batch's stats; the details (found, picked, …) only when not zero.
 export function statsLine(stats) {
-  return STAT_LABELS.filter(([k]) => stats && stats[k] != null)
-    .map(([k, label]) => `${typeof stats[k] === "object" ? Object.keys(stats[k]).length : stats[k]} ${label}`)
+  const n = (k) => (stats[k] && typeof stats[k] === "object" ? Object.keys(stats[k]).length : stats[k]);
+  return STAT_LABELS.filter(([k, , optional]) => stats && stats[k] != null && !(optional && !n(k)))
+    .map(([k, label]) => `${n(k)} ${label}`)
     .join(" · ");
 }
 

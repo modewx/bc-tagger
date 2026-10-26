@@ -269,6 +269,13 @@ export async function pullPendingAdds() {
 
 // --- Import rows (Phase 3) -----------------------------------------------------
 
+// Rows of open imports still waiting for a Bandcamp item, with the URL the user
+// pasted for them (match_url) or the file's link (hint).
+export async function openImportRows() {
+  const rows = await api("/api/import/open-rows", { timeoutMs: 4000 });
+  return Array.isArray(rows) ? rows : [];
+}
+
 // Rows of open imports that fit an item of the Bandcamp page the user has open
 // (for the content script's "Link to import"), best first:
 // [{batch_id, batch_name, n, artist, title, album, score, hint_match, bandcamp_id, via}].
@@ -304,14 +311,18 @@ async function fetchOwnedIds() {
   return { owned, fanId: data.fan_id, username: summary.username || null };
 }
 
+// The last check is also kept in chrome.storage.local (bcOwnershipCheck), so an
+// extension reload (e.g. a dev rebuild) doesn't ask Bandcamp again.
 export async function refreshOwnership() {
   let fetched;
   try {
     fetched = await fetchOwnedIds();
   } catch (e) {
     await setStatus({ ownership: { at: Date.now(), error: e.message, challenge: !!e.challenge } });
+    await setStorage({ bcOwnershipCheck: { at: Date.now(), challenge: !!e.challenge } });
     throw e;
   }
+  await setStorage({ bcOwnershipCheck: { at: Date.now(), challenge: false } });
   const res = await api("/api/ownership", {
     method: "POST",
     body: { owned_ids: fetched.owned, source: "extension", full: true, fan_id: fetched.fanId, username: fetched.username },
@@ -356,7 +367,7 @@ export async function syncTick(reason) {
   }
   await pullTagEdits().catch((e) => console.warn("[sync] pull failed", e.message));
   await pullPendingAdds().catch((e) => console.warn("[sync] pending adds failed", e.message));
-  const own = status.ownership || {};
+  const { bcOwnershipCheck: own = {} } = await getStorage("bcOwnershipCheck");
   // After a bot check, only the user's own Refresh ownership tries again.
   if (!own.challenge && (!own.at || Date.now() - own.at > OWNERSHIP_EVERY_MS)) {
     await refreshOwnership().catch((e) => console.warn("[sync] ownership failed", e.message));

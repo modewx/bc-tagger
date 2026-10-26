@@ -175,6 +175,7 @@ button.chip:hover { filter: brightness(0.95); border-color: #bbb; }
 .match-none { background: transparent; color: #999; border-color: #e3e3e3; }
 .match-cand { background: #fff4d6; color: #8a5a00; }
 .match-unavail { background: #fdecec; color: #b42318; border-color: #f2b8b5; }
+.match-url { background: #eef3ff; color: #2f5fb8; }
 .import-unavailable { flex-basis: 100%; padding: 6px 10px; border: 1px solid #e5a5a0; border-radius: 5px; background: #fdecec; color: #7a1d14; font-size: 12px; }
 .import-unavailable[hidden] { display: none; }
 .match-cell .open-bc { display: block; margin: 3px 0 0; font-size: 11px; }

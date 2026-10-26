@@ -119,11 +119,19 @@ function renderInfo() {
   title.textContent = `Import preview · ${batch.source || batch.id}`;
   const confirmN = batch.rows.filter((r) => r.needsConfirmation).length;
   stats.textContent = [statsLine(batch.stats), confirmN ? `${confirmN} to confirm` : ""].filter(Boolean).join(" · ");
-  const blocked = batch.rows.filter((r) => r.lookupUnavailable && r.source !== "bandcamp").length;
+  const blockedRows = batch.rows.filter((r) => r.lookupUnavailable && r.source !== "bandcamp");
+  const blocked = blockedRows.length;
+  const lookups = batch.lookups || {};
+  const why =
+    lookups.reason === "challenge" || blockedRows.some((r) => r.lookupReason === "challenge")
+      ? `Bandcamp showed its bot check (“Client Challenge”) to the server${lookups.at ? ` at ${new Date(lookups.at).toLocaleTimeString()}` : ""}, so it stopped looking rows up`
+      : lookups.state === "off" || blockedRows.some((r) => r.lookupReason === "off")
+      ? "Bandcamp lookups are turned off on this server"
+      : "the lookup failed";
   unavailable.hidden = !blocked;
   unavailable.textContent = blocked
-    ? `Bandcamp lookup unavailable for ${blocked} row${blocked > 1 ? "s" : ""}: Bandcamp showed its bot check (“Client Challenge”) ` +
-      "to the server, so it stopped looking rows up. For those rows: Open on Bandcamp, then Link to import on the page (or paste its URL)."
+    ? `Bandcamp lookup unavailable for ${blocked} row${blocked > 1 ? "s" : ""}: ${why}. ` +
+      "For those rows: Open on Bandcamp, then Link to import on the page (or paste its URL)."
     : "";
   const pr = batch.pendingReleases;
   pending.hidden = !pr.length;
@@ -229,7 +237,7 @@ const SOURCES = {
   collection: ["in collection", "match-bc", "Already in your collection: its tags are merged on import."],
   search: ["search", "match-bc", "Found by the Bandcamp search."],
   picked: ["picked", "match-bc", "Picked by you from the search results."],
-  url: ["URL", "match-bc", "Set by you from a pasted Bandcamp URL."],
+  url: ["URL", "match-url", "You pasted its Bandcamp page: open it and the tagger links the row from the page. Imported without it, the row goes to Other with that link."],
   file: ["from file", "match-bc", "The Bandcamp URL given in the import file."],
   linked: ["linked", "match-bc", "Linked by you on its Bandcamp page (the tagger's “Link to import” button)."],
   candidates: ["options", "match-cand", "The search found possible matches: pick one."],
@@ -243,7 +251,18 @@ const SOURCES = {
   pending: ["not looked up", "match-none", "Not looked up yet."],
   none: ["unmatched", "match-none", "No Bandcamp match yet: Open on Bandcamp, then link the page with the tagger's button on it, or paste its URL here."],
 };
-const sourceInfo = (row) => SOURCES[matchSource(row)] || [matchSource(row), "match-bc", `Match source: ${matchSource(row)}.`];
+const UNAVAILABLE_WHY = {
+  challenge: "Bandcamp showed its bot check (“Client Challenge”) to the server, which stopped looking rows up.",
+  off: "Bandcamp lookups are turned off on this server.",
+  error: "The lookup failed (no answer from Bandcamp).",
+};
+function sourceInfo(row) {
+  const src = matchSource(row);
+  const info = SOURCES[src] || [src, "match-bc", `Match source: ${src}.`];
+  if (src !== "unavailable") return info;
+  const why = UNAVAILABLE_WHY[row.lookupReason] || UNAVAILABLE_WHY.error;
+  return [info[0], info[1], `Bandcamp lookup unavailable: ${why} Open on Bandcamp, then link the page with the tagger's button on it, or paste its URL here.`];
+}
 
 // "Open on Bandcamp" in a normal tab: the row's link hint, else a search.
 function openLink(row, text, url) {
@@ -269,22 +288,24 @@ function urlForm(row) {
   if (!input.value && row.hints.bandcamp) input.placeholder = `Paste a Bandcamp track or album URL (the import has ${row.hints.bandcamp})`;
   const err = el("div", "pop-meta pop-err");
   const use = el("button", "primary", "Use URL");
-  // The URL becomes the row's link hint; the server then looks the row up from
-  // it (not after the bot check: then Link to import on the page does it).
+  // The server keeps the URL (nothing is fetched); opening that page with the
+  // extension links the row (it reads the page's item), and Open on Bandcamp
+  // opens it.
   const submit = async () => {
     const url = cleanBandcampUrl(input.value);
     if (!url) {
       err.textContent = "That isn't a Bandcamp track or album page (…/track/… or …/album/…).";
       return;
     }
-    const saved = await patchRow(row, { bandcamp_url: url }, "Saving the URL…");
+    const saved = await patchRow(row, { match_url: url }, "Saving the URL…");
     if (!saved) return;
-    if (saved.hints.bandcamp !== url) {
+    if (saved.match.url !== url) {
       page.statusEl.textContent = "This server doesn't take a URL yet: open it and use Link to import on the page. ";
       page.statusEl.appendChild(openLink(saved, "Open it ↗", url));
       return;
     }
-    if (!saved.lookupUnavailable) await patchRow(saved, { re_resolve: true }, "Looking it up…");
+    page.statusEl.textContent = "Saved. Open it (Open on Bandcamp) and the tagger links the row from the page. ";
+    page.statusEl.appendChild(openLink(saved, "Open it ↗", url));
   };
   use.addEventListener("click", submit);
   input.addEventListener("keydown", (e) => e.key === "Enter" && submit());

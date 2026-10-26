@@ -7,6 +7,7 @@ import {
   pullPendingAdds,
   importLinkCandidates,
   linkImportRow,
+  openImportRows,
   queueItemsDiff,
   queueTags,
   refreshOwnership,
@@ -352,6 +353,13 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
 
   // From the content script: import rows that fit an item of the page, and
   // linking the page's item to one of them.
+  if (request.type === "importOpenRows") {
+    openImportRows().then(
+      (rows) => sendResponse({ ok: true, rows }),
+      (e) => sendResponse({ ok: false, error: e.message })
+    );
+    return true;
+  }
   if (request.type === "importLinkCandidates") {
     importLinkCandidates(request.item, request.page_url).then(
       (rows) => sendResponse({ ok: true, rows }),

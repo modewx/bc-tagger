@@ -9,7 +9,7 @@
 //         source: "bandcamp" | "other", duplicate: null | {of, source, title, artist, tags},
 //         via: how the row got its Bandcamp item ("collection" | "resolved" | "chosen" | "linked" | null),
 //         match: {status, source, confidence, query, url, error, chosen, candidates, item}, item (tagger item or null),
-//         lookupUnavailable (the server's Bandcamp lookup hit the bot check and stopped),
+//         lookupUnavailable, lookupReason ("challenge" | "off" | "error": why the server didn't look it up),
 //         hints: {bandcamp, discogs} (links from the file or a metadata lookup), local,
 //         links: {discogs, youtube}, committed}
 // Batch.pendingReleases: [{line, artist, release, tags, reason}] (not importable yet)
@@ -62,6 +62,7 @@ function normRow(r, i) {
     duplicate: normDuplicate(r.duplicate || r.duplicate_of, r),
     needsConfirmation: (Array.isArray(r.flags) ? r.flags : []).includes("needs_user_confirmation"),
     lookupUnavailable: lookupUnavailable(r, match),
+    lookupReason: match.reason || (/challenge|bot.?check/i.test(String(match.error || "")) ? "challenge" : null),
     match: {
       status: match.status || null,
       source: match.source || match.match_source || r.match_source || null,
@@ -101,6 +102,7 @@ export function normBatch(b) {
     newTags: b.new_tags || [],
     defaultTags: b.default_tags || [],
     pendingReleases: Array.isArray(b.pending_releases) ? b.pending_releases : [],
+    lookups: b.bandcamp_lookups || null, // {state: "on" | "off" | "stopped", reason, error, at}
     rows,
   };
 }
@@ -109,7 +111,8 @@ export const listBatches = () => apiJson("/api/import").then((l) => (Array.isArr
 export const getBatch = (id) => apiJson(`/api/import/${enc(id)}`).then(normBatch);
 export const startImport = (file, name, defaultTags) =>
   apiJson("/api/import", { method: "POST", body: { file, name, default_tags: defaultTags } });
-// patch: any of {tags, checked, choose: <candidate id> | null, artist, title, album, re_resolve, bandcamp_url}
+// patch: any of {tags, checked, choose: <candidate id> | null, artist, title, album, re_resolve,
+//        match_url (a Bandcamp page the user found; stored, not fetched), link_item}
 export const updateRow = (id, n, patch) =>
   apiJson(`/api/import/${enc(id)}/rows/${enc(n)}`, { method: "PUT", body: patch }).then((r) => (r ? normRow(r, n) : r));
 export const applyTagMap = (id, map, unmapped) =>
@@ -123,7 +126,7 @@ const VIA = { collection: "collection", chosen: "picked", linked: "linked" };
 
 export function matchSource(row) {
   const m = row.match;
-  if (row.via) return VIA[row.via] || (m.source === "file_url" ? "file" : "search");
+  if (row.via) return VIA[row.via] || (m.source === "file" || m.source === "file_url" ? "file" : "search");
   if (row.lookupUnavailable && row.source !== "bandcamp") return "unavailable";
   if (m.source && m.source !== "file_url") return m.source;
   if (row.duplicate && row.duplicate.source !== "other" && row.source === "bandcamp") return "collection";
@@ -141,10 +144,10 @@ export function bandcampSearchUrl(row) {
   return `https://bandcamp.com/search?q=${enc(q)}&item_type=${row.kind === "album" ? "a" : "t"}`;
 }
 
-// "Open on Bandcamp": the row's link hint (file or metadata lookup) when it
-// has one, else Bandcamp's search.
+// "Open on Bandcamp": the page the user pasted, else the row's link hint (from
+// the file), else Bandcamp's search.
 export function openOnBandcampUrl(row) {
-  return cleanBandcampUrl(row.hints.bandcamp) || bandcampSearchUrl(row);
+  return cleanBandcampUrl(row.match.url) || cleanBandcampUrl(row.hints.bandcamp) || bandcampSearchUrl(row);
 }
 
 // A pasted Bandcamp track/album page URL (artist.bandcamp.com or a label's

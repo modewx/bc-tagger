@@ -128,22 +128,7 @@ function bandcampFixture(url) {
 
 const NO_LIVE = "http://127.0.0.1:9"; // nothing listens there
 const NO_LIVE_PROXY = { HTTPS_PROXY: NO_LIVE, HTTP_PROXY: NO_LIVE, ALL_PROXY: NO_LIVE, NO_PROXY: "127.0.0.1,localhost" };
-const RECORDED_RESOLVER = path.join(ROOT, "server/tests/fixtures/bandcamp_recorded.json");
-
-// Session A's recorded resolver answers into the server's response cache.
-function seedRecordedBandcamp(db) {
-  execFileSync("python3", [
-    "-c",
-    `import json, sqlite3, sys
-c = sqlite3.connect(sys.argv[1])
-with c:
-    for e in json.load(open(sys.argv[2])):
-        c.execute("INSERT OR REPLACE INTO http_cache(key, url, status, body, fetched_at) VALUES(?, ?, ?, ?, ?)",
-                  (e["key"], e["url"], e["status"], e["body"], "2026-10-26T00:00:00+00:00"))`,
-    db,
-    RECORDED_RESOLVER,
-  ]);
-}
+const RECORDED_RESOLVER = path.join(ROOT, "server/tests/fixtures"); // Session A's recordings
 
 async function routeBandcamp(route) {
   const fixture = bandcampFixture(route.request().url());
@@ -173,19 +158,18 @@ before(async () => {
   });
   execFileSync("npm", ["run", "build:app"], { cwd: ROOT, stdio: "ignore" }); // test the current source
 
-  // The server's own Bandcamp requests (the import resolver) go to a closed
-  // local port, so they fail instead of reaching Bandcamp; the resolver gets
-  // Session A's recorded answers through its response cache instead.
+  // The import resolver answers only from Session A's recorded responses
+  // (BC_TAGGER_BANDCAMP_FIXTURES); as a backstop, the server's own requests
+  // go to a closed local port, so nothing can reach Bandcamp.
   server = spawn(path.join(ROOT, "server/bct"), ["serve", "--port", String(PORT)], {
     cwd: ROOT,
-    env: { ...process.env, BC_TAGGER_DATA_DIR: SERVER_DATA, ...NO_LIVE_PROXY },
+    env: { ...process.env, BC_TAGGER_DATA_DIR: SERVER_DATA, BC_TAGGER_BANDCAMP_FIXTURES: RECORDED_RESOLVER, ...NO_LIVE_PROXY },
     stdio: "ignore",
   });
   await waitFor(() => api("/api/health").then((h) => h.ok && h.items > 0).catch(() => false), {
     timeout: 30000,
     what: "the server",
   });
-  seedRecordedBandcamp(path.join(SERVER_DATA, "server.db"));
 
   process.env.PW_EXPERIMENTAL_SERVICE_WORKER_NETWORK_EVENTS = "1"; // route the extension's own fetches too
   context = await chromium.launchPersistentContext(PROFILE, {
@@ -1149,20 +1133,17 @@ test("import: file → tag mapping → preview (tints, release, to confirm, matc
   await waitFor(() => stub.calls.some((c) => c.method === "PUT" && c.body.re_resolve === true), { what: "the re_resolve PUT" });
   assert.deepEqual(stub.calls.filter((c) => c.method === "PUT").pop().body, { artist: "The Carbon Boys", title: "Untitled", re_resolve: true });
 
-  // Paste a URL: junk is refused; a page URL (query dropped) becomes the row's
-  // hint and the server looks the row up from it.
+  // Paste a URL: junk is refused; a page URL (query dropped) is kept for the
+  // row (the extension links it when the page is opened).
   await page.click("tr[data-key='r2'] .match-cell .chip");
   await page.fill(".popover .match-url", "not a url");
   await page.click(".popover .pop-url button.primary");
   assert.match(await page.textContent(".popover .pop-err"), /isn't a Bandcamp track or album page/);
   await page.fill(".popover .match-url", "https://nobodyknown.bandcamp.com/track/slow-one?from=search");
   await page.click(".popover .pop-url button.primary");
-  await page.waitForFunction(() => document.querySelector("tr[data-key='r2'] .match-cell .chip").dataset.source === "file");
-  assert.deepEqual(
-    stub.calls.filter((c) => c.method === "PUT").slice(-2).map((c) => c.body),
-    [{ bandcamp_url: "https://nobodyknown.bandcamp.com/track/slow-one" }, { re_resolve: true }]
-  );
-  assert.equal(await page.$("tr[data-key='r2'] a.open-bc"), null);
+  await page.waitForFunction(() => document.querySelector("tr[data-key='r2'] .match-cell .chip").dataset.source === "url");
+  assert.deepEqual(stub.calls.filter((c) => c.method === "PUT").pop().body, { match_url: "https://nobodyknown.bandcamp.com/track/slow-one" });
+  assert.equal(await page.getAttribute("tr[data-key='r2'] a.open-bc", "href"), "https://nobodyknown.bandcamp.com/track/slow-one");
 
   // Pick a candidate, then send that row back to Other.
   await page.click("tr[data-key='r5'] .match-cell .chip");
@@ -1180,7 +1161,7 @@ test("import: file → tag mapping → preview (tints, release, to confirm, matc
   assert.equal(await page.$eval("#selectAll", (b) => b.indeterminate), true);
   await page.click("#importSelected");
   await page.waitForFunction(() => /^Imported:/.test(document.getElementById("refreshStatus").textContent));
-  assert.match(await page.textContent("#refreshStatus"), /pending adds 2, tag merges 1, other added 3/);
+  assert.match(await page.textContent("#refreshStatus"), /pending adds 1, tag merges 1, other added 4/);
   assert.ok(stub.calls.some((c) => c.path.endsWith("/commit")));
   assert.deepEqual(standInPages, [], "the preview fetches no Bandcamp pages");
   await page.close();
@@ -1263,17 +1244,13 @@ test("bot check: ownership reports it and stops refreshing in the background", a
 // selected: Bandcamp rows reach the extension through pending adds, the rest
 // show under Other in the collection.
 
-test("import end to end (real server): resolve, map tags, link from the album page, commit, pending adds, Other", async () => {
+test("import end to end (real server): resolve, map tags, paste a URL, link from the album page, commit, pending adds, Other", async () => {
   const items = JSON.parse(fs.readFileSync(path.join(ROOT, "server/tests/fixtures/import_rows.json"), "utf8"));
-  items.push({
-    line: 900,
-    raw: "Synergy Trilogy - Holo Law",
-    artist: "Synergy Trilogy",
-    title: "Holo Law",
-    album: "Synergy Trilogy",
-    tags: ["vocal"],
-    bandcamp_url: "https://infiniteexpanse.bandcamp.com/album/synergy-trilogy",
-  });
+  const ALBUM = "https://infiniteexpanse.bandcamp.com/album/synergy-trilogy";
+  items.push(
+    { line: 900, raw: "Synergy Trilogy - Holo Law", artist: "Synergy Trilogy", title: "Holo Law", album: "Synergy Trilogy", tags: ["vocal"] },
+    { line: 901, raw: "Synergy Trilogy - E2E stand-in track", artist: "Synergy Trilogy", title: "E2E stand-in track", tags: [], bandcamp_url: ALBUM }
+  );
   const file = path.join(E2E, "import-e2e.json");
   fs.writeFileSync(file, JSON.stringify({ format: "bc-tagger-import/1", source: "e2e-real.txt", revision: 3, unknown_tags: { mourn: ["melancholic"] }, pending_releases: [], items }));
   const before = Object.keys((await storage("taggedItems")).taggedItems).length;
@@ -1282,14 +1259,14 @@ test("import end to end (real server): resolve, map tags, link from the album pa
   page.on("dialog", (d) => d.accept());
   await page.goto(SERVER + "/settings/#import");
   await page.setInputFiles("#importFile", file);
-  await page.waitForFunction(() => /13 rows from/.test(document.getElementById("importFileInfo").textContent));
+  await page.waitForFunction(() => /14 rows from/.test(document.getElementById("importFileInfo").textContent));
   await page.click("#importStart");
   await page.waitForSelector("#importMapping:not([hidden])", { timeout: 60000 });
   assert.deepEqual(await page.$$eval("#importMapping .map-row", (r) => r.map((x) => x.dataset.tag)), ["mourn"]);
   await page.click("#mapCreate");
   await page.waitForURL(/\/import\/\?batch=imp-/);
   const batchId = new URL(page.url()).searchParams.get("batch");
-  await page.waitForFunction(() => document.querySelectorAll("#collectionTable tbody tr").length === 13);
+  await page.waitForFunction(() => document.querySelectorAll("#collectionTable tbody tr").length === 14);
   const sources = () =>
     page.$$eval("#collectionTable tbody tr", (trs) =>
       Object.fromEntries(trs.map((tr) => [tr.querySelector(".col-title").textContent, tr.querySelector(".match-cell .chip").dataset.source]))
@@ -1300,17 +1277,28 @@ test("import end to end (real server): resolve, map tags, link from the album pa
   assert.equal(await page.$$eval("tr.row-duplicate", (r) => r.length), 2);
   assert.equal(src["Take It As A Game (Super Drama Mix)"], "file", "resolved from the file's link (recorded)");
   assert.equal(src.Astika, "search", "found by the Bandcamp search (recorded)");
-  // Not recorded: the lookup can't go out (the server reports it as unavailable).
-  assert.ok(["error", "unavailable"].includes(src["Holo Law"]), src["Holo Law"]);
+  // Not recorded: no lookup goes out; the row says why.
+  assert.equal(src["Holo Law"], "unavailable");
+  assert.match(await page.textContent("#lookupUnavailable"), /Bandcamp lookup unavailable for \d+ rows?: the lookup failed/);
 
-  // Link Holo Law from its album page (the file's link): the extension links it by itself.
+  // Paste Holo Law's page (its album) in the preview: stored, not fetched.
+  const holoKey = await page.$$eval("#collectionTable tbody tr", (trs) => trs.find((tr) => tr.querySelector(".col-title").textContent === "Holo Law").dataset.key);
+  await page.click(`tr[data-key='${holoKey}'] .match-cell .chip`);
+  await page.fill(".popover .match-url", ALBUM + "?from=search");
+  await page.click(".popover .pop-url button.primary");
+  await page.waitForFunction((k) => document.querySelector(`tr[data-key='${k}'] .match-cell .chip`).dataset.source === "url", holoKey);
+
+  // Open the album page: the extension links Holo Law (pasted URL) and the
+  // stand-in track (the file's link) by itself.
   const album = await context.newPage();
-  await album.goto("https://infiniteexpanse.bandcamp.com/album/synergy-trilogy");
-  await album.waitForSelector("#bct-import-notice", { timeout: 15000 });
-  assert.match(await album.textContent("#bct-import-notice"), /linked this page's “Holo Law” to the import row Synergy Trilogy – Holo Law/);
+  await album.goto(ALBUM);
+  await album.waitForFunction(() => (document.getElementById("bct-import-notice") || {}).childElementCount >= 2, null, { timeout: 15000 });
+  const notices = await album.textContent("#bct-import-notice");
+  assert.match(notices, /linked this page's “Holo Law” to the import row Synergy Trilogy – Holo Law/);
+  assert.match(notices, /linked this page's “E2E stand-in track”/);
   await album.close();
   await page.waitForFunction(
-    () => [...document.querySelectorAll("#collectionTable tbody tr")].some((tr) => tr.querySelector(".col-title").textContent === "Holo Law" && tr.querySelector(".match-cell .chip").dataset.source === "linked"),
+    () => [...document.querySelectorAll("#collectionTable tbody tr")].filter((tr) => tr.querySelector(".match-cell .chip").dataset.source === "linked").length === 2,
     null,
     { timeout: 15000 }
   );
@@ -1318,6 +1306,7 @@ test("import end to end (real server): resolve, map tags, link from the album pa
   const holo = batch.rows.find((r) => r.title === "Holo Law");
   assert.equal(holo.bandcamp.via, "linked");
   assert.equal(holo.bandcamp.item.id, "t3738475288");
+  assert.equal(batch.rows.find((r) => r.title === "E2E stand-in track").bandcamp.item.id, "t3738475200");
 
   // Import selected → pending adds into the extension, the rest into Other.
   await page.click("#importSelected");
@@ -1325,7 +1314,7 @@ test("import end to end (real server): resolve, map tags, link from the album pa
   const status = await page.textContent("#refreshStatus");
   const count = (k) => Number((status.match(new RegExp(`${k} (\\d+)`)) || [])[1] || 0);
   assert.equal(count("tag merges"), 2, status);
-  assert.ok(count("pending adds") >= 3, status); // Holo Law, Super Drama, Astika at least
+  assert.ok(count("pending adds") >= 4, status); // Holo Law, the stand-in, Super Drama, Astika at least
   assert.ok(count("other added") >= 1, status);
   await waitFor(async () => !!(await storage("taggedItems")).taggedItems.t3738475288, { what: "Holo Law in the extension", timeout: 30000 });
   const after = (await storage("taggedItems")).taggedItems;
