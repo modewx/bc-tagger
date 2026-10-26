@@ -154,6 +154,20 @@ CREATE TABLE IF NOT EXISTS http_cache (
     fetched_at TEXT NOT NULL
 );
 
+-- Release downloads the user started (Phase 4): what each item got, for the import logs.
+CREATE TABLE IF NOT EXISTS download_log (
+    seq INTEGER PRIMARY KEY AUTOINCREMENT,
+    ref TEXT NOT NULL,
+    item_id TEXT,
+    release TEXT,
+    full_release INTEGER NOT NULL DEFAULT 0,
+    state TEXT NOT NULL,
+    message TEXT,
+    folder TEXT,
+    job_id TEXT,
+    at TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS tag_edits (
     seq INTEGER PRIMARY KEY AUTOINCREMENT,
     item_id TEXT NOT NULL,

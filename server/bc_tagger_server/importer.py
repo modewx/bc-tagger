@@ -21,7 +21,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 
-from . import bandcamp, musicbrainz
+from . import bandcamp, importlog, musicbrainz
 from .collection import (
     DuplicateIndex, by_number, merge_pending_item_tags, now_ms_iso, other_get, other_id, other_put, queue_add,
     search_links,
@@ -447,6 +447,7 @@ def create_batch(svc, file_obj: dict, default_tags: list[str], name: str | None 
         "batch_id": "imp-" + secrets.token_hex(4), "name": name or file_obj.get("source") or "import",
         "created_at": now_iso(), "status": "resolving", "error": None, "default_tags": default_tags,
         "default_tags_all": bool(default_tags_all), "lookup": lookup,
+        "lookup_source": svc.settings.get("lookup_source"), "logs": [],
         "unknown_tags": unknown, "new_tags": [], "tag_mapping": None, "source_file": file_obj.get("source"),
         "revision": file_obj.get("revision"), "pending_releases": list(file_obj.get("pending_releases") or []),
         "job_id": None, "job_kind": None, "job_boot": svc.boot_id, "phase": "resolving", "stats": {},
@@ -792,7 +793,7 @@ def _live(svc, batch: dict) -> dict:
 
 
 LIST_FIELDS = ("batch_id", "name", "created_at", "status", "error", "stats", "estimate", "bandcamp_lookups",
-               "default_tags", "default_tags_all", "committed_at")
+               "default_tags", "default_tags_all", "committed_at", "logs")
 
 
 def get_batch(svc, batch_id: str) -> dict:
@@ -1117,14 +1118,21 @@ def apply_tag_mapping(svc, batch_id: str, mapping: dict[str, list[str]], unmappe
     changed = 0
     for row in rows:
         new: list[str] = []
+        mapped: dict[str, list[str]] = {}  # for the import log: what each unknown tag became
         for t in row["tags"]:
             if t in unknown:
                 if mapping.get(t):
                     new += mapping[t]
+                    mapped[t] = mapping[t]
                 elif unmapped == "create":
                     new.append(t)
+                    mapped[t] = [t]
+                else:
+                    mapped[t] = []
             else:
                 new.append(t)
+        if mapped:
+            row["mapped_tags"] = mapped
         new = _clean_tags(new)
         if new != row["tags"]:
             row["tags"] = new
@@ -1132,7 +1140,7 @@ def apply_tag_mapping(svc, batch_id: str, mapping: dict[str, list[str]], unmappe
     vocab = set(store.get_tags())
     batch["new_tags"] = sorted({t for r in rows for t in r["tags"] if t not in vocab})
     batch["unknown_tags"] = {}
-    batch["tag_mapping"] = {"map": mapping, "unmapped": unmapped}
+    batch["tag_mapping"] = {"map": mapping, "unmapped": unmapped, "per_row": True}
     _save_rows(store, batch_id, rows)
     _refresh_stats(store, batch, rows)
     svc.jobs.bus.publish("import", {"batch_id": batch_id, "phase": "tags", "current": changed, "total": len(rows)})
@@ -1149,21 +1157,25 @@ def commit(svc, batch_id: str) -> dict:
         raise ImportError_("the batch was already imported")
     if batch["status"] != "ready":
         raise ImportError_(f"the batch isn't ready ({batch['status']})")
+    earlier = {r["n"] for r in load_rows(store, batch_id) if r.get("committed")}  # an earlier attempt's rows
     svc.committing.add(batch_id)
     batch.update(status="committing", error=None)
     _save_batch(store, batch)
     try:
-        return _commit(svc, batch)
+        return _commit(svc, batch, earlier)
     except Exception as e:
         batch.update(status="ready", error=f"The import stopped: {type(e).__name__}: {e}. Import again: rows "
                                             "already imported are skipped.")
+        rows = load_rows(store, batch_id)
+        if any(r.get("committed") and r["n"] not in earlier for r in rows):  # partly imported: log that part
+            importlog.attach(svc, batch, rows, None, earlier, error=f"{type(e).__name__}: {e}")
         _save_batch(store, batch)
         raise
     finally:
         svc.committing.discard(batch_id)
 
 
-def _commit(svc, batch: dict) -> dict:
+def _commit(svc, batch: dict, earlier: set[int] = frozenset()) -> dict:
     store, batch_id = svc.store, batch["batch_id"]
     rows = load_rows(store, batch_id)
     dups = DuplicateIndex(store)
@@ -1182,21 +1194,23 @@ def _commit(svc, batch: dict) -> dict:
         _check_duplicate(dups, row)
         dup = row["duplicate"]
         if dup and dup["source"] == "bandcamp":
+            union = list(dict.fromkeys(dup["tags"] + tags))
             if dup.get("pending"):
                 merge_pending_item_tags(store, dup["of"], tags)
             else:
-                union = list(dict.fromkeys(dup["tags"] + tags))
                 if union != dup["tags"]:
                     svc.queue_tag_edit(dup["of"], union)
                 svc.touch_item(dup["of"], stamp)  # merged by this import, even with no new tags
             row["committed"] = "tag_merge"
+            row["commit_info"] = {"item_id": dup["of"], "tags_before": dup["tags"], "tags_after": union}
             result["tag_merges"] += 1
             ids["merged"].append(dup["of"])
         elif dup:  # an existing "other" item
             existing = other_get(store, dup["of"]) or {}
-            other_put(store, {**existing, "tags": list(dict.fromkeys((existing.get("tags") or []) + tags)),
-                              "modified_at": stamp})
+            union = list(dict.fromkeys((existing.get("tags") or []) + tags))
+            other_put(store, {**existing, "tags": union, "modified_at": stamp})
             row["committed"] = "other_merge"
+            row["commit_info"] = {"item_id": dup["of"], "tags_before": existing.get("tags") or [], "tags_after": union}
             result["other_merged"] += 1
             ids["other_merged"].append(dup["of"])
         elif row["source"] == "bandcamp":
@@ -1204,6 +1218,7 @@ def _commit(svc, batch: dict) -> dict:
             queue_add(store, item=item)
             dups.add({**item, "source": "bandcamp", "pending": "tagger"})
             row["committed"] = "pending_add"
+            row["commit_info"] = {"item_id": item["id"]}
             result["pending_adds"] += 1
             ids["added"].append(item["id"])
         else:
@@ -1213,6 +1228,7 @@ def _commit(svc, batch: dict) -> dict:
             })
             dups.add(item)
             row["committed"] = "other"
+            row["commit_info"] = {"item_id": item["id"]}
             result["other_added"] += 1
             ids["other_added"].append(item["id"])
         located = row.get("located") or {}
@@ -1233,6 +1249,8 @@ def _commit(svc, batch: dict) -> dict:
     result["selected"] = list(dict.fromkeys(ids["added"] + ids["merged"] + ids["other_added"] + ids["other_merged"]))
     result["modified_at"] = stamp
     batch.update(status="committed", committed_at=now_iso(), commit_result=result)
+    batch["stats"] = compute_stats(batch, rows)
+    importlog.attach(svc, batch, rows, result, earlier)  # result["log"]: the log's file name
     _save_rows(store, batch_id, rows)
     _refresh_stats(store, batch, rows)
     svc.jobs.bus.publish("import", {"batch_id": batch_id, "phase": "committed", "current": len(rows), "total": len(rows)})

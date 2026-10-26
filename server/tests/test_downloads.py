@@ -217,3 +217,31 @@ def test_cached_but_missing_files_are_downloaded_again(svc, tmp_path):
     # with force (the user asked explicitly) it is fetched again even though it is on disk and located
     again = downloads.run(svc, ["t200"], force=True)
     assert again["releases"][0]["outcome"] in ("downloaded", "on_disk")  # force: the user asked explicitly
+
+
+def test_downloads_are_kept_for_the_import_log(svc):
+    batch = importer.create_batch(svc, {"format": "bc-tagger-import/1", "source": "dl.json", "items": [
+        {"line": 1, "artist": "Artist E", "title": "Row Song", "album": "Imported EP", "tags": []},
+        {"line": 2, "artist": "Artist C", "title": "Not Mine", "album": "Other", "tags": []}]}, ["must"])
+    bid = batch["batch_id"]
+    importer.link_row(svc, bid, 0, {"item": {"id": "t500", "title": "Row Song", "artist": "Artist E",
+                                             "album_title": "Imported EP", "album_id": "a50"}})
+    b = importer.load_batch(svc.store, bid)
+    b["status"] = "ready"
+    importer._save_batch(svc.store, b)
+    downloads.run(svc, [f"{bid}:0", "t300", "t400"])  # t300 isn't owned; t400 is already located (skipped)
+    kept = svc.store.query("SELECT ref, item_id, release, state, message, folder FROM download_log ORDER BY seq")
+    assert [(r["ref"], r["state"]) for r in kept] == [(f"{bid}:0", "done"), ("t300", "failed")]
+    assert kept[0]["release"] == "a50" and kept[0]["folder"].endswith("2023 - Imported EP")
+    result = importer.commit(svc, bid)
+    log = json.loads((svc.settings.path.parent / "import-logs" / result["log"]).read_text())
+    row = log["rows"][0]
+    assert row["outcome"] == "added_to_tagger" and row["item_id"] == "t500"
+    assert [(d["ref"], d["release"], d["state"], d["message"]) for d in row["downloads"]] == [
+        (f"{bid}:0", "a50", "done", "downloaded")]
+    assert row["located"]["status"] == "located" and log["counts"]["downloaded"] == 1
+    # the second row is collection item t300: its download from the collection page (since the batch began)
+    other = log["rows"][1]
+    assert other["outcome"] == "merged" and other["item_id"] == "t300"
+    assert [(d["ref"], d["state"], d["message"]) for d in other["downloads"]] == [("t300", "failed", "not owned")]
+    assert result["log"].endswith(f"_dl_{bid}.json")

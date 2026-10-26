@@ -105,6 +105,9 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     # Downloads of owned releases (Phase 4); empty: the owned root. Must be inside an owned root.
     "downloads_dir": "",
     "download_format": "aiff-lossless",
+    # Imports: a JSON + Markdown log of each commit goes here; empty: <data dir>/import-logs. Never on the
+    # music drive or inside a root.
+    "import_log_dir": "",
     # Opt-in file watcher (docs/fsevents-watcher.md): keeps the index current while the server runs.
     "watch_roots": False,
     "watch_debounce_seconds": 3,
@@ -158,6 +161,38 @@ def _check_downloads_dir(settings: dict[str, Any]) -> None:
         raise SettingsError(f"downloads_dir must be inside an owned root ({', '.join(map(str, owned))})")
 
 
+def _check_import_log_dir(settings: dict[str, Any]) -> None:
+    """``import_log_dir`` (when set) must not be inside a root or on a music root's drive."""
+    value = settings.get("import_log_dir") or ""
+    if not value:
+        return
+    problem = import_log_dir_problem(Path(value), all_root_paths(settings))
+    if problem:
+        raise SettingsError(problem)
+
+
+def all_root_paths(settings: dict[str, Any]) -> list[str]:
+    paths = [settings.get("owned_root") or "", settings.get("downloads_dir") or ""]
+    paths += [r["path"] for r in settings.get("not_owned_roots") or []]
+    paths += [r["path"] for r in settings.get("extra_roots") or []]
+    return [p for p in paths if p]
+
+
+def import_log_dir_problem(folder: Path, roots: list[str]) -> str | None:
+    """Why ``folder`` can't hold import logs (inside a root, or on a music root's drive), else None."""
+    from .fsguard import volume_root
+
+    folder = Path(os.path.realpath(Path(folder).expanduser()))
+    for root in roots:
+        real = Path(os.path.realpath(Path(root).expanduser()))
+        if folder == real or real in folder.parents:
+            return f"import_log_dir can't be inside a music root ({root})"
+        vol = volume_root(root)
+        if vol is not None and volume_root(folder) == vol:
+            return f"import_log_dir can't be on the music drive ({vol})"
+    return None
+
+
 def _validate(merged: dict[str, Any]) -> dict[str, Any]:
     out = dict(merged)
     out["settings_version"] = SETTINGS_VERSION
@@ -174,6 +209,9 @@ def _validate(merged: dict[str, Any]) -> dict[str, Any]:
     if out.get("download_format") not in ("flac", "wav", "aac-hi", "mp3-320", "aiff-lossless", "vorbis", "mp3-v0", "alac"):
         raise SettingsError("download_format must be one of the downloader's audio formats")
     out["downloads_dir"] = out.get("downloads_dir") or ""
+    out["import_log_dir"] = out.get("import_log_dir") or ""
+    if not isinstance(out["import_log_dir"], str):
+        raise SettingsError("import_log_dir must be a string path")
     if out.get("last_browse_dir") is None:
         out["last_browse_dir"] = ""  # cleared
     if not isinstance(out["last_browse_dir"], str):
@@ -337,6 +375,8 @@ class Settings:
             merged = _validate({**self._fresh(), **changes})
             if "downloads_dir" in changes:
                 _check_downloads_dir(merged)
+            if changes.keys() & {"import_log_dir", "owned_root", "not_owned_roots", "extra_roots", "downloads_dir"}:
+                _check_import_log_dir(merged)
             self._data = merged
             self.path.parent.mkdir(parents=True, exist_ok=True)
             tmp = self.path.with_suffix(".tmp")
@@ -368,6 +408,11 @@ class Settings:
     def app_dist_dir(self) -> Path:
         configured = self.get("app_dist_dir")
         return Path(configured).expanduser() if configured else default_app_dist_dir()
+
+    def import_log_dir(self) -> Path:
+        """Where import logs go: the setting, else ``import-logs`` next to settings.json (the data dir)."""
+        configured = self.get("import_log_dir")
+        return Path(configured).expanduser() if configured else self.path.parent / "import-logs"
 
     def xml_output_dir(self) -> Path:
         configured = self.get("xml_output_dir")

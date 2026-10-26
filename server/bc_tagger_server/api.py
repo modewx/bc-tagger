@@ -22,6 +22,7 @@ log = logging.getLogger(__name__)
 # Browser pages allowed to call the API: extension pages and local pages on any port.
 ALLOWED_ORIGIN_RE = r"^(chrome-extension://[a-p]{32}|http://(127\.0\.0\.1|localhost)(:\d+)?)$"
 ALLOWED_HOSTS = {"127.0.0.1", "localhost", "testserver"}
+LOOPBACK = {"127.0.0.1", "::1", "testclient"}  # testclient: FastAPI's TestClient
 
 
 class SyncItemsBody(BaseModel):
@@ -47,6 +48,10 @@ class OwnershipBody(BaseModel):
     owned_ids: list[str]
     source: str = "extension"
     full: bool = False
+
+
+class RevealLogBody(BaseModel):
+    name: Optional[str] = None  # a log file; none: the logs folder
 
 
 class SelectionBody(BaseModel):
@@ -253,6 +258,31 @@ def create_app(service: Service | None = None) -> FastAPI:
     @app.get("/api/import/open-rows")
     def import_open_rows() -> list[dict]:
         return imp.open_rows(svc)
+
+    from . import importlog
+
+    @app.get("/api/import/logs")
+    def import_logs() -> dict:
+        """The import logs, newest first."""
+        return importlog.list_logs(svc)
+
+    @app.get("/api/import/logs/{name}")
+    def import_log(name: str) -> Response:
+        try:
+            content, media_type = importlog.read(svc, name)
+        except importlog.LogNotFound as e:
+            raise HTTPException(404, f"no import log {name!r}") from e
+        return Response(content, media_type=media_type)
+
+    @app.post("/api/import/logs/reveal")
+    def import_log_reveal(request: Request, body: RevealLogBody = Body(default_factory=lambda: RevealLogBody())) -> dict:
+        """Show a log in Finder, or open the logs folder (only for a request from this Mac)."""
+        if (request.client.host if request.client else None) not in LOOPBACK:
+            raise HTTPException(403, "only from this Mac")
+        try:
+            return importlog.reveal(svc, body.name)
+        except importlog.LogNotFound as e:
+            raise HTTPException(404, f"no import log {body.name!r}") from e
 
     @app.get("/api/import/{batch_id}")
     def import_get(batch_id: str) -> dict:
