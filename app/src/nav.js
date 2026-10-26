@@ -20,6 +20,12 @@ function ago(iso) {
 export function buildNav(active) {
   const nav = document.createElement("nav");
   nav.id = "appNav";
+  // Shown while exports target the user's main rekordbox library.
+  const mainBanner = document.createElement("a");
+  mainBanner.id = "mainLibraryBanner";
+  mainBanner.href = "/settings/#rekordbox";
+  mainBanner.hidden = true;
+  nav.appendChild(mainBanner);
   const brand = document.createElement("span");
   brand.className = "brand";
   brand.textContent = "bc-tagger";
@@ -47,6 +53,17 @@ export function buildNav(active) {
 
   return {
     el: nav,
+    // settings: the server's settings (rekordbox_target, rekordbox_main_db_path)
+    setTarget(settings) {
+      const main = !!settings && settings.rekordbox_target === "main";
+      mainBanner.hidden = !main;
+      document.documentElement.classList.toggle("target-main", main);
+      if (main) {
+        const path = settings.rekordbox_main_db_path || "~/Library/Pioneer/rekordbox/master.db";
+        mainBanner.textContent = "MAIN LIBRARY · exports write to your real rekordbox collection";
+        mainBanner.title = `${path}\nEvery export shows a dry run and asks before writing. Click to change.`;
+      }
+    },
     setHealth(health, error) {
       if (error || !health) {
         setPill(server, "server offline", "bad", error ? String(error.message || error) : "");

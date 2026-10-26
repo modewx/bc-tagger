@@ -4,6 +4,7 @@
 import { apiJson } from "../../shared/datasource/HttpDataSource";
 import { openPopover, closePopover } from "./popover";
 import { progressText, resultText } from "./jobs";
+import { runExport } from "./exportFlow";
 
 const LOCAL_RANK = { located: 0, candidates: 1, missing: 2, unknown: 3 };
 const OWNED_RANK = { owned: 0, not_owned: 1, unknown: 2 };
@@ -59,12 +60,14 @@ function dirname(p) {
 export function appColumns(ctx) {
   const busy = {}; // item id -> label while a per-item job runs
 
-  async function itemJob(key, label, path, body) {
+  // Run a job for one row (start(onProgress) -> finished job), showing its
+  // progress in the row.
+  async function itemJob(key, label, start) {
     busy[key] = label;
     ctx.page().refreshRow(key);
     let job = null;
     try {
-      job = await ctx.jobs.run(path, body, (j) => {
+      job = await start((j) => {
         busy[key] = `${label} ${progressText(j)}`;
         const s = document.querySelector(`#collectionTable tr[data-key="${key}"] .busy-note`);
         if (s) s.textContent = busy[key];
@@ -79,8 +82,9 @@ export function appColumns(ctx) {
     return job;
   }
 
-  const locate = (key) => itemJob(key, "locating…", "/api/locate", { ids: [key] });
-  const exportItem = (key) => itemJob(key, "exporting…", "/api/rekordbox/export", { ids: [key] });
+  const locate = (key) => itemJob(key, "locating…", (p) => ctx.jobs.run("/api/locate", { ids: [key] }, p));
+  // Asks first (dry run + diff) when the target is the main library.
+  const exportItem = (key) => itemJob(key, "exporting…", (p) => runExport(ctx.jobs, { ids: [key] }, p));
 
   // Confirm/reject a file; the server re-locates the item right away.
   async function decide(key, path, decision) {

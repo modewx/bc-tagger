@@ -10,6 +10,7 @@ import { buildNav } from "./nav";
 import { appColumns, localPlayUrl } from "./columns";
 import { startDevReload } from "./devReload";
 import { createStatusFilter } from "./statusFilter";
+import { runExport } from "./exportFlow";
 
 const bridge = new ExtensionBridge();
 const events = new ServerEvents();
@@ -67,31 +68,10 @@ function locateShown(onProgress) {
 }
 
 // Export writes rekordbox, so preview it with a dry run and ask first.
-async function exportShown(onProgress) {
+function exportShown(onProgress) {
   const ids = shownIds();
-  if (!ids.length) return { status: "done", result: { message: "no items shown" } };
-  const preview = await jobs.run("/api/rekordbox/export", { ids, dry_run: true }, (j) =>
-    onProgress({ ...j, progress: { ...j.progress, message: `preview · ${(j.progress || {}).message || ""}` } })
-  );
-  if (preview.status !== "done") return preview;
-  const d = preview.result || {};
-  const n = (v) => (Array.isArray(v) ? v.length : v || 0);
-  if (!d.changed) {
-    const none = n(d.skipped_items) >= n(d.selected_items); // selected = all shown; skipped = not located
-    return { status: "done", result: { message: none ? "none of the shown items are located" : "rekordbox is already up to date" } };
-  }
-  const lines = [
-    `Export ${ids.length} shown items to rekordbox?`,
-    `${d.db_path || ""}`,
-    "",
-    `• ${n(d.content_added)} tracks added to the collection (${n(d.content_existing)} already there)`,
-    `• ${n(d.playlists_created)} new playlists in "${(d.folder || {}).name || ""}"`,
-    `• ${n(d.entries_added)} playlist entries added, ${n(d.entries_removed)} removed`,
-  ];
-  if (n(d.skipped_items)) lines.push(`• ${n(d.skipped_items)} items skipped (not located)`);
-  if (n(d.failed_files)) lines.push(`• ${n(d.failed_files)} files rekordbox can't take`);
-  if (!confirm(lines.join("\n"))) return { status: "done", result: { message: "cancelled" } };
-  return jobs.run("/api/rekordbox/export", { ids }, onProgress);
+  if (!ids.length) return Promise.resolve({ status: "done", result: { message: "no items shown" } });
+  return runExport(jobs, { ids }, onProgress, { ask: true });
 }
 
 function updateShownButtons(shown) {
@@ -104,6 +84,7 @@ function updateShownButtons(shown) {
 async function refreshHealth() {
   try {
     nav.setHealth(await apiJson("/api/health"));
+    nav.setTarget(await apiJson("/api/settings"));
   } catch (e) {
     nav.setHealth(null, e);
   }
@@ -133,7 +114,7 @@ async function refreshHealth() {
         "exportLatest",
         "Export latest 10 to rekordbox",
         "Add the 10 most recent located items to rekordbox, one playlist per tag",
-        (p) => jobs.run("/api/rekordbox/export", { latest: 10 }, p)
+        (p) => runExport(jobs, { latest: 10 }, p) // asks first when the target is the main library
       ),
       jobButton("refreshOwnership", "Refresh ownership", "Check which items you own on Bandcamp", refreshOwnership),
       jobButton("locateShown", "Locate shown", "Match the items shown below to local files", locateShown),

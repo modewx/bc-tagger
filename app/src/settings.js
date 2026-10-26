@@ -6,14 +6,24 @@ import { apiJson } from "../../shared/datasource/HttpDataSource";
 import { ExtensionBridge } from "../../shared/datasource/extensionBridge";
 import { buildNav } from "./nav";
 import { startDevReload } from "./devReload";
+import { confirmDialog } from "./dialog";
+import { createMappingEditor } from "./mappingEditor";
 
+const TABS = [
+  ["general", "General"],
+  ["rekordbox", "Rekordbox"],
+];
+
+// [id, tab, title, help]
 const SECTIONS = [
-  ["folders", "Music folders", "Where the indexer looks for your files. Files are referenced in place, never moved."],
-  ["matching", "Matching", "How tagged Bandcamp items are matched to local files."],
-  ["rekordbox", "rekordbox", "Export target. Writes are refused unless the database folder is the marked test library."],
-  ["bandcamp", "Bandcamp", "Ownership normally comes from the extension's live session; these are the fallback."],
-  ["server", "Server", ""],
-  ["advanced", "Advanced", ""],
+  ["folders", "general", "Music folders", "Where the indexer looks for your files. Files are referenced in place, never moved."],
+  ["matching", "general", "Matching", "How tagged Bandcamp items are matched to local files."],
+  ["bandcamp", "general", "Bandcamp", "Ownership normally comes from the extension's live session; these are the fallback."],
+  ["server", "general", "Server", ""],
+  ["advanced", "general", "Advanced", ""],
+  ["rb_target", "rekordbox", "Target library", "Where exports write. Your main collection needs an explicit opt-in, and every export to it shows a dry run first."],
+  ["rb_playlists", "rekordbox", "Playlists", "Which rekordbox playlists each tag goes to."],
+  ["rb_files", "rekordbox", "Files", ""],
 ];
 
 const FIELDS = {
@@ -49,15 +59,30 @@ const FIELDS = {
     label: "Offer candidates at or above",
     help: "Below auto-accept, matches are listed for you to confirm in the Located column.",
   },
-  rekordbox_db_path: { section: "rekordbox", type: "path", label: "Database (master.db)" },
-  playlist_folder: {
-    section: "rekordbox",
-    type: "text",
-    label: "Playlist folder",
-    help: "One playlist per tag is created inside this folder.",
+  rekordbox_target: { section: "rb_target", type: "target", label: "Main collection" },
+  allow_main_writes: { section: "rb_target", type: "part" }, // edited by the target editor
+  rekordbox_db_path: {
+    section: "rb_target",
+    type: "path",
+    label: "Test library database",
+    help: "Used while the main collection isn't enabled. Writes need the test-library marker file in its folder.",
   },
+  rekordbox_main_db_path: {
+    section: "rb_target",
+    type: "path",
+    label: "Main library database",
+    help: "Your real collection. Only written when enabled above; bc-tagger backs it up before every write.",
+  },
+  playlist_folder: {
+    section: "rb_playlists",
+    type: "text",
+    label: "Target folder",
+    help: "The rekordbox folder for bc-tagger's playlists: plain playlist names below (and every tag in Auto mode) go inside it.",
+  },
+  tag_playlist_mode: { section: "rb_playlists", type: "mapping", label: "Tags → playlists" },
+  tag_playlist_map: { section: "rb_playlists", type: "part" }, // edited by the mapping editor
   xml_output_dir: {
-    section: "rekordbox",
+    section: "rb_files",
     type: "path",
     label: "XML export folder",
     placeholder: "default: the server's data folder / exports",
@@ -103,8 +128,16 @@ function changed() {
   document.getElementById("saveBtn").disabled = !dirty.length;
   document.getElementById("revertBtn").disabled = !dirty.length;
   document.getElementById("saveState").textContent = dirty.length ? `${dirty.length} unsaved change${dirty.length > 1 ? "s" : ""}` : "";
-  document.querySelectorAll(".field").forEach((f) => f.classList.toggle("dirty", dirty.includes(f.dataset.key)));
+  document.querySelectorAll(".field").forEach((f) => f.classList.toggle("dirty", dirty.some((k) => (f.dataset.keys || f.dataset.key).split(" ").includes(k))));
+  document.querySelectorAll("#tabs [data-tab]").forEach((b) =>
+    b.classList.toggle("dirty", dirty.some((k) => tabOf(k) === b.dataset.tab))
+  );
   return dirty;
+}
+
+function tabOf(key) {
+  const def = FIELDS[key] || { section: "advanced" };
+  return (SECTIONS.find(([id]) => id === def.section) || [])[1];
 }
 
 // --- Editors -----------------------------------------------------------------
@@ -312,8 +345,98 @@ function genericEditor(key, value) {
   };
 }
 
+// The main-collection opt-in: one checkbox drives rekordbox_target ("test" |
+// "main") and allow_main_writes. Ticking it asks first, with a clear warning
+// and a backup reminder; unticking returns to the test library.
+function targetEditor() {
+  const box = el("input", { type: "checkbox", id: "f_allow_main_writes" });
+  const label = el("label", { class: "target-toggle", for: "f_allow_main_writes" }, box, " Allow bc-tagger to write to my main rekordbox collection");
+  const banner = el("div", { class: "main-banner", hidden: true });
+  const paint = () => {
+    banner.hidden = !box.checked;
+    const path = (editors.rekordbox_main_db_path && editors.rekordbox_main_db_path.get()) || "~/Library/Pioneer/rekordbox/master.db";
+    banner.textContent = `MAIN LIBRARY: exports write to ${path}. Each export shows a dry run and asks before writing. rekordbox must be closed.`;
+  };
+  box.addEventListener("change", async () => {
+    if (box.checked) {
+      box.checked = false;
+      const ok = await confirmDialog({
+        id: "mainLibraryConfirm",
+        danger: true,
+        title: "Write to your main rekordbox collection?",
+        body: mainWarning(),
+        requireAck: "I've made a backup of my rekordbox library (File → Library → Backup Library)",
+        confirmLabel: "Use my main collection",
+      });
+      box.checked = ok;
+    }
+    paint();
+    changed();
+  });
+  // Checked only when both settings say so (the server needs both to write).
+  let target = "test";
+  let allow = false;
+  const sync = () => {
+    box.checked = target === "main" && allow;
+    paint();
+  };
+  const node = el("div", { class: "target" }, label, banner);
+  return {
+    node,
+    parts: {
+      rekordbox_target: { get: () => (box.checked ? "main" : "test"), set: (v) => ((target = v), sync()) },
+      allow_main_writes: { get: () => box.checked, set: (v) => ((allow = !!v), sync()) },
+    },
+  };
+}
+
+function mainWarning() {
+  const path = (editors.rekordbox_main_db_path && editors.rekordbox_main_db_path.get()) || "~/Library/Pioneer/rekordbox/master.db";
+  const wrap = el("div", {});
+  wrap.append(
+    el("div", { class: "warn-box" }, "bc-tagger will write to your real rekordbox library: ", el("code", {}, path), " (and its masterPlaylists6.xml)."),
+    el(
+      "ul",
+      {},
+      el("li", {}, "Quit rekordbox before exporting: the server refuses to write while it runs, and while the test library is switched in."),
+      el("li", {}, "Exports only add tracks and playlist entries. Existing tracks are never edited, and playlists bc-tagger didn't create are never deleted."),
+      el("li", {}, "Before each write bc-tagger copies master.db and masterPlaylists6.xml to its own backup folder (the last 5 are kept)."),
+      el("li", {}, "Every export shows a dry run (playlists to create, tracks to add, entries per playlist) and asks before writing.")
+    ),
+    el("p", {}, "Make your own backup first: in rekordbox, File → Library → Backup Library."),
+    el("p", { class: "muted" }, "Takes effect when you save settings. Untick the box to go back to the test library.")
+  );
+  return wrap;
+}
+
+let mapping = null;
+
+function mappingEditor() {
+  mapping = createMappingEditor({ onChange: changed });
+  return {
+    node: mapping.node,
+    parts: {
+      tag_playlist_mode: { get: mapping.getMode, set: mapping.setMode },
+      tag_playlist_map: { get: mapping.getMap, set: mapping.setMap },
+    },
+  };
+}
+
+// Vocabulary and the target library's playlists for the mapping editor.
+async function loadMappingData() {
+  if (!mapping) return;
+  apiJson("/api/tags").then(mapping.setVocabulary).catch(() => {});
+  try {
+    mapping.setPlaylists(await apiJson("/api/rekordbox/playlists"));
+  } catch (e) {
+    mapping.setPlaylists(null); // not available (older server, library unreadable)
+  }
+}
+
 function makeEditor(key, def, value) {
   switch (def.type) {
+    case "target": return targetEditor();
+    case "mapping": return mappingEditor();
     case "preset": return presetEditor();
     case "roots": return rootsEditor();
     case "roots-kind": return rootsEditor({ withKind: true });
@@ -329,19 +452,32 @@ function makeEditor(key, def, value) {
 // --- Page --------------------------------------------------------------------
 
 function render(main, data) {
+  const tabs = el("nav", { id: "tabs", role: "tablist" });
+  TABS.forEach(([id, label]) => {
+    const b = el("button", { type: "button", role: "tab", "data-tab": id, id: `tab_${id}` }, label);
+    b.addEventListener("click", () => showTab(id));
+    tabs.appendChild(b);
+  });
+  main.appendChild(tabs);
+
   const sections = {};
-  SECTIONS.forEach(([id, title, help]) => {
+  SECTIONS.forEach(([id, tab, title, help]) => {
     const body = el("div", { class: "section-body" });
     sections[id] = body;
-    main.appendChild(el("section", { id: `sec_${id}` }, el("h2", {}, title), help ? el("p", { class: "help" }, help) : "", body));
+    main.appendChild(
+      el("section", { id: `sec_${id}`, "data-tab": tab }, el("h2", {}, title), help ? el("p", { class: "help" }, help) : "", body)
+    );
   });
   const keys = [...Object.keys(FIELDS).filter((k) => k in data), ...Object.keys(data).filter((k) => !(k in FIELDS))];
   keys.forEach((key) => {
     const def = FIELDS[key] || { section: "advanced", label: key };
+    if (def.type === "part") return; // edited by a composite editor
     const ed = makeEditor(key, def, data[key]);
-    editors[key] = ed;
+    const owned = ed.parts ? Object.keys(ed.parts).filter((k) => k in data) : [key];
+    if (ed.parts) owned.forEach((k) => (editors[k] = ed.parts[k]));
+    else editors[key] = ed;
     const label = el("label", { class: "field-label", for: `f_${key}` }, def.label || key);
-    const field = el("div", { class: "field", "data-key": key }, label, ed.node);
+    const field = el("div", { class: "field", "data-key": key, "data-keys": owned.join(" ") }, label, ed.node);
     if (def.help) field.appendChild(el("div", { class: "help" }, def.help));
     if (key === "rekordbox_db_path") field.appendChild(el("div", { class: "help", id: "dbStatus" }));
     sections[def.section].appendChild(field);
@@ -349,10 +485,28 @@ function render(main, data) {
   SECTIONS.forEach(([id]) => {
     if (!sections[id].children.length) document.getElementById(`sec_${id}`).remove();
   });
+
+  // Plain mapping names resolve inside the target folder.
+  const folderInput = document.getElementById("f_playlist_folder");
+  if (mapping && folderInput) {
+    mapping.setTargetFolder(folderInput.value);
+    folderInput.addEventListener("input", () => mapping.setTargetFolder(folderInput.value));
+  }
+  showTab(location.hash === "#rekordbox" ? "rekordbox" : "general");
+}
+
+function showTab(id) {
+  document.querySelectorAll("#tabs [data-tab]").forEach((b) => {
+    b.classList.toggle("active", b.dataset.tab === id);
+    b.setAttribute("aria-selected", b.dataset.tab === id ? "true" : "false");
+  });
+  document.querySelectorAll("main section[data-tab]").forEach((sec) => (sec.hidden = sec.dataset.tab !== id));
+  if (location.hash !== `#${id}`) history.replaceState(null, "", `#${id}`);
 }
 
 function fill(data) {
   Object.entries(editors).forEach(([k, ed]) => ed.set(data[k]));
+  if (mapping && "playlist_folder" in data) mapping.setTargetFolder(document.getElementById("f_playlist_folder").value);
   changed();
 }
 
@@ -373,7 +527,9 @@ async function save() {
     fill(saved);
     state.className = "ok";
     state.textContent = "Saved.";
+    nav.setTarget(saved);
     refreshHealth();
+    loadMappingData(); // the target library may have changed
   } catch (e) {
     btn.disabled = false;
     state.className = "err";
@@ -420,6 +576,8 @@ async function refreshHealth() {
     loaded = data;
     render(main, data);
     fill(data);
+    nav.setTarget(data);
+    loadMappingData();
   } catch (e) {
     main.appendChild(el("p", { class: "err" }, `Could not load settings: ${e.message}`));
   }

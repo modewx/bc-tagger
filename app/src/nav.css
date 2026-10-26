@@ -29,3 +29,20 @@
 @media (max-width: 640px) {
   #appNav .pill:first-of-type { margin-left: 0; }
 }
+
+/* Unmistakable while exports go to the user's main rekordbox library. */
+#mainLibraryBanner {
+  flex: 1 0 100%;
+  order: -1;
+  display: block;
+  background: #d92d20;
+  color: #fff !important;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  text-align: center;
+  padding: 6px 10px;
+  border-radius: 5px;
+  border-bottom: none !important;
+  text-decoration: none;
+}
+#mainLibraryBanner[hidden] { display: none; }
