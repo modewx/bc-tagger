@@ -62,7 +62,9 @@ cd server
 ```
 
 `--latest N` means the N most recent items for `locate`, and the N most recent **located** items
-for `export` and `xml`. `--all` selects every item. Add `--json` for machine-readable output.
+for `export` and `xml`. `locate`/`export`/`xml` rescan the roots first unless the last scan is under
+5 minutes old (a rescan of the full drive takes about a minute even when nothing changed);
+`./bct scan` (or the app's scan) always rescans. `--all` selects every item. Add `--json` for machine-readable output.
 
 ## Settings
 

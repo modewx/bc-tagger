@@ -170,7 +170,11 @@ def scan(
     marks = ",".join("?" * len(keep)) or "''"
     with store.tx() as c:
         stats["removed"] += c.execute(f"DELETE FROM files WHERE root NOT IN ({marks})", keep).rowcount
-    store.set_meta("last_scan", {"at": now_iso(), **{k: v for k, v in stats.items() if k != "roots"}})
+    store.set_meta("last_scan", {
+        "at": now_iso(),
+        **{k: v for k, v in stats.items() if k != "roots"},
+        "roots": [r["path"] for r in roots],
+    })
     if progress:
         progress(stats["files"], stats["files"], "scan finished")
     return stats

@@ -205,6 +205,23 @@ class Service:
         progress = (lambda cur, tot, msg: ctx.progress(cur, tot, msg)) if ctx else None
         return scan(self.store, self.settings.roots(), progress)
 
+    RESCAN_MAX_AGE_S = 300
+
+    def scan_if_stale(self, ctx=None, max_age_s: float | None = None) -> dict[str, Any] | None:
+        """Rescan before locating/exporting unless the last scan is recent (a full rescan of a
+        large drive takes about a minute even when nothing changed). Returns None if skipped."""
+        from datetime import datetime, timezone
+
+        last = self.store.get_meta("last_scan") or {}
+        limit = self.RESCAN_MAX_AGE_S if max_age_s is None else max_age_s
+        try:
+            age = (datetime.now(timezone.utc) - datetime.fromisoformat(last["at"])).total_seconds()
+        except (KeyError, TypeError, ValueError):
+            age = None
+        if age is not None and age < limit and last.get("roots") == [r["path"] for r in self.settings.roots()]:
+            return None
+        return self.scan(ctx)
+
     def start_scan(self):
         return self.jobs.submit("scan", lambda ctx: self.scan(ctx))
 
@@ -229,7 +246,7 @@ class Service:
         from .items import select_items
         from .matcher import load_overrides, locate_item, save_result
 
-        scan_stats = self.scan(ctx) if rescan else None
+        scan_stats = self.scan_if_stale(ctx) if rescan else None
         index = self.file_index()
         cfg = self.match_config()
         chosen = select_items(self.store.all_items(), ids=ids, latest=latest)
@@ -260,7 +277,7 @@ class Service:
         from .items import select_items
         from .matcher import load_overrides, locate_item, save_result
 
-        self.scan(ctx)
+        self.scan_if_stale(ctx)
         index = self.file_index()
         cfg = self.match_config()
         pool = select_items(self.store.all_items(), ids=ids)

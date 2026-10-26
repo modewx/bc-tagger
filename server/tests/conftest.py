@@ -78,6 +78,7 @@ def make_service(tmp_path):
             changes["rekordbox_db_path"] = str(db_path)
         settings.update(changes)
         svc = Service(settings=settings, store=Store(path=tmp_path / "data" / "server.db"), seed=False)
+        svc.RESCAN_MAX_AGE_S = 0  # tests add files between calls
         if items is not None:
             svc.store.upsert_items(items, full=True)
             svc.store.set_tags(tags or sorted({t for it in items.values() for t in it.get("tags", [])}))
