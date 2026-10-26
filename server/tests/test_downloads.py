@@ -31,6 +31,7 @@ def svc(make_service, tmp_path, monkeypatch):
         "t101": {"title": "Song B", "artist": "Artist A", "album_title": "Album A", "album_id": "a10", "track_num": 2},
         "t200": {"title": "Single", "artist": "Artist B", "album_title": "Single", "album_id": "a20", "track_num": 1},
         "t300": {"title": "Not Mine", "artist": "Artist C", "album_title": "Other", "album_id": "a30", "track_num": 1},
+        "a70": {"title": "Look At Yourself", "artist": "Artist G", "album_title": "look-at-yourself", "track_num": -1},
         "t400": {"title": "Here Already", "artist": "Artist D", "album_title": "Here", "album_id": "a40", "track_num": 1},
     }
     s = make_service(music, items=items, tags=["must"])
@@ -38,7 +39,7 @@ def svc(make_service, tmp_path, monkeypatch):
     cookies.write_text("# Netscape HTTP Cookie File\n")
     s.settings.update({"owned_root": str(owned), "cookies_file": str(cookies), "downloads_dir": ""})
     with s.store.tx() as c:
-        for owned_id in ("a10", "t200", "a40", "a50"):
+        for owned_id in ("a10", "t200", "a40", "a50", "a70"):
             c.execute("INSERT INTO owned_ids(id, source, checked_at) VALUES(?, 'test', '2026-10-26')", (owned_id,))
     rel = tmp_path / "releases.json"
     rel.write_text(json.dumps(RELEASES))
@@ -63,6 +64,11 @@ def test_plan_maps_tracks_to_owned_releases(svc, tmp_path):
     assert items["t300"]["state"] == "failed" and items["t300"]["message"] == "not owned"
     assert items["t400"]["state"] == "skipped" and items["t400"]["message"] == "already located"
     assert items["nope"]["message"] == "no such item"
+
+
+def test_plan_shows_an_album_items_own_title(svc):
+    p = downloads.plan(svc, ["a70", "t100"])
+    assert [(r["release"], r["title"]) for r in p["releases"]] == [("a70", "Look At Yourself"), ("a10", "Album A")]
 
 
 def test_download_then_locate(svc, tmp_path):
