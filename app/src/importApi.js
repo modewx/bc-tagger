@@ -138,7 +138,8 @@ export function normBatch(b) {
     lookupVia: b.lookup === "browser" ? "browser" : "server", // who makes the Bandcamp requests
     estimate: b.estimate || null, // {lookups, cached, requests, seconds, interval_s, text}
     logs: Array.isArray(b.logs) ? b.logs : [], // its import logs (JSON file names), oldest first
-    uncreatedTags: Array.isArray(b.uncreated_tags) ? b.uncreated_tags : [], // the rows' tags not in the tag list yet
+    // the rows' tags not in the tag list yet (live until the commit; new_tags is the newer name)
+    uncreatedTags: Array.isArray(b.uncreated_tags) ? b.uncreated_tags : Array.isArray(b.new_tags) ? b.new_tags : [],
     rows,
   };
 }

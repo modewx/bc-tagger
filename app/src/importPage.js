@@ -120,8 +120,8 @@ defaultsAll.addEventListener("change", async () => {
   renderInfo();
 });
 // At the top: the rows' tags that aren't in the tag list yet. They're offered in
-// every row's tag editor (highlighted) and created when the rows are imported or
-// transferred; "Create now" is optional. Then a link to map them to playlists.
+// every row's tag editor (highlighted); Import selected creates them, or Create New
+// Tags now. Then a link to map them to playlists.
 const newTags = el("div", "import-new-tags");
 newTags.id = "newTagsBar";
 newTags.hidden = true;
@@ -142,9 +142,9 @@ function renderNewTags() {
     return link;
   };
   if (pending.length) {
-    const btn = el("button", "mini-btn", "Create now");
+    const btn = el("button", "mini-btn", "Create New Tags");
     btn.id = "createNewTags";
-    btn.title = "Add them to your tag list now (Import selected and Transfer to rekordbox do it anyway)";
+    btn.title = "Add them to your tag list now (Import selected creates them anyway; Transfer to rekordbox doesn't)";
     btn.addEventListener("click", async () => {
       btn.disabled = true;
       try {
@@ -158,7 +158,7 @@ function renderNewTags() {
     });
     const n = pending.length;
     newTags.append(
-      el("span", "new-tags-text", `${n} new tag${n > 1 ? "s" : ""} will be created when you import or transfer: `),
+      el("span", "new-tags-text", `${n} new tag${n > 1 ? "s" : ""}, not in your tag list yet (highlighted in the rows; Import selected creates them): `),
       ...pending.map((t, i) => [i ? ", " : "", el("span", "new-tag-name", t)]).flat(),
       ". ",
       mapLink(pending),
