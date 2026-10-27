@@ -244,8 +244,90 @@ def compute_stats(batch: dict, rows: list[dict]) -> dict[str, int]:
 def _refresh_stats(store, batch: dict, rows: list[dict] | None = None) -> dict:
     rows = rows if rows is not None else load_rows(store, batch["batch_id"])
     batch["stats"] = compute_stats(batch, rows)
+    if batch.get("kind") == "files" and batch["status"] != "committed":
+        batch["location_updates"] = location_updates(store, batch, rows)
+        batch["stats"]["location_updates"] = len(batch["location_updates"])
     _save_batch(store, batch)
     return batch
+
+
+# -- location updates (files imports) ------------------------------------------------------------
+
+
+def _location_state(store, item_id: str) -> str | None:
+    """Why an item's location must stay: "located", "manual" (a file the user confirmed), else None."""
+    if store.query_one("SELECT 1 FROM match_overrides WHERE item_id = ? AND decision = 'confirm'", (item_id,)):
+        return "manual"
+    row = store.query_one("SELECT status FROM locate_results WHERE item_id = ?", (item_id,))
+    return "located" if row and row["status"] == "located" else None
+
+
+def location_updates(store, batch: dict, rows: list[dict]) -> list[dict]:
+    """Files imports: collection items the batch's files match that aren't located yet (and weren't located by
+    hand). The commit locates them to those files whether or not their row is checked (the checkbox is
+    only about tags). ``[{item_id, path, release_dir, kind, n, line, title, artist, checked}]``."""
+    if batch.get("kind") != "files":
+        return []
+    out: list[dict] = []
+    seen: set[str] = set()
+    for row in rows:
+        located = row.get("located") or {}
+        item_id = (row.get("duplicate") or {}).get("of")
+        path = (located.get("best") or {}).get("path") if located.get("source") == "file" else None
+        if not item_id or not path or item_id in seen or _location_state(store, item_id):
+            continue
+        seen.add(item_id)
+        out.append({"item_id": item_id, "path": path, "release_dir": str(Path(path).parent),
+                    "kind": "album" if item_id.startswith("a") else "track", "n": row["n"], "line": row.get("line"),
+                    "title": (row.get("duplicate") or {}).get("title") or row.get("title"),
+                    "artist": (row.get("duplicate") or {}).get("artist") or row.get("artist"),
+                    "checked": bool(row.get("checked"))})
+    return out
+
+
+def _release_key(index, path: str) -> str:
+    """The matcher's release key (folder, or ``folder::album``) of the release holding ``path``."""
+    f = index.by_path.get(path)
+    if f is None:
+        return str(Path(path).parent)
+    i = next(i for i, g in enumerate(index.files) if g is f)
+    return next((key for key, idxs in index.releases.items() if i in idxs), f.release_dir)
+
+
+def apply_location_updates(svc, updates: list[dict]) -> list[dict]:
+    """Locate each item to its file (a track) or to that file's release folder (an album): the path is
+    confirmed for the item, then the item is located as usual. Items located (or confirmed by hand) since are
+    left alone. Returns the updates with ``applied`` and ``status``."""
+    from .collection import all_items
+    from .matcher import load_overrides, locate_item, save_result
+
+    if not updates:
+        return []
+    store = svc.store
+    index, cfg = svc.file_index(), svc.match_config()
+    items = {it["id"]: it for it in all_items(store)}
+    out = []
+    for u in updates:
+        item = items.get(u["item_id"])
+        state = _location_state(store, u["item_id"])
+        if item is None or state:
+            out.append({**u, "applied": False, "status": state or "not in the collection"})
+            continue
+        key = u["path"] if u["kind"] == "track" else _release_key(index, u["path"])
+        with store.tx() as c:
+            c.execute("INSERT INTO match_overrides(item_id, path, decision, created_at) VALUES(?, ?, 'confirm', ?)",
+                      (u["item_id"], key, now_iso()))
+        result = locate_item(item, index, cfg, load_overrides(store, u["item_id"]))
+        if result["status"] == "located":
+            save_result(store, u["item_id"], result)
+            svc.jobs.bus.publish("item", {"id": u["item_id"]})
+        else:  # the file isn't in the index any more: no trace
+            with store.tx() as c:
+                c.execute("DELETE FROM match_overrides WHERE item_id = ? AND path = ? AND decision = 'confirm'",
+                          (u["item_id"], key))
+        out.append({**u, "applied": result["status"] == "located", "status": result["status"],
+                    "located_path": (result.get("best") or {}).get("path")})
+    return out
 
 
 # -- rows ------------------------------------------------------------------------------------------
@@ -841,6 +923,9 @@ def get_batch(svc, batch_id: str) -> dict:
     for row in rows:  # what Download can fetch for Bandcamp rows (not stored: ownership changes)
         item = (row.get("bandcamp") or {}).get("item")
         row["owned"] = ownership_status(svc.store, item) if item else None
+    if batch.get("kind") == "files" and batch["status"] != "committed":  # live: items may have been located since
+        batch["location_updates"] = location_updates(svc.store, batch, rows)
+        batch["stats"] = {**(batch.get("stats") or {}), "location_updates": len(batch["location_updates"])}
     return {**batch, **live, "logs": batch.get("logs") or [], "rows": rows}
 
 
@@ -1223,6 +1308,11 @@ def _commit(svc, batch: dict, earlier: set[int] = frozenset()) -> dict:
     order = max_order(store)  # "#": new items are numbered after everything, in row order; merges keep theirs
     pref = svc.settings.get("format_preference")
     from_files: dict[str, int] = {}  # items this commit added from a file (files imports): that file's format rank
+    # files imports: not-yet-located collection items the files match are located to them, checked or not
+    result["location_updates"] = apply_location_updates(svc, location_updates(store, batch, rows))
+    result["located_items"] = sum(u["applied"] for u in result["location_updates"])
+    if batch.get("kind") == "files":  # from now on the batch shows what was applied
+        batch["location_updates"] = result["location_updates"]
     used_tags: list[str] = []
     for row in rows:
         if row.get("checked"):

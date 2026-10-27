@@ -234,3 +234,54 @@ def test_the_same_track_in_two_folders_keeps_the_preferred_format(tree):
     assert result["other_merged"] == 1  # the AIFF row merged into the item the FLAC row added
     confirmed = dict(svc.store.query("SELECT item_id, path FROM match_overrides WHERE decision = 'confirm'"))
     assert confirmed[song["item_id"]] == str(aiff)  # aiff before flac in format_preference
+
+
+W_URL = "https://artistw.bandcamp.com/album/album-w"
+
+
+def test_unlocated_collection_items_get_located_checked_or_not(tree, monkeypatch):
+    svc, coll, complete, files = tree
+    svc.store.upsert_items({
+        "t901": {"title": "Unlocated", "artist": "Artist Y", "album_title": "Found", "track_num": 1, "tags": ["must"]},
+        "t902": {"title": "Manual One", "artist": "Artist V", "album_title": "V", "track_num": 1, "tags": ["must"]},
+        "a950": {"title": "Album W", "artist": "Artist W", "album_title": "album-w", "track_num": -1, "tags": ["must"],
+                 "item_url": W_URL},
+    })
+    with svc.store.tx() as c:  # t902 was pointed at a file by hand (gone now): never touched
+        c.execute("INSERT INTO match_overrides(item_id, path, decision, created_at) VALUES('t902', '/gone/x.aiff', "
+                  "'confirm', 'x')")
+    unloc = aged(write_flac(complete / "Artist Y - Found" / "01 Unlocated.flac", "Unlocated", "Artist Y", "Found", 1), 1)
+    aged(write_flac(complete / "Artist V - V" / "01 Manual One.flac", "Manual One", "Artist V", "V", 1), 1)
+    w1 = aged(write_flac(coll / "Artist W - Album W" / "01 A.flac", "A", "Artist W", "Album W", 1, f"Visit {W_URL}"), 1)
+    aged(write_flac(coll / "Artist W - Album W" / "02 B.flac", "B", "Artist W", "Album W", 2, f"Visit {W_URL}"), 1)
+    events = []
+    publish = svc.jobs.bus.publish
+    monkeypatch.setattr(svc.jobs.bus, "publish", lambda kind, data: (events.append((kind, data)), publish(kind, data)))
+    with TestClient(create_app(svc)) as c:
+        r = start(c, [{"path": str(coll), "since": since(7)}, {"path": str(complete), "since": since(7)}])
+        assert svc.jobs.wait(r["job_id"], timeout=30).status == "done"
+        batch = c.get(f"/api/import/{r['batch_id']}").json()
+        updates = {u["item_id"]: u for u in batch["location_updates"]}
+        # t900 is located already, t902 was located by hand: neither is listed
+        assert set(updates) == {"t901", "a950"} and batch["stats"]["location_updates"] == 2
+        assert (updates["t901"]["path"], updates["t901"]["kind"], updates["t901"]["checked"]) == (str(unloc), "track",
+                                                                                                 False)
+        assert updates["a950"]["kind"] == "album" and updates["a950"]["path"] == str(w1)
+        rows = {x["raw"]: x for x in batch["rows"]}
+        assert not rows[str(unloc)]["checked"] and not rows[str(w1)]["checked"]  # duplicates: unchecked
+        result = c.post(f"/api/import/{r['batch_id']}/commit").json()
+        assert result["located_items"] == 2 and all(u["applied"] for u in result["location_updates"])
+        after = c.get(f"/api/import/{r['batch_id']}").json()["location_updates"]
+        assert {(u["item_id"], u["applied"]) for u in after} == {("t901", True), ("a950", True)}
+        t901 = c.get("/api/items/t901").json()["local"]
+        a950 = c.get("/api/items/a950").json()["local"]
+        assert t901["status"] == "located" and t901["best"]["path"] == str(unloc)
+        assert a950["status"] == "located" and a950["best"]["release_dir"] == str(w1.parent)
+        assert c.get("/api/items/t900").json()["local"]["best"]["path"] == str(files["tagged"])  # left alone
+        assert c.get("/api/items/t902").json()["local"]["status"] != "located"
+        log = c.get(f"/api/import/logs/{result['log']}").json()
+        md = c.get(f"/api/import/logs/{result['log_md']}").text
+    assert {u["item_id"] for u in log["location_updates"]} == {"t901", "a950"} and log["counts"]["located_items"] == 2
+    assert "Collection items located to these files (checked or not):" in md
+    assert {d["id"] for k, d in events if k == "item"} >= {"t901", "a950"}
+    assert "t901" not in {e["item_id"] for e in svc.pending_tag_edits()}  # unchecked: its tags stay as they were

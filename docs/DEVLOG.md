@@ -82,6 +82,9 @@ Tests never touch Bandcamp, the music drive or a real rekordbox library: Bandcam
     - 94 files gave 94 rows; 33 were already in the collection and stayed unchecked;
     - the commit gave the new items "#" 947–998 and wrote the log;
     - an album present as MP3 and as AIFF kept the AIFFs.
+  - Location updates (user's addition): collection items the files match that aren't located yet get located
+    to those files at commit, checked or not. Located items and hand-picked locations are left alone. On the
+    clones with nothing located beforehand, 18 items were located this way.
 
 ## App and extension (`app/`, `extension/`, `shared/`, branch `claude/local-collection-ui-e8f6f6`)
 

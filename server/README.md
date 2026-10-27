@@ -367,6 +367,12 @@ import: rows, review, commit, log (`source: "files"`), `modified_at` and "#".
   collection item, or the same artist + title makes the row a duplicate, and it starts unchecked.
 - **On commit:** the file is confirmed for each new item. When the same track came from two folders, the item
   keeps the better format.
+- **Location updates:** collection items that a row's file matches (a row that's a duplicate) but that aren't
+  located yet, and weren't located by hand, are listed in `location_updates: [{item_id, path, release_dir, kind,
+  n, line, title, artist, checked}]` (count in `stats.location_updates`). The commit locates them to those files
+  (an album item to that file's release), **whether or not the row is checked**; the checkbox only decides tags.
+  Items already located are never changed. The commit result has `location_updates` (with `applied`, `status`
+  and `located_path`) and `located_items`, SSE `item` events fire, and the log lists them.
 
 `GET /api/import/files/defaults` → `{folders: [{path, kind, since, last_run, mounted, exists}], remembered,
 default_tags: ["pool"], lookup}`: the owned root and the not-owned `complete` root. Each `since` is the date of
