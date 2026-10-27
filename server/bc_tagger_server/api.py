@@ -102,6 +102,23 @@ class ImportBody(BaseModel):
     name: Optional[str] = None
 
 
+class CollectionBody(BaseModel):
+    name: str
+
+
+class CollectionPatch(BaseModel):
+    name: Optional[str] = None
+    pos: Optional[int] = None
+
+
+class ItemIdsBody(BaseModel):
+    ids: list[str] = Field(max_length=20000)
+
+
+class CommitBody(BaseModel):
+    collection_id: int = 0
+
+
 class BulkRowChanges(BaseModel):
     model_config = ConfigDict(extra="forbid")  # only these two apply to many rows at once
     checked: Optional[bool] = None
@@ -222,13 +239,58 @@ def create_app(service: Service | None = None) -> FastAPI:
         sort: Optional[Literal["order", "modified_at", "date_added"]] = Query(
             None, description='"order" ("#", default; ascending) or a date (newest first; undated earliest)'),
         order: Optional[Literal["desc", "asc"]] = None,
+        collection: str = Query("all", pattern=r"^(all|\d+)$", description='a collection id, or "all" (default)'),
     ) -> list[dict]:
         id_list = [i for i in ids.split(",") if i] if ids else None
         sources = [x for x in source.split(",") if x in ("bandcamp", "other")] if source else None
-        total, page = svc.list_items(q=q, tag=tag, limit=limit, offset=offset, ids=id_list, sources=sources,
-                                     sort=sort, order=order)
+        try:
+            total, page = svc.list_items(q=q, tag=tag, limit=limit, offset=offset, ids=id_list, sources=sources,
+                                         sort=sort, order=order, collection=collection)
+        except KeyError:
+            raise HTTPException(404, f"unknown collection {collection}") from None
         response.headers["X-Total-Count"] = str(total)
         return page
+
+    # -- collections (Phase 8) ---------------------------------------------------------
+
+    def _collection_call(fn, *a):
+        from .membership import CollectionConflict, CollectionError
+
+        try:
+            return fn(*a)
+        except KeyError as e:
+            raise HTTPException(404, f"unknown collection {e}") from e
+        except CollectionConflict as e:
+            raise HTTPException(409, str(e)) from e
+        except CollectionError as e:
+            raise HTTPException(400, str(e)) from e
+
+    @app.get("/api/collections")
+    def collections_list() -> list[dict]:
+        """``[{id, name, pos, count, created_at}]`` by ``pos``; the UI adds All itself."""
+        from .membership import all_collections
+
+        return all_collections(svc.store)
+
+    @app.post("/api/collections")
+    def collections_create(body: CollectionBody) -> dict:
+        return _collection_call(svc.collection_create, body.name)
+
+    @app.patch("/api/collections/{collection_id}")
+    def collections_update(collection_id: int, body: CollectionPatch) -> dict:
+        return _collection_call(svc.collection_update, collection_id, body.name, body.pos)
+
+    @app.delete("/api/collections/{collection_id}")
+    def collections_delete(collection_id: int) -> dict:
+        return _collection_call(svc.collection_delete, collection_id)
+
+    @app.post("/api/collections/{collection_id}/items")
+    def collections_add(collection_id: int, body: ItemIdsBody) -> dict:
+        return _collection_call(svc.collection_add, collection_id, body.ids)
+
+    @app.delete("/api/collections/{collection_id}/items")
+    def collections_remove(collection_id: int, body: ItemIdsBody) -> dict:
+        return _collection_call(svc.collection_remove, collection_id, body.ids)
 
     @app.get("/api/items/{item_id}")
     def item(item_id: str) -> dict:
@@ -455,8 +517,9 @@ def create_app(service: Service | None = None) -> FastAPI:
         return _import_call(imp.apply_tag_mapping, svc, batch_id, body.map, body.unmapped)
 
     @app.post("/api/import/{batch_id}/commit")
-    def import_commit(batch_id: str) -> dict:
-        return _import_call(imp.commit, svc, batch_id)
+    def import_commit(batch_id: str, body: Optional[CommitBody] = None) -> dict:
+        """``{collection_id}``: where the import's items go (default 0, "Collection"); chosen now, at commit."""
+        return _import_call(imp.commit, svc, batch_id, (body or CommitBody()).collection_id)
 
     @app.delete("/api/import/{batch_id}")
     def import_discard(batch_id: str) -> dict:

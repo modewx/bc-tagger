@@ -31,6 +31,24 @@ CREATE INDEX IF NOT EXISTS items_date_added ON items(date_added);
 
 CREATE TABLE IF NOT EXISTS tags (name TEXT PRIMARY KEY, pos INTEGER NOT NULL);
 
+-- Collections (Phase 8): explicit membership for every collection, id 0 "Collection" included. Track data (tags,
+-- location, ownership, previews, rekordbox) stays per item. ``pos`` is the collection's own "#" (collection 0's
+-- follows the item's ``order``, which the extension and imports number); added_at sorts what has none.
+CREATE TABLE IF NOT EXISTS collections (
+    id INTEGER PRIMARY KEY,
+    name TEXT UNIQUE NOT NULL,
+    pos INTEGER,
+    created_at TEXT
+);
+CREATE TABLE IF NOT EXISTS collection_items (
+    collection_id INTEGER NOT NULL,
+    item_id TEXT NOT NULL,
+    pos INTEGER,
+    added_at TEXT NOT NULL,
+    PRIMARY KEY (collection_id, item_id)
+);
+CREATE INDEX IF NOT EXISTS collection_items_item ON collection_items(item_id);
+
 CREATE TABLE IF NOT EXISTS files (
     path TEXT PRIMARY KEY,
     root TEXT NOT NULL,
@@ -253,12 +271,31 @@ class Store:
         if "channels" not in cols:  # rows indexed before these are filled when re-read (AIFF: when played)
             self._conn.execute("ALTER TABLE files ADD COLUMN channels INTEGER")
             self._conn.execute("ALTER TABLE files ADD COLUMN aiff_layout TEXT")
+        if self._conn.execute("SELECT 1 FROM meta WHERE key = 'collections_v1'").fetchone() is None:
+            self._migrate_collections()
         if self._conn.execute("SELECT 1 FROM meta WHERE key = 'file_counts_v1'").fetchone() is None:
             # the triggers keep file_counts from now on; count what's there once
             with self.tx() as c:
                 c.execute("DELETE FROM file_counts")
                 c.execute("INSERT INTO file_counts(root, n) SELECT root, COUNT(*) FROM files GROUP BY root")
                 c.execute("INSERT INTO meta(key, value) VALUES('file_counts_v1', 'true')")
+
+    def _migrate_collections(self) -> None:
+        """Phase 8, once: collection 0 "Collection", holding every item there is (the Bandcamp mirror, unacked
+        pending adds, Other items) with today's "#" as its pos. INSERT OR IGNORE: running it again adds nothing."""
+        ts = now_iso()
+        order = ("CASE WHEN json_type({col}, '{path}') = 'integer' AND json_extract({col}, '{path}') >= 1 "
+                 "THEN json_extract({col}, '{path}') END")
+        with self.tx() as c:
+            c.execute("INSERT OR IGNORE INTO collections(id, name, pos, created_at) VALUES(0, 'Collection', 0, ?)", (ts,))
+            c.execute("INSERT OR IGNORE INTO collection_items(collection_id, item_id, pos, added_at) "
+                      f"SELECT 0, id, {order.format(col='data', path='$.order')}, ? FROM items", (ts,))
+            c.execute("INSERT OR IGNORE INTO collection_items(collection_id, item_id, pos, added_at) "
+                      f"SELECT 0, item_id, {order.format(col='payload', path='$.item.order')}, ? FROM pending_adds "
+                      "WHERE acked_at IS NULL AND item_id IS NOT NULL", (ts,))
+            c.execute("INSERT OR IGNORE INTO collection_items(collection_id, item_id, pos, added_at) "
+                      f"SELECT 0, id, {order.format(col='data', path='$.order')}, ? FROM other_items", (ts,))
+            c.execute("INSERT OR IGNORE INTO meta(key, value) VALUES('collections_v1', ?)", (json.dumps(ts),))
 
     def close(self) -> None:
         with self._lock, self._readers_lock:
@@ -375,6 +412,7 @@ class Store:
             for item_id in deleted:
                 if c.execute("DELETE FROM items WHERE id = ?", (item_id,)).rowcount:
                     removed_ids.append(item_id)
+            c.executemany("DELETE FROM collection_items WHERE item_id = ?", [(i,) for i in removed_ids])
             for item_id, item in items.items():
                 if not isinstance(item, dict):
                     continue
@@ -390,6 +428,16 @@ class Store:
                     (item_id, data, date_added, ts),
                 )
                 changed_ids.append(item_id)
+                order = item.get("order")
+                order = order if isinstance(order, int) and not isinstance(order, bool) and order >= 1 else None
+                if row is None:  # new from the extension, which tags into "Collection": collection 0, unless an
+                    # import already put it somewhere (its pending add carried that membership)
+                    c.execute("INSERT INTO collection_items(collection_id, item_id, pos, added_at) SELECT 0, ?, ?, ? "
+                              "WHERE NOT EXISTS (SELECT 1 FROM collection_items WHERE item_id = ?)",
+                              (item_id, order, ts, item_id))
+                elif order is not None:  # collection 0's "#" is the item's
+                    c.execute("UPDATE collection_items SET pos = ? WHERE collection_id = 0 AND item_id = ?",
+                              (order, item_id))
         return {"upserted": len(items), "changed": len(changed_ids), "removed": len(removed_ids),
                 "changed_ids": changed_ids, "removed_ids": removed_ids}
 

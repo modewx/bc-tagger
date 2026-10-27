@@ -202,6 +202,28 @@ root (downloads and the downloader's folders, XML output, rekordbox backups and 
 first requires the volume to be mounted and the root to exist; folders are only created below an existing
 root. The refusal reads "music drive not mounted: /Volumes/<name> (plug it in; nothing was written)".
 
+## Collections (Phase 8)
+
+Items belong to collections: id 0 "Collection" (what the extension tags into) and any the user creates. Membership is
+explicit (`collection_items`); an item can be in several or in none (it still shows in All). Tags, location,
+ownership, previews and rekordbox stay per item.
+
+- **Migration (once, at start):** every existing item (the Bandcamp mirror, unacked pending adds, Other items) joins
+  collection 0 with its "#" as `pos`. Running it again adds nothing.
+- **Who joins where:** a new item from the extension joins 0, unless it's already in a collection (an import's
+  pending add carries its membership). An import commit (`POST /api/import/<id>/commit {collection_id}`, default 0,
+  chosen at commit) puts every committed row's item into that collection only, in row order (merged items are
+  copied; they stay where they were).
+- **"#":** collection 0's `pos` is the item's `order` (the extension's and imports' numbering); other collections
+  number items as they join. `GET /api/items?collection=<id|all>` (default all) sorts "#" by that collection's
+  `pos`; All by collection 0's, then by when items joined a collection, then items in none.
+- **API:** `GET /api/collections` → `[{id, name, pos, count, created_at}]` by `pos`; `POST /api/collections {name}`;
+  `PATCH /api/collections/<id> {name?, pos?}`; `DELETE /api/collections/<id>` (memberships only; 409 for 0);
+  `POST /api/collections/<id>/items {ids}` → `{added, already, unknown}` (a copy); `DELETE …/items {ids}` →
+  `{removed}`. Every item view has `collections: [ids]`. Names are unique (any case), trimmed, up to 100 characters.
+- **Events:** SSE `collections` `{action: created|renamed|reordered|deleted|items, id, collection?, added?|removed?}`
+  and `item` `{id}` for each membership change.
+
 ## Items: "#", dates and sorting
 
 `order` is an item's "#": an integer from 1, one sequence across both collections, kept where the item lives.

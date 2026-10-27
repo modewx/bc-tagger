@@ -231,6 +231,12 @@ Tests never touch Bandcamp, the music drive or a real rekordbox library: Bandcam
   some):** `PUT /api/import/<id>/rows {ns, changes: {checked?, tags?}}` → `{updated, rows}`. All rows and the batch's
   counts in one transaction, one `import` event. 1,000 rows in one call in a test; a failure at row 500 leaves all
   1,000 as they were.
+- **Phase 8, several collections (user: "I need multiple collections … assume this collection is item 0"):**
+  `collections` and `collection_items` (explicit membership, collection 0 included); a one-time migration put every
+  existing item into collection 0 with its "#" (on a copy of the live data: 1,089 items, the All order identical in
+  both directions, `imp-45e20d7a` byte for byte unchanged). The extension's new items join 0; an import commit
+  chooses its collection (`collection_id`) and adds there only. Collections API, `?collection=` on the item list,
+  `collections: [ids]` on every item.
 
 ## App and extension (`app/`, `extension/`, `shared/`, branch `claude/local-collection-ui-e8f6f6`)
 

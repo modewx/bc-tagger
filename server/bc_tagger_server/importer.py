@@ -1353,9 +1353,16 @@ def apply_tag_mapping(svc, batch_id: str, mapping: dict[str, list[str]], unmappe
 # -- commit ------------------------------------------------------------------------------------------
 
 
-def commit(svc, batch_id: str) -> dict:
+def commit(svc, batch_id: str, collection_id: int = 0) -> dict:
+    """Import the batch's checked rows into ``collection_id`` (chosen now, at commit; "Collection" by default)."""
+    from . import membership
+
     store = svc.store
     batch = load_batch(store, batch_id)
+    try:
+        membership.get(store, collection_id)
+    except KeyError:
+        raise ImportError_(f"there is no collection {collection_id}") from None
     if batch["status"] == "committed":
         raise ImportError_("the batch was already imported")
     if batch["status"] != "ready":
@@ -1365,7 +1372,7 @@ def commit(svc, batch_id: str) -> dict:
     batch.update(status="committing", error=None)
     _save_batch(store, batch)
     try:
-        return _commit(svc, batch, earlier)
+        return _commit(svc, batch, earlier, collection_id)
     except Exception as e:
         batch.update(status="ready", error=f"The import stopped: {type(e).__name__}: {e}. Import again: rows "
                                             "already imported are skipped.")
@@ -1378,7 +1385,9 @@ def commit(svc, batch_id: str) -> dict:
         svc.committing.discard(batch_id)
 
 
-def _commit(svc, batch: dict, earlier: set[int] = frozenset()) -> dict:
+def _commit(svc, batch: dict, earlier: set[int] = frozenset(), collection_id: int = 0) -> dict:
+    from . import membership
+
     store, batch_id = svc.store, batch["batch_id"]
     rows = load_rows(store, batch_id)
     dups = DuplicateIndex(store)
@@ -1396,6 +1405,7 @@ def _commit(svc, batch: dict, earlier: set[int] = frozenset()) -> dict:
         batch["location_updates"] = result["location_updates"]
     used_tags: list[str] = []
     located_now: list[str] = []  # items this commit located (SSE "item" once the commit is done)
+    joined_before = set(membership.members(store, collection_id))
     for row in rows:
         if row.get("checked"):
             used_tags += row["tags"]  # also rows done before a restart: their new tags still count
@@ -1439,12 +1449,16 @@ def _commit(svc, batch: dict, earlier: set[int] = frozenset()) -> dict:
             item = other_put(store, {
                 **row_item(row), "date_added": stamp, "modified_at": stamp, "import_batch": batch_id, "order": order,
                 **{k: row.get(k) for k in OTHER_FIELDS if row.get(k) is not None},
-            })
+            }, collection_id)
             dups.add(item)
             row["committed"] = "other"
             row["commit_info"] = {"item_id": item["id"], "order": order}
             result["other_added"] += 1
             ids["other_added"].append(item["id"])
+        # the row's item joins the chosen collection now, so the collection's "#" follows the rows (a new Other item
+        # joined as it was made; a new Bandcamp item joins while it waits as a pending add)
+        joining = item if row["committed"] in ("pending_add", "other") else {"id": dup["of"]}
+        membership.add_items(store, collection_id, [joining])
         located = row.get("located") or {}
         item_id = (row["duplicate"] or {}).get("of") or row_item(row)["id"]
         confirm = bool(located.get("manual") and located.get("best"))  # the hand-picked file
@@ -1480,6 +1494,12 @@ def _commit(svc, batch: dict, earlier: set[int] = frozenset()) -> dict:
     # what the collection page selects afterwards (sorted by modified_at, newest first): every committed row's
     # item, also those an earlier attempt committed before it stopped
     ids = committed_item_ids(rows)
+    # the import's items are in the chosen collection only (merged ones too: a copy, if they're elsewhere), in row
+    # order, also those an earlier attempt committed before it stopped. New Bandcamp items joined while they wait
+    # as pending adds: the extension's sync then finds them in a collection and leaves them there.
+    result["collection_id"] = collection_id
+    result["collection_added"] = _join_collection(svc, collection_id, [i for _, i in _committed_items(rows)],
+                                                  joined_before)
     result["item_ids"] = ids
     result["selected"] = list(dict.fromkeys(ids["added"] + ids["merged"] + ids["other_added"] + ids["other_merged"]))
     result["modified_at"] = stamp
@@ -1502,6 +1522,22 @@ def _located_files(store, rows: list[dict], updates: list[dict], earlier: set[in
     paths = [t["path"] for r in rows if r.get("committed") and r["n"] not in earlier
              and (r.get("located") or {}).get("status") == "located" for t in located_tracks(r["located"].get("best"))]
     return paths + located_paths(store, [u["item_id"] for u in updates if u.get("applied")])
+
+
+def _join_collection(svc, collection_id: int, item_ids: list[str], joined_before: set[str]) -> int:
+    """Every committed row's item in the collection (rows an earlier, stopped attempt committed too); one ``item``
+    event per item that joined during this commit, and a ``collections`` event. Returns how many joined."""
+    from . import membership
+    from .collection import all_items
+
+    index = {it["id"]: it for it in all_items(svc.store)}
+    membership.add_items(svc.store, collection_id, [index[i] for i in dict.fromkeys(item_ids) if i in index])
+    joined = [i for i in dict.fromkeys(item_ids) if i not in joined_before]
+    for item_id in joined:
+        svc.jobs.bus.publish("item", {"id": item_id})
+    if joined:
+        svc.jobs.bus.publish("collections", {"action": "items", "id": collection_id, "added": len(joined)})
+    return len(joined)
 
 
 _ID_KEYS = {"pending_add": "added", "tag_merge": "merged", "other": "other_added", "other_merge": "other_merged"}
@@ -1541,10 +1577,12 @@ def last_committed(svc) -> dict[str, Any]:
                  if b.get("status") == "committed" and b.get("committed_at")]
     best = max(committed, key=when, default=None)
     if best is None:
-        return {"batch_id": None, "name": None, "kind": None, "committed_at": None, "item_ids": [], "by_outcome": {}}
+        return {"batch_id": None, "name": None, "kind": None, "committed_at": None, "collection_id": None,
+                "item_ids": [], "by_outcome": {}}
     rows = load_rows(svc.store, best["batch_id"])
     return {"batch_id": best["batch_id"], "name": best.get("name"), "kind": best.get("kind") or "json",
             "committed_at": best["committed_at"],
+            "collection_id": (best.get("commit_result") or {}).get("collection_id", 0),
             "item_ids": list(dict.fromkeys(item_id for _, item_id in _committed_items(rows))),
             "by_outcome": committed_item_ids(rows)}
 
