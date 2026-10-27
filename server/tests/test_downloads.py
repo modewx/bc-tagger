@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 
 import pytest
@@ -325,3 +326,25 @@ def test_downloads_are_kept_for_the_import_log(svc):
     assert other["outcome"] == "merged" and other["item_id"] == "t300"
     assert [(d["ref"], d["state"], d["message"]) for d in other["downloads"]] == [("t300", "failed", "not owned")]
     assert result["log"].endswith(f"_dl_{bid}.json")
+
+
+def test_an_import_rows_download_locates_the_collection_items_too(svc):
+    """Downloading from an import row (here the full release) also locates the collection's items of that
+    release, so the collection shows them at once."""
+    svc.store.upsert_items({"t102": {"title": "Song C", "artist": "Artist A", "album_title": "Album A",
+                                     "album_id": "a10", "track_num": 3}})
+    rel = json.loads(Path(os.environ["BC_TAGGER_STUB_RELEASES"]).read_text())
+    rel["a10"]["tracks"] = ["Song A", "Song B", "Song C"]
+    Path(os.environ["BC_TAGGER_STUB_RELEASES"]).write_text(json.dumps(rel))
+    batch = importer.create_batch(svc, {"format": "bc-tagger-import/1", "items": [
+        {"line": 1, "artist": "Artist A", "title": "Song A", "album": "Album A", "tags": []}]}, ["must"])
+    bid = batch["batch_id"]
+    importer.link_row(svc, bid, 0, {"item": {"id": "t100", "title": "Song A", "artist": "Artist A",
+                                             "album_title": "Album A", "album_id": "a10"}})
+    b = importer.load_batch(svc.store, bid)
+    b["status"] = "ready"
+    importer._save_batch(svc.store, b)
+    result = downloads.run(svc, [f"{bid}:0"], full_release=True)
+    assert result["releases"][0]["release"] == "a10" and by_ref(result)[f"{bid}:0"]["located"]
+    for item_id in ("t100", "t101", "t102"):  # the row's item and the rest of the album
+        assert svc.get_item_view(item_id)["local"]["status"] == "located", item_id

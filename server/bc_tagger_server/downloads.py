@@ -129,14 +129,27 @@ def _index_folder(svc, folder: str | None) -> int:
     return n
 
 
-def _locate_refs(svc, entries: list[dict]) -> dict[str, bool]:
+def _album_of(item: dict) -> str | None:
+    album = item.get("album_id")
+    return f"a{album}" if isinstance(album, int) else album
+
+
+def _locate_refs(svc, entries: list[dict], release: str | None = None) -> dict[str, bool]:
+    """Locate the downloaded refs: collection items, and import rows (the row, and the collection item it
+    is, if any). With ``release`` (after a download), also the collection's other items of that release, so
+    a full release or an import row's download shows up in the collection at once."""
     from . import importer
+    from .collection import all_items
 
     located: dict[str, bool] = {}
-    items = [e["item_id"] for e in entries if ":" not in e["ref"]]
+    collection = {it["id"]: it for it in all_items(svc.store)}
+    items = {e["item_id"] for e in entries if e.get("item_id") in collection}
+    if release:
+        items |= {i for i, it in collection.items() if i == release or _album_of(it) == release}
     if items:
-        for s in svc.locate(ids=items, scan="none")["items"]:
+        for s in svc.locate(ids=sorted(items), scan="none")["items"]:
             located[s["id"]] = s["status"] == "located"
+            svc.jobs.bus.publish("item", {"id": s["id"]})
     for e in entries:
         if ":" in e["ref"]:
             batch_id, _, n = e["ref"].rpartition(":")
@@ -286,7 +299,7 @@ def _run_releases(svc, p: dict, by_ref: dict, force: bool, ctx, job_id, publish,
                 res, entries = res_by[release], entries_of[release]
                 active.pop(release, None)
                 indexed = _index_folder(svc, res.get("folder")) if res["ok"] else 0
-                located = _locate_refs(svc, entries) if res["ok"] else {}
+                located = _locate_refs(svc, entries, release) if res["ok"] else {}
                 for e in entries:
                     message = MESSAGES[res["outcome"]]
                     if res["outcome"] == "failed" and stop and "not mounted" in stop:
