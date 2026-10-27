@@ -334,8 +334,11 @@ to the server's `other` collection with Bandcamp/Discogs/YouTube links. Each com
 its item that location right away (new items always; a merged item only if it wasn't located already, or the row
 confirms it), with SSE `item` events, so the collection shows it located without a Locate (`items_located`).
 The commit result lists
-`item_ids {added, merged, other_added, other_merged}`, `selected` and the `modified_at` it stamped, so the
-collection page can select exactly what the import added or merged and sort it to the top.
+`item_ids {added, merged, other_added, other_merged}` (every committed row's item, also those an earlier, stopped
+attempt committed), `selected` and the `modified_at` it stamped, so the collection page can select exactly what the
+import added or merged and sort it to the top. `GET /api/import/last-committed` → `{batch_id, name, kind,
+committed_at, item_ids, by_outcome}` gives the newest committed batch's items in row order ("Select last import";
+nulls before the first commit).
 
 More import options:
 

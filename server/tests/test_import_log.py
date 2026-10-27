@@ -158,3 +158,36 @@ def test_log_folder_is_never_in_a_root_or_on_the_music_drive(svc, tmp_path):  # 
     folder, warning = importlog.log_dir(svc)
     assert folder == logs_dir(svc) and "not mounted" in warning and str(logs_dir(svc)) in warning
     assert not Path("/Volumes/bc-tagger-no-such-drive").exists()
+
+
+def test_last_committed_lists_every_item_of_the_newest_import(svc, monkeypatch):  # noqa: F811
+    with TestClient(create_app(svc)) as c:
+        assert c.get("/api/import/last-committed").json()["batch_id"] is None
+    first = run(svc, recorded_rows()[:3])
+    importer.apply_tag_mapping(svc, first["batch_id"], {}, "create")
+    importer.commit(svc, first["batch_id"])
+    batch = run(svc, recorded_rows())
+    bid = batch["batch_id"]
+    importer.apply_tag_mapping(svc, bid, {}, "create")
+    real, calls = importer.queue_add, []
+
+    def flaky(store, **kw):  # the commit stops part way, then the retry finishes it
+        calls.append(kw)
+        if len(calls) == 3:
+            raise OSError("disk full")
+        return real(store, **kw)
+
+    monkeypatch.setattr(importer, "queue_add", flaky)
+    with pytest.raises(OSError):
+        importer.commit(svc, bid)
+    monkeypatch.setattr(importer, "queue_add", real)
+    result = importer.commit(svc, bid)
+    committed = [r for r in importer.load_rows(svc.store, bid) if r.get("committed")]
+    expected = list(dict.fromkeys(r["commit_info"]["item_id"] for r in committed))
+    # both attempts' items, not only the retry's
+    assert sum(len(v) for v in result["item_ids"].values()) == len(expected)
+    with TestClient(create_app(svc)) as c:
+        last = c.get("/api/import/last-committed").json()
+    assert last["batch_id"] == bid and last["kind"] == "json" and last["name"] == "test"
+    assert last["item_ids"] == expected and last["committed_at"] == importer.load_batch(svc.store, bid)["committed_at"]
+    assert last["by_outcome"] == result["item_ids"]
