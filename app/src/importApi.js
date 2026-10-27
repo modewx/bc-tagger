@@ -138,6 +138,7 @@ export function normBatch(b) {
     lookupVia: b.lookup === "browser" ? "browser" : "server", // who makes the Bandcamp requests
     estimate: b.estimate || null, // {lookups, cached, requests, seconds, interval_s, text}
     logs: Array.isArray(b.logs) ? b.logs : [], // its import logs (JSON file names), oldest first
+    uncreatedTags: Array.isArray(b.uncreated_tags) ? b.uncreated_tags : [], // the rows' tags not in the tag list yet
     rows,
   };
 }
@@ -183,6 +184,11 @@ export async function fileImportDefaults() {
     lookup: d.lookup === "browser" ? "browser" : "server",
   };
 }
+
+// Add tags to the tag list now (→ {created, existing, tags}); the extension gets them too.
+export const createTags = (tags) => apiJson("/api/tags/create", { method: "POST", body: { tags } });
+// Settings → Rekordbox with these tags pointed out in the tag → playlist mapping.
+export const mapTagsUrl = (tags) => `/settings/#rekordbox/${encodeURIComponent(`tags=${tags.join(",")}`)}`;
 
 // Change an open batch's default tags: `all` puts them on every row, else only on untagged rows.
 export const setDefaultTags = (id, tags, all) =>

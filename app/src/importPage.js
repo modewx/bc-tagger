@@ -13,7 +13,7 @@ import { Jobs, progressText, resultText } from "./jobs";
 import { buildNav } from "./nav";
 import { sourceColumn, localPlayUrl } from "./columns";
 import { openPopover, closePopover } from "./popover";
-import { getBatch, updateRow, commitBatch, discardBatch, resumeLookups, setDefaultTags, relocateRows, relocateRow, searchFiles, listFolder, rowToItem, matchSource, bandcampSearchUrl, openOnBandcampUrl, cleanBandcampUrl } from "./importApi";
+import { createTags, mapTagsUrl, getBatch, updateRow, commitBatch, discardBatch, resumeLookups, setDefaultTags, relocateRows, relocateRow, searchFiles, listFolder, rowToItem, matchSource, bandcampSearchUrl, openOnBandcampUrl, cleanBandcampUrl } from "./importApi";
 import { statsLine } from "./importTab";
 import { rememberImport } from "./openImport";
 import { downloadFileTitle, downloadFlow, fullReleaseOf, fullReleasesToggle, stateLabel, trackDownloads } from "./downloads";
@@ -119,6 +119,38 @@ defaultsAll.addEventListener("change", async () => {
   await page.reload();
   renderInfo();
 });
+// At the top: the rows' tags that aren't in the tag list yet, and Create New Tags;
+// then a link to map them to playlists. Transfer doesn't wait for either.
+const newTags = el("div", "import-new-tags");
+newTags.id = "newTagsBar";
+newTags.hidden = true;
+let createdTags = null; // what Create New Tags made, for the link afterwards
+function renderNewTags() {
+  const pending = batch.committed ? [] : batch.uncreatedTags;
+  newTags.innerHTML = "";
+  newTags.hidden = !pending.length && !createdTags;
+  if (pending.length) {
+    const btn = el("button", "mini-btn", "Create New Tags");
+    btn.id = "createNewTags";
+    btn.addEventListener("click", async () => {
+      btn.disabled = true;
+      try {
+        const r = await createTags(pending);
+        createdTags = [...(r.created || []), ...(r.existing || [])].filter((t) => pending.includes(t));
+        batch = await getBatch(batchId);
+      } catch (e) {
+        page.statusEl.textContent = `Couldn't create the tags: ${e.message}`;
+      }
+      renderNewTags();
+    });
+    newTags.append(`${pending.length} tag${pending.length > 1 ? "s" : ""} in these rows ${pending.length > 1 ? "aren't" : "isn't"} in your tag list yet: ${pending.join(", ")}. `, btn);
+  } else if (createdTags) {
+    const link = el("a", "", "Map them to rekordbox playlists →");
+    link.id = "mapNewTags";
+    link.href = mapTagsUrl(createdTags);
+    newTags.append(`Created: ${createdTags.join(", ")}. `, link);
+  }
+}
 const unavailable = el("div", "import-unavailable");
 unavailable.id = "lookupUnavailable";
 // Import from Files: collection items that aren't located yet get their file on commit.
@@ -142,7 +174,7 @@ showSel.id = "importShow";
 SHOW.forEach(([v, label]) => showSel.appendChild(new Option(label, v)));
 const showLabel = el("label", "import-show-label", "Show ");
 showLabel.appendChild(showSel);
-info.append(title, stats, showLabel, defaults, unavailable, locations, pending, proc);
+info.append(title, newTags, stats, showLabel, defaults, unavailable, locations, pending, proc);
 const showFilter = (item) => (SHOW.find(([v]) => v === showSel.value) || SHOW[0])[2](rowNow(item));
 
 function renderLocations() {
@@ -176,6 +208,7 @@ function renderLocations() {
 function renderInfo() {
   if (!batch) return;
   title.textContent = `Import preview · ${batch.source || batch.id}`;
+  renderNewTags();
   renderLocations();
   defaultsText.textContent = `Default tags: ${batch.defaultTags.join(", ") || "none"} · `;
   defaults.hidden = !batch.defaultTags.length || batch.committed;

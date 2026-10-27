@@ -606,6 +606,7 @@ function showTab(id, arg) {
   const bar = document.getElementById("saveBar");
   if (bar) bar.hidden = id === "import";
   if (id === "import" && importTab) importTab.show(arg);
+  if (id === "rekordbox" && mapping && arg && arg.startsWith("tags=")) mapping.focusTags(arg.slice(5).split(",").filter(Boolean));
 }
 
 function fill(data) {

@@ -2725,7 +2725,21 @@ test("Import from Files: folders prefilled with their dates, rows by folder unde
     await page.waitForFunction((k) => !document.querySelector(`tr[data-key="${k}"] .row-check`).checked, dup);
     await waitFor(() => api(`/api/import/${batchId}`).then((b) => b.rows.every((r) => r.checked === !r.duplicate)), { what: "the ticks saved" });
     assert.equal(await page.isChecked(`tr[data-key="${first}"] .row-check`), true);
+    // A tag the rows use that isn't in the tag list yet: "Create New Tags" at the top.
+    const NEW_TAG = "e2e-new-tag";
+    const firstRow = (await api(`/api/import/${batchId}`)).rows.find((r) => r.title === "First");
+    await api(`/api/import/${batchId}/rows/${firstRow.n}`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ tags: [...firstRow.tags, NEW_TAG] }),
+    });
+    await page.reload();
+    await page.waitForSelector("#newTagsBar:not([hidden]) #createNewTags");
+    await shot("files-new-tags.png", ".import-info");
+    assert.match(await page.textContent("#newTagsBar"), new RegExp(`isn't in your tag list yet: ${NEW_TAG}\\.`));
+    assert.equal(await page.evaluate(() => document.querySelector(".import-info").firstElementChild.nextElementSibling.id), "newTagsBar", "at the top");
     // Transfer to rekordbox: the ticked rows, a dry run first (cancelled here: nothing written, nothing added).
+    // It doesn't wait for the new tag: the dialog says where each tag goes, the new one pointed out.
     const exportPosts = [];
     page.on("request", (r) => r.method() === "POST" && new URL(r.url()).pathname === "/api/rekordbox/export" && exportPosts.push(r.postDataJSON()));
     assert.equal(await page.textContent("#transferToRekordbox"), "Transfer to rekordbox (3)…");
@@ -2739,9 +2753,26 @@ test("Import from Files: folders prefilled with their dates, rows by folder unde
       null,
       { timeout: 60000 }
     );
-    if (await page.$(".confirm-dialog .dialog-cancel")) await page.click(".confirm-dialog .dialog-cancel");
+    assert.ok(await page.$(".confirm-dialog .tag-playlists"), "tag → playlists in the dialog");
+    assert.match(await page.textContent(".confirm-dialog h3"), /^Transfer 3 rows to rekordbox \(not added to your collection here\)\?$/);
+    await shot("files-transfer-dialog.png");
+    assert.match(await page.textContent(".confirm-dialog .tag-playlists"), new RegExp(`${NEW_TAG} \\(new tag\\) → `));
+    assert.match(await page.getAttribute(".confirm-dialog .map-tags-link", "href"), new RegExp(`^/settings/#rekordbox/tags%3D.*${NEW_TAG}`));
+    await page.click(".confirm-dialog .dialog-cancel");
     await page.waitForFunction(() => /^Transfer to rekordbox: (done|error)/.test(document.getElementById("refreshStatus").textContent));
     assert.equal(exportPosts.length, 1, "only the dry run");
+    // Create New Tags: in the tag list now; then a link to map it, which Settings opens with the tag pointed out.
+    await page.click("#createNewTags");
+    await page.waitForSelector("#mapNewTags");
+    assert.match(await page.textContent("#newTagsBar"), new RegExp(`^Created: ${NEW_TAG}\\.`));
+    assert.ok((await api("/api/tags")).includes(NEW_TAG));
+    const mapUrl = await page.getAttribute("#mapNewTags", "href");
+    const settings = await context.newPage();
+    await settings.goto(SERVER + mapUrl);
+    await settings.waitForSelector(".mapping-focus-note:not([hidden])");
+    assert.match(await settings.textContent(".mapping-focus-note"), new RegExp(`New tags: ${NEW_TAG}\\.`));
+    assert.equal(await settings.isVisible("#sec_rb_playlists"), true, "the Rekordbox tab");
+    await settings.close();
     // Locations to update: the duplicate's collection item isn't located, so it gets this file on commit,
     // ticked or not; an item already located isn't listed.
     await page.waitForSelector("#locationUpdates:not([hidden])");

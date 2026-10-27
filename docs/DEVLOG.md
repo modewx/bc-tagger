@@ -125,7 +125,12 @@ npm run test:e2e                         # Playwright e2e: own profile, server :
     on commit, ticked or not. The preview's "#" is the row's own place. e2e uses a fixture tree with real file
     dates on the test server.
   - Import preview: **Select all**, **Select new only**, and **Transfer to rekordbox** (A's `rows` export: the ticked
-    rows, not added to the collection).
+    rows, not added to the collection). Transfer doesn't wait for tags to be created or mapped.
+    - The dialog lists `tag_playlists` (new tags and tags that won't be exported are pointed out) with a link to map
+      them.
+    - **Create New Tags** at the top of the preview (`uncreated_tags`, `POST /api/tags/create`) is followed by "Map
+      them to rekordbox playlists →". `#rekordbox/tags=a,b` opens Settings with those tags pointed out in the mapping
+      editor.
   - **New tags reach open pages again:** an update or a dev reload cuts off the content script in tabs already
     open. The background now injects a fresh one into Bandcamp and local-app tabs (the `scripting` permission). It
     drops the old copy's widgets, and a cut-off app bridge stays quiet. The Bandcamp tagger also follows storage

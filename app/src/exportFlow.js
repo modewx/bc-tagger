@@ -62,7 +62,7 @@ export function diffView(d, target) {
   const removed = per ? per.reduce((n, p) => n + count(p.remove), 0) : count(d.entries_removed);
   const ul = el("ul");
   [
-    `${count(d.content_added)} tracks added to the collection (${count(d.content_existing)} already there)`,
+    `${count(d.content_added)} tracks added to rekordbox's collection (${count(d.content_existing)} already there)`,
     `${count(d.playlists_created)} new playlists` +
       (count(d.folders_created) ? `, ${count(d.folders_created)} new folders` : d.folder && d.folder.created ? ` and the folder "${d.folder.name}"` : ""),
     `${added} playlist entries added, ${removed} removed`,
@@ -70,6 +70,26 @@ export function diffView(d, target) {
   if (count(d.skipped_items)) ul.appendChild(el("li", `${count(d.skipped_items)} items skipped (not located)`));
   if (count(d.failed_files)) ul.appendChild(el("li", `${count(d.failed_files)} files rekordbox can't take`));
   wrap.appendChild(ul);
+
+  // Where each tag goes (the tag → playlist mapping): new tags and tags that aren't exported pointed out,
+  // with a link to map them.
+  const tp = Array.isArray(d.tag_playlists) ? d.tag_playlists : [];
+  if (tp.length) {
+    const block = listBlock("Tags → playlists", tp, (t) =>
+      `${t.tag}${t.new ? " (new tag)" : ""} → ${(t.playlists || []).length ? t.playlists.join(", ") : "not exported (no playlist)"}`
+    );
+    block.classList.add("tag-playlists");
+    const toMap = tp.filter((t) => t.new || !(t.playlists || []).length).map((t) => t.tag);
+    if (toMap.length) {
+      const a = el("a", "Map these tags in Settings →");
+      a.href = `/settings/#rekordbox/${encodeURIComponent(`tags=${toMap.join(",")}`)}`;
+      a.target = "_blank";
+      a.className = "map-tags-link";
+      block.appendChild(a);
+      block.open = true;
+    }
+    wrap.appendChild(block);
+  }
 
   if (Array.isArray(d.folders_created) && d.folders_created.length) {
     wrap.appendChild(listBlock("Folders to create", d.folders_created, (p) => p));
@@ -157,7 +177,12 @@ export async function runExport(jobs, selection, onProgress, { ask = false } = {
   const ok = await confirmDialog({
     id: "exportConfirm",
     danger: target === "main",
-    title: target === "main" ? `Export ${n} items to your MAIN rekordbox library?` : `Export ${n} items to rekordbox?`,
+    // Import rows (Transfer to rekordbox) don't join the bc-tagger collection.
+    title: selection.rows
+      ? `Transfer ${n} rows to ${target === "main" ? "your MAIN rekordbox library" : "rekordbox"} (not added to your collection here)?`
+      : target === "main"
+      ? `Export ${n} items to your MAIN rekordbox library?`
+      : `Export ${n} items to rekordbox?`,
     body: diffView(d, target),
     confirmLabel: target === "main" ? "Write to my main library" : "Export",
     confirmDisabled: blockers.length > 0 || d.can_confirm === false,

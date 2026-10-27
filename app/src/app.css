@@ -221,3 +221,6 @@ button.chip:hover { filter: brightness(0.95); border-color: #bbb; }
 .import-locations summary { cursor: pointer; font-weight: 600; }
 .import-locations .location-list { margin: 6px 0 2px; padding-left: 18px; max-height: 200px; overflow-y: auto; font-size: 12px; }
 .import-locations .loc-path { font-size: 11px; color: #555; overflow-wrap: anywhere; }
+/* The rows' tags not in the tag list yet (Create New Tags), at the top of the preview. */
+.import-new-tags { margin: 6px 0; padding: 6px 10px; background: #fff8e1; border: 1px solid #f0d68a; border-radius: 6px; font-size: 13px; }
+.import-new-tags[hidden] { display: none; }

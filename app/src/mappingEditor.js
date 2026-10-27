@@ -29,6 +29,8 @@ export function createMappingEditor({ onChange }) {
   let folder = "bc-tagger";
   let playlists = null; // [{path, name, kind, count}] or null when unavailable
   let filter = "";
+  let focus = []; // tags to point out (Settings → #rekordbox/tags=a,b, from an import)
+  let scrolled = false;
 
   const root = el("div", "mapping");
   const autoLabel = el("label", "mapping-auto");
@@ -56,7 +58,9 @@ export function createMappingEditor({ onChange }) {
   datalist.id = "playlistOptions";
   const rows = el("div", "mapping-rows");
   panel.append(help, head, warning, source, datalist, rows);
-  root.append(autoLabel, panel);
+  const focusNote = el("div", "mapping-focus-note");
+  focusNote.hidden = true;
+  root.append(autoLabel, focusNote, panel);
 
   // --- name resolution ----------------------------------------------------------
 
@@ -89,7 +93,7 @@ export function createMappingEditor({ onChange }) {
   // --- rendering ------------------------------------------------------------------
 
   function tagsToShow() {
-    const extra = Object.keys(map).filter((t) => !vocab.includes(t));
+    const extra = [...Object.keys(map), ...focus].filter((t, i, all) => !vocab.includes(t) && all.indexOf(t) === i);
     return [...vocab, ...extra];
   }
 
@@ -121,10 +125,19 @@ export function createMappingEditor({ onChange }) {
     return row;
   }
 
+  // Once the tags are listed: to the first pointed-out one (or the note, in Auto mode).
+  function scrollToFocus() {
+    if (scrolled || !focus.length) return;
+    const first = rows.querySelector(".map-row.map-focus");
+    if (mode === "custom" && !first) return;
+    (mode === "custom" ? first : focusNote).scrollIntoView({ block: "center" });
+    scrolled = true;
+  }
+
   function render() {
     rows.innerHTML = "";
     tagsToShow().forEach((tag) => {
-      const row = el("div", "map-row");
+      const row = el("div", "map-row" + (focus.includes(tag) ? " map-focus" : ""));
       row.dataset.tag = tag;
       const name = el("div", "map-tag", tag);
       const list = el("div", "map-entries");
@@ -195,6 +208,12 @@ export function createMappingEditor({ onChange }) {
     warning.hidden = mode !== "custom" || mapped > 0;
     panel.hidden = mode !== "custom";
     autoBox.checked = mode !== "custom";
+    focusNote.hidden = !focus.length;
+    focusNote.textContent = !focus.length
+      ? ""
+      : mode === "custom"
+      ? `New tags: ${focus.join(", ")} (highlighted below). Give each the playlists it goes to; a tag left empty isn't exported.`
+      : `New tags: ${focus.join(", ")}. In Auto mode each one gets its own playlist, named like the tag. Untick Auto to choose playlists.`;
   }
 
   // Read the inputs back into `map` (a tag with every name removed: [], not exported).
@@ -239,6 +258,7 @@ export function createMappingEditor({ onChange }) {
       vocab = Array.isArray(tags) ? tags : [];
       const added = mode === "custom" && prefill(); // new tags start with their own name
       render();
+      scrollToFocus();
       if (added) onChange();
     },
     setTargetFolder(name) {
@@ -250,6 +270,14 @@ export function createMappingEditor({ onChange }) {
       playlists = Array.isArray(list) ? list : null;
       renderOptions();
       repaint();
+    },
+    // Point out these tags (e.g. an import's new ones): listed, highlighted, scrolled to.
+    focusTags(tags) {
+      focus = Array.isArray(tags) ? tags.filter(Boolean) : [];
+      scrolled = false;
+      if (mode === "custom") prefill();
+      render();
+      scrollToFocus();
     },
     // Any entry that can't work (folder, smart playlist, bad path)?
     problems: () => [...rows.querySelectorAll(".map-status.bad")].length,
