@@ -12,6 +12,7 @@ from fastapi import Body, FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, JSONResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
+from starlette.concurrency import run_in_threadpool
 from pydantic import BaseModel, Field
 
 from .config import PRESETS, SettingsError
@@ -23,6 +24,7 @@ log = logging.getLogger(__name__)
 ALLOWED_ORIGIN_RE = r"^(chrome-extension://[a-p]{32}|http://(127\.0\.0\.1|localhost)(:\d+)?)$"
 ALLOWED_HOSTS = {"127.0.0.1", "localhost", "testserver"}
 LOOPBACK = {"127.0.0.1", "::1", "testclient"}  # testclient: FastAPI's TestClient
+LINK_CANDIDATE_SLOTS = 2
 
 
 class SyncItemsBody(BaseModel):
@@ -337,9 +339,17 @@ def create_app(service: Service | None = None) -> FastAPI:
             raise HTTPException(400, "send item (null to unlink) or tralbum")
         return _import_call(imp.link_row, svc, batch_id, n, payload)
 
+    link_slots = asyncio.Semaphore(LINK_CANDIDATE_SLOTS)
+
     @app.post("/api/import/link-candidates")
-    def import_link_candidates(body: LinkBody) -> list[dict]:
-        return _import_call(imp.link_candidates, svc, body.model_dump(exclude_unset=True))
+    async def import_link_candidates(request: Request, body: LinkBody) -> list[dict]:
+        """At most ``LINK_CANDIDATE_SLOTS`` at a time: the extension asks for every item of a Bandcamp page at once,
+        which would otherwise take every CPU slice from the page loads. A request the extension already gave up on
+        (it waits 4 s) isn't computed."""
+        async with link_slots:
+            if await request.is_disconnected():
+                return []
+            return await run_in_threadpool(_import_call, imp.link_candidates, svc, body.model_dump(exclude_unset=True))
 
     @app.get("/api/import/{batch_id}/lookups")
     def import_lookups(batch_id: str, limit: int = 20) -> dict:
@@ -559,6 +569,11 @@ def create_app(service: Service | None = None) -> FastAPI:
         return {"build_id": svc.build_id()}
 
     # -- the built local app -----------------------------------------------------------
+
+    from .reqlog import RequestLog
+
+    # outermost: times every request, and names the threads when one stalls
+    app.add_middleware(RequestLog, extra=lambda: f"store lock: {svc.store._lock!r}")
 
     dist = svc.settings.app_dist_dir()
     if dist.is_dir():

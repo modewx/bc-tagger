@@ -88,6 +88,22 @@ def test_export_layout_and_idempotency(svc, library, test_db):
     assert view["status"] == "exported" and view["playlists"] == [f"/{FOLDER}/closer", f"/{FOLDER}/must"]
 
 
+def test_item_lists_read_the_views_in_bulk(svc, library, test_db):
+    """``/api/items`` reads locate results, ownership and rekordbox entries once for all items: the same views."""
+    from bc_tagger_server.collection import all_items
+    from bc_tagger_server.views import ViewData, item_view
+
+    export(svc, ids=["a100", "t200", "t300", "t400"])
+    svc.set_ownership(["a100", "t300"], "extension", full=True)
+    db, rule, items = svc.db_path(), svc.playlist_rule(), all_items(svc.store)
+    data = ViewData(svc.store, db)
+    bulk = [item_view(svc.store, it, db, rule, data) for it in items]
+    assert bulk == [item_view(svc.store, it, db, rule) for it in items]
+    assert {v["id"]: (v["rekordbox"]["status"], v["owned"]["status"]) for v in bulk} == {
+        "a100": ("exported", "owned"), "t200": ("exported", "not_owned"), "t300": ("exported", "owned"),
+        "t400": ("none", "not_owned")}
+
+
 def _user_adds(test_db, playlist_name, path):
     """Simulate the user adding a track to a playlist inside rekordbox."""
     with rbguard.database(test_db, for_write=True, **GUARD) as db:

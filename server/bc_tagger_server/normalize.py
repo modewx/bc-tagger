@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import re
 import unicodedata
+from functools import lru_cache, wraps
 
 _SPECIAL = str.maketrans({"æ": "ae", "Æ": "ae", "ø": "o", "Ø": "o", "ß": "ss", "œ": "oe", "Œ": "oe", "đ": "d", "ł": "l", "Ł": "l"})
 _NON_ALNUM = re.compile(r"[^0-9a-z]+")
@@ -15,6 +16,19 @@ _SIDE_PREFIX = re.compile(r"^\s*[a-dA-D][1-9]\s*[-.:)]?\s+(?=\S)")
 _SLUG_SEP = re.compile(r"[-_]+")
 
 
+def _memo(fn):
+    """Remember results for string arguments: matching normalizes the same titles over and over (every
+    link-candidates call scores all open import rows)."""
+    cached = lru_cache(maxsize=1 << 16)(fn)
+
+    @wraps(fn)
+    def call(s):
+        return cached(s) if s is None or isinstance(s, str) else fn(s)
+
+    return call
+
+
+@_memo
 def fold(s: str | None) -> str:
     """Lowercase, strip accents, map a few special letters (æ -> ae)."""
     if not s:
@@ -25,6 +39,7 @@ def fold(s: str | None) -> str:
     return s.casefold()
 
 
+@_memo
 def norm(s: str | None) -> str:
     """Folded, '&' -> 'and', punctuation -> spaces, whitespace collapsed."""
     s = fold(s).replace("&", " and ").replace("+", " and ")
@@ -34,6 +49,7 @@ def norm(s: str | None) -> str:
 _GLUED_DIGITS = re.compile(r"(?<=[a-z])(?=\d)")
 
 
+@_memo
 def norm_title(s: str | None) -> str:
     """Like ``norm`` but drops '(Original Mix)' noise and Mixed In Key '- 11A - 82' suffixes,
     and splits digits glued to words ('Sfire2' -> 'sfire 2')."""

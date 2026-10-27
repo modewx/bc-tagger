@@ -116,6 +116,27 @@ Tests never touch Bandcamp, the music drive or a real rekordbox library: Bandcam
   - The extension's periodic full sync rewrites and announces only items that changed (it returns `changed`).
     Before, every open tab re-read all items every 15 minutes. The tag list announces only a real change too.
   - The build id (asked every few seconds by each tab) is cached for 2 s.
+- **A 45 s stall after the 01:16 rebuild, found and fixed.**
+  - What happened: every open tab reloaded at once, and the Bandcamp tabs asked `link-candidates` for every
+    item on their pages. Each of those calls parsed all 1,591 open import rows (5.2 MB of JSON) while holding
+    the Store's single lock. `/api/items` runs about 5,000 small queries, each needing that lock, so it waited
+    behind them. Most of the 40 worker threads sat waiting on the lock, so new requests also waited for a free
+    thread.
+  - Reproduced on a copy (10 tabs, 40 `link-candidates`, a full sync): 10.5 s, with 36 threads waiting on
+    the Store lock in the stack dump.
+  - Fixes:
+    - Reads use a pool of up to 8 SQLite read connections instead of the write lock. A thread inside `tx`
+      still reads through its own connection, so it sees its own writes.
+    - `link-candidates`: the open rows are kept slimmed in memory until an import row changes (a trigger-kept
+      version). Title normalization is memoized: 128 → 53 ms per call, 0.2 ms when the same item is asked
+      again. At most two run at once, and requests the extension already gave up on are skipped.
+    - `/api/items` reads locate results, ownership and rekordbox entries once for all items:
+      0.13 → 0.07 s, with identical views.
+    - The mount table comes from `getfsstat(MNT_NOWAIT)` (0.1 ms, no process spawned); `mount` is the fallback.
+  - After the fixes, the same load finishes in 3–5 s, all of it CPU, with light requests under 1 s. A
+    normal reload (6 tabs, 15 `link-candidates`, unchanged sync) finishes in 1.2 s.
+  - To catch the next one: every request is logged with its time and duration. A request over 5 s dumps
+    every thread's stack and the Store lock's owner.
 
 ## App and extension (`app/`, `extension/`, `shared/`, branch `claude/local-collection-ui-e8f6f6`)
 

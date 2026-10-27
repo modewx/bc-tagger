@@ -1,11 +1,14 @@
 """SQLite state: the items/tags mirror plus local-only data.
 
-One connection shared across threads behind a lock; the server's write volume is tiny.
+Writes go through one connection behind a lock (``tx``); the server's write volume is tiny. Reads outside a
+transaction use a small pool of their own connections (WAL lets them run beside a write), so a page load never
+waits behind another request's queries or a long write.
 """
 
 from __future__ import annotations
 
 import json
+import queue
 import sqlite3
 import threading
 from contextlib import contextmanager
@@ -151,6 +154,18 @@ CREATE TABLE IF NOT EXISTS import_rows (
     PRIMARY KEY (batch_id, n)
 );
 
+-- Bumped by triggers on every write to a table, so caches built from it know when to rebuild.
+CREATE TABLE IF NOT EXISTS data_versions (name TEXT PRIMARY KEY, n INTEGER NOT NULL);
+CREATE TRIGGER IF NOT EXISTS import_rows_insert AFTER INSERT ON import_rows BEGIN
+    INSERT INTO data_versions(name, n) VALUES('import_rows', 1) ON CONFLICT(name) DO UPDATE SET n = n + 1;
+END;
+CREATE TRIGGER IF NOT EXISTS import_rows_update AFTER UPDATE ON import_rows BEGIN
+    INSERT INTO data_versions(name, n) VALUES('import_rows', 1) ON CONFLICT(name) DO UPDATE SET n = n + 1;
+END;
+CREATE TRIGGER IF NOT EXISTS import_rows_delete AFTER DELETE ON import_rows BEGIN
+    INSERT INTO data_versions(name, n) VALUES('import_rows', 1) ON CONFLICT(name) DO UPDATE SET n = n + 1;
+END;
+
 -- Items (and new vocabulary tags) for the extension to add to chrome.storage.
 CREATE TABLE IF NOT EXISTS pending_adds (
     add_id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -197,11 +212,20 @@ def now_iso() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 
+READERS = 8  # read connections at most (3 file descriptors each)
+
+
 class Store:
     def __init__(self, path: Path | None = None):
         self.path = path or data_dir() / "server.db"
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self._lock = threading.RLock()
+        self._local = threading.local()  # .tx: this thread is inside tx() (its reads must see its writes)
+        self._readers: queue.SimpleQueue[sqlite3.Connection] = queue.SimpleQueue()
+        self._readers_made = 0
+        self._readers_lock = threading.Lock()
+        self._all_readers: list[sqlite3.Connection] = []
+        self._closed = False
         self._conn = sqlite3.connect(self.path, check_same_thread=False, isolation_level=None)
         self._conn.row_factory = sqlite3.Row
         self._conn.execute("PRAGMA journal_mode=WAL")
@@ -221,13 +245,17 @@ class Store:
                 c.execute("INSERT INTO meta(key, value) VALUES('file_counts_v1', 'true')")
 
     def close(self) -> None:
-        with self._lock:
+        with self._lock, self._readers_lock:
+            self._closed = True
+            for conn in self._all_readers:
+                conn.close()
             self._conn.close()
 
     @contextmanager
     def tx(self) -> Iterator[sqlite3.Connection]:
         with self._lock:
             self._conn.execute("BEGIN IMMEDIATE")
+            self._local.tx = True
             try:
                 yield self._conn
             except BaseException:
@@ -235,14 +263,55 @@ class Store:
                 raise
             else:
                 self._conn.execute("COMMIT")
+            finally:
+                self._local.tx = False
+
+    def _new_reader(self) -> sqlite3.Connection:
+        conn = sqlite3.connect(self.path, check_same_thread=False, isolation_level=None, timeout=30)
+        conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA query_only=ON")
+        return conn
+
+    @contextmanager
+    def _reader(self) -> Iterator[sqlite3.Connection]:
+        """A read connection from the pool (made on demand, up to ``READERS``). Inside ``tx`` the reads use the
+        transaction's own connection, so they see its uncommitted writes."""
+        if getattr(self._local, "tx", False) or self._closed:
+            with self._lock:
+                yield self._conn
+            return
+        try:
+            conn = self._readers.get_nowait()
+        except queue.Empty:
+            conn = None
+            with self._readers_lock:
+                if self._readers_made < READERS and not self._closed:
+                    self._readers_made += 1
+                    conn = self._new_reader()
+                    self._all_readers.append(conn)
+            if conn is None:
+                conn = self._readers.get()
+        try:
+            yield conn
+        finally:
+            self._readers.put(conn)
 
     def query(self, sql: str, params: Iterable[Any] = ()) -> list[sqlite3.Row]:
-        with self._lock:
-            return self._conn.execute(sql, tuple(params)).fetchall()
+        with self._reader() as conn:
+            return conn.execute(sql, tuple(params)).fetchall()
 
     def query_one(self, sql: str, params: Iterable[Any] = ()) -> sqlite3.Row | None:
-        with self._lock:
-            return self._conn.execute(sql, tuple(params)).fetchone()
+        with self._reader() as conn:
+            cur = conn.execute(sql, tuple(params))
+            try:
+                return cur.fetchone()
+            finally:
+                cur.close()  # ends the statement, so this connection's next read sees the newest data
+
+    def version(self, name: str) -> int:
+        """How many writes ``name`` has had (kept by triggers; 0 before the first)."""
+        row = self.query_one("SELECT n FROM data_versions WHERE name = ?", (name,))
+        return row["n"] if row else 0
 
     # -- meta -------------------------------------------------------------------------
 

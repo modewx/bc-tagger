@@ -149,6 +149,16 @@ def test_link_rows_to_bandcamp_pages(svc):
     assert importer.get_batch(svc, bid)["stats"]["linked"] == 1
 
 
+def test_link_candidates_follow_row_edits(svc):
+    """The rows behind link-candidates are cached for the extension's bursts; an edit shows at once."""
+    batch = run(svc, recorded_rows())
+    uf0 = row_at(batch, 181)
+    assert importer.link_candidates(svc, {"item": PAGE_ITEM})[0]["n"] == uf0["n"]
+    assert importer.link_candidates(svc, {"item": PAGE_ITEM})[0]["n"] == uf0["n"]  # asked again: from the cache
+    importer.update_row(svc, batch["batch_id"], uf0["n"], {"artist": "Nobody", "title": "Nothing Like It"})
+    assert all(c["n"] != uf0["n"] for c in importer.link_candidates(svc, {"item": PAGE_ITEM}))
+
+
 def test_tag_mapping_edits_and_commit(svc):
     rows = recorded_rows()
     rows.append({"line": 999, "raw": "x", "artist": "Nobody Here", "title": "Not Anywhere", "album": None,

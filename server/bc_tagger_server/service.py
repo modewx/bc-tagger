@@ -13,7 +13,7 @@ from .config import Settings
 from .items import is_valid_id, item_tags, matches_query, seed_from_export
 from .jobs import JobManager
 from .store import Store, now_iso
-from .views import item_view
+from .views import ViewData, item_view
 
 log = logging.getLogger(__name__)
 
@@ -35,6 +35,7 @@ class Service:
         self.last_prepare: dict[str, Any] | None = None
         self._file_index = None
         self._build_id: tuple[float, str] | None = None
+        self.link_rows_cache: tuple[int, dict, dict] | None = None  # importer._link_cache
         # Bandcamp lookups for imports; tests swap in an offline fetcher with recorded responses.
         self.bandcamp_fetcher = self.default_bandcamp_fetcher
         self.musicbrainz_fetcher = lambda: __import__("bc_tagger_server.musicbrainz", fromlist=["x"]).make_fetcher(
@@ -152,7 +153,8 @@ class Service:
         page = items[offset : offset + limit if limit is not None else None]
         db_path = self.db_path()
         rule = self.playlist_rule()
-        return total, [item_view(self.store, it, db_path, rule) for it in page]
+        data = ViewData(self.store, db_path) if len(page) > 20 else None
+        return total, [item_view(self.store, it, db_path, rule, data) for it in page]
 
     def get_item_view(self, item_id: str) -> dict | None:
         from .collection import all_items

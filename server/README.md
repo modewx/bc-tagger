@@ -41,6 +41,11 @@ cd server
   `transcode-cache/`.
 - Until the extension pushes its data, the items mirror is seeded from the export JSON
   (setting `seed_export_json`). `./bct seed --force` reloads it.
+- The log (stderr) has one timed line per request: when it ended, port, method, path, status, duration, size
+  and when it started. A request running longer than 5 s logs every thread's stack once, plus who holds the
+  Store's write lock (`slow requests: …`), so a stall names its cause.
+- Reads use their own pooled SQLite connections (WAL), so a page load never waits for another request's
+  queries or for a write.
 
 ## CLI
 
@@ -346,7 +351,8 @@ server's own cache only.
 Rows below the threshold keep up to three candidates to pick (`PUT …/rows/<n> {choose}`). A row the
 search misses can be linked from the extension to the Bandcamp page the user has open
 (`POST /api/import/<id>/rows/<n>/link {item}`; `POST /api/import/link-candidates {item}` says which
-rows fit that page). On commit, Bandcamp rows go to the extension's pending-adds queue and the rest
+rows fit that page; at most two run at once, a request the extension gave up on is skipped, and answers are
+cached until an import row changes). On commit, Bandcamp rows go to the extension's pending-adds queue and the rest
 to the server's `other` collection with Bandcamp/Discogs/YouTube links. Each committed row that is located gives
 its item that location right away (new items always; a merged item only if it wasn't located already, or the row
 confirms it), with SSE `item` events, so the collection shows it located without a Locate (`items_located`).

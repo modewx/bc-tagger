@@ -8,10 +8,13 @@ already exists, and folders are only ever created below an existing root, never 
 
 from __future__ import annotations
 
+import ctypes
 import logging
 import os
+import platform
 import re
 import subprocess
+import sys
 import threading
 import time
 import unicodedata
@@ -41,9 +44,49 @@ def _key(path: str | Path) -> str:
     return unicodedata.normalize("NFC", str(path)).casefold()
 
 
+class _Statfs(ctypes.Structure):
+    """macOS ``struct statfs`` (64-bit inodes), as ``getfsstat`` fills it."""
+
+    _fields_ = [("f_bsize", ctypes.c_uint32), ("f_iosize", ctypes.c_int32), ("f_blocks", ctypes.c_uint64),
+                ("f_bfree", ctypes.c_uint64), ("f_bavail", ctypes.c_uint64), ("f_files", ctypes.c_uint64),
+                ("f_ffree", ctypes.c_uint64), ("f_fsid", ctypes.c_int32 * 2), ("f_owner", ctypes.c_uint32),
+                ("f_type", ctypes.c_uint32), ("f_flags", ctypes.c_uint32), ("f_fssubtype", ctypes.c_uint32),
+                ("f_fstypename", ctypes.c_char * 16), ("f_mntonname", ctypes.c_char * 1024),
+                ("f_mntfromname", ctypes.c_char * 1024), ("f_flags_ext", ctypes.c_uint32),
+                ("f_reserved", ctypes.c_uint32 * 7)]
+
+
+MNT_NOWAIT = 2  # the kernel's cached list: no volume is asked for its statistics (a sleeping drive isn't woken)
+
+
+def _getfsstat_mount_points() -> frozenset[str] | None:
+    """The mount points from ``getfsstat(MNT_NOWAIT)``; None where that isn't available."""
+    if sys.platform != "darwin" or ctypes.sizeof(_Statfs) != 2168:
+        return None
+    try:
+        libc = ctypes.CDLL(None, use_errno=True)
+        fn = libc["getfsstat$INODE64"] if platform.machine() == "x86_64" else libc["getfsstat"]
+    except (OSError, AttributeError):
+        return None
+    fn.argtypes, fn.restype = [ctypes.c_void_p, ctypes.c_int, ctypes.c_int], ctypes.c_int
+    for _ in range(3):  # volumes can come and go between the two calls
+        n = fn(None, 0, MNT_NOWAIT)
+        if n <= 0:
+            return None
+        buf = (_Statfs * (n + 4))()
+        got = fn(buf, ctypes.sizeof(buf), MNT_NOWAIT)
+        if 0 < got <= n + 4:
+            points = frozenset(_key(os.fsdecode(buf[i].f_mntonname)) for i in range(got))
+            return points if "/" in points else None
+    return None
+
+
 def _read_mount_table() -> frozenset[str] | None:
-    """The mount points in the kernel's mount table. ``mount`` lists it without waiting on (or touching) any
-    volume; None if it can't be read."""
+    """The mount points in the kernel's mount table: ``getfsstat`` with ``MNT_NOWAIT``, else the ``mount``
+    command's list. None if neither works."""
+    points = _getfsstat_mount_points()
+    if points is not None:
+        return points
     try:
         out = subprocess.run(["/sbin/mount"], capture_output=True, text=True, timeout=5).stdout
     except (OSError, subprocess.SubprocessError) as e:

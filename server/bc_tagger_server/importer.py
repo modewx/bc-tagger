@@ -1178,24 +1178,58 @@ def link_candidates(svc, payload: dict, limit: int = 5) -> list[dict]:
     page = bandcamp.page_key(payload.get("page_url") or item.get("item_url"))
     album_page = bandcamp.page_key(item.get("album_url"))
     found = _PageItem(item)
+    ready = [b for b in list_batches(svc) if b["status"] == "ready"]
+    key = (tuple((b["batch_id"], b["name"]) for b in ready), page, album_page, found.title, found.artist, found.album,
+           limit)
+    results = _link_cache(svc)[2]
+    if key not in results:  # the extension asks again for the same page items (reloads, retries)
+        if len(results) > 5000:
+            results.clear()
+        results[key] = _link_candidates(svc, ready, page, album_page, found, limit)
+    return copy.deepcopy(results[key])
+
+
+def _link_candidates(svc, ready: list[dict], page, album_page, found: _PageItem, limit: int) -> list[dict]:
     out = []
-    for b in list_batches(svc):
-        if b["status"] != "ready":
-            continue
-        for row in load_rows(svc.store, b["batch_id"]):
-            if row.get("committed"):
-                continue
-            hint = bandcamp.page_key((row.get("hints") or {}).get("bandcamp_url"))
-            hint_match = bool(hint) and hint in (page, album_page)
+    for b in ready:
+        for row in _link_rows(svc, b["batch_id"]):
+            hint_match = bool(row["hint"]) and row["hint"] in (page, album_page)
             score = score_row(found, row) if found.title else 0.0
             if hint_match or score >= 0.6:
-                bc = row.get("bandcamp") or {}
                 out.append({"batch_id": b["batch_id"], "batch_name": b["name"], "n": row["n"],
-                            "artist": row.get("artist"), "title": row.get("title"), "album": row.get("album"),
+                            "artist": row["artist"], "title": row["title"], "album": row["album"],
                             "score": round(score, 3), "hint_match": hint_match,
-                            "bandcamp_id": (bc.get("item") or {}).get("id"), "via": bc.get("via")})
+                            "bandcamp_id": row["bandcamp_id"], "via": row["via"]})
     out.sort(key=lambda r: (-r["score"], not r["hint_match"]))
     return out[:limit]
+
+
+def _link_cache(svc) -> tuple[int, dict[str, list[dict]], dict[tuple, list[dict]]]:
+    """``(import_rows version, slim rows by batch, results by request)``, emptied when any import row changes."""
+    version = svc.store.version("import_rows")
+    cache = svc.link_rows_cache
+    if cache is None or cache[0] != version:
+        cache = svc.link_rows_cache = (version, {}, {})
+    return cache
+
+
+def _link_rows(svc, batch_id: str) -> list[dict]:
+    """A batch's rows not imported yet, with only what ``link_candidates`` reads. Cached until any import row
+    changes: the extension asks for every item on a Bandcamp page, and the rows of open batches run to
+    megabytes of JSON."""
+    cache = _link_cache(svc)
+    if batch_id not in cache[1]:
+        slim = []
+        for row in load_rows(svc.store, batch_id):
+            if row.get("committed"):
+                continue
+            bc = row.get("bandcamp") or {}
+            slim.append({"n": row["n"], "artist": row.get("artist"), "title": row.get("title"),
+                         "album": row.get("album"), "flags": row.get("flags") or [],
+                         "hint": bandcamp.page_key((row.get("hints") or {}).get("bandcamp_url")),
+                         "bandcamp_id": (bc.get("item") or {}).get("id"), "via": bc.get("via")})
+        cache[1][batch_id] = slim
+    return cache[1][batch_id]
 
 
 def _default_added(batch: dict, row: dict) -> list[str]:
