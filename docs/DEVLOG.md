@@ -161,7 +161,11 @@ npm run test:e2e                         # Playwright e2e: own profile, server :
   - Downloads (user request): no confirmation, since they only add files to the downloads folder. **Download File**
     shows only for owned items (the server's `owned`). **Download Full Release** shows when a track's album or EP is
     owned (`full_release`), and a **Download Full Releases** box makes Download owned missing do the same. Rows show
-    the server's plain progress ("downloading 42 %", "retrying 1/3 after: …").
+    the server's plain progress ("downloading 42 %", "retry 1/3: read timed out", amber while retrying).
+  - Parallel downloads (A): Settings → Downloads has Parallel downloads (1–8, default 4) and Download timeout
+    (≥ 30 s, default 180). Rows show their own percent while several releases run, and the status line shows the
+    job's line of everything in flight. The job tracker keeps a job's events that arrive before its start call
+    answers.
   - **Import logs** (user request; the server writes them): after Import selected, the collection shows "Import
     log saved: <file>" with View (the Markdown, rendered in a dialog) and Show in Finder. The Import tab lists
     **Past imports**, and Settings has the folder (`import_log_dir`). A commit that stops part way still shows its

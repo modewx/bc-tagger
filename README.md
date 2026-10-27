@@ -28,8 +28,9 @@ reachable, edits are queued on the server and applied by the extension on its ne
     **Export Selected to RB** (always a dry run, then confirm), **Download owned missing** (with **Download Full
     Releases** ticked: each track's whole album or EP).
   - The Located popover: candidates, Locate again, **Download File** for owned items that aren't on the drive, and
-    **Download Full Release** when a track's album or EP is owned. Downloads start at once and the row shows their
-    progress.
+    **Download Full Release** when a track's album or EP is owned. Downloads start at once, several releases at a
+    time (Settings → Downloads → Parallel downloads, default 4). Each row shows its progress, and a retry shows its
+    reason (amber).
 - **Settings → Import:**
   - import a `bc-tagger-import/1` track list: default tags, optionally on every track; lookups by the server or
     **in my browser** (the extension);
@@ -98,7 +99,7 @@ Runs the extension, server and local app together in a Playwright Chromium with 
   real server (mapping, linking, browser lookups, downloads, re-locate, browse), settings, and rekordbox dry runs
   and a sandbox write.
 
-A full run (62 tests) takes about 110 s (2026-10-26, three runs: 110–112 s). For a quick check, run a subset by
+A full run (64 tests) takes about 115 s (2026-10-26: 110–114 s). For a quick check, run a subset by
 name. Include `Import \(replace\)`, which loads the test collection the others use:
 
 ```bash
