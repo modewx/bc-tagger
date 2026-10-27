@@ -185,6 +185,12 @@ npm run test:e2e                         # Playwright e2e: own profile, server :
   Raising `preload` already resumes the fetch, so `load()` is only called when nothing is loading (it made a second
   request). e2e with a stream that answers 1.5 s late (app and extension page): one click at 60% before load starts
   at 60% (fails on 52c107c), a second click replaces it, a click after load seeks at once.
+- **Volume; Use previews** (user): the player has a speaker (mute) with a volume slider on hover, one volume and
+  mute for all players (localStorage), ↑/↓ on the bar. **Use previews** (by the player; on by default, kept per
+  browser): off, local stream URLs get `preview=0` (the server's original instead of its Opus preview, A); a player
+  that has started swaps its source at the same moment and keeps playing (`swapSource`), the others when they
+  next load. "▶ preview / original / Bandcamp stream" says what the track playing is heard from (the toggle and
+  `local.best.preview`). Play/pause are SVG icons (the text glyphs rendered as a square in the docked player).
 - **Cached lengths** (user: faster playback): when the server sends a located file's cached `duration`
   (`local.best.duration`, A), the player shows it before anything loads (`0:00 / 5:12`), and a click shows the time
   it'll start at; the file's own length wins once it's in. Without it (Bandcamp streams, an older server), as above.

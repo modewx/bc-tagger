@@ -145,11 +145,12 @@ body { font-family: -apple-system, system-ui, sans-serif; margin: 0; }
 .player-btn:disabled { opacity: 0.6; cursor: default; }
 /* The players' own controls (rowPlayer.js): play/pause, a seek bar, current / duration. */
 .row-player {
+  position: relative;
   display: flex;
   align-items: center;
   gap: 8px;
   height: 32px;
-  padding: 0 10px 0 4px;
+  padding: 0 4px;
   border: 1px solid #dcdfe4;
   border-radius: 16px;
   background: #f6f7f9;
@@ -164,8 +165,7 @@ body { font-family: -apple-system, system-ui, sans-serif; margin: 0; }
   border-radius: 50%;
   background: #3875d7;
   color: #fff;
-  font-size: 10px;
-  line-height: 24px;
+  line-height: 0;
   padding: 0;
   cursor: pointer;
 }
@@ -185,7 +185,48 @@ body { font-family: -apple-system, system-ui, sans-serif; margin: 0; }
   box-sizing: border-box;
 }
 .row-player .rp-bar:focus-visible .rp-track { box-shadow: 0 0 0 3px rgba(56, 117, 215, 0.3); }
-.row-player .rp-time { flex: none; min-width: 74px; text-align: right; font-size: 11px; color: #555; font-variant-numeric: tabular-nums; }
+.row-player .rp-time { flex: none; min-width: 70px; text-align: right; font-size: 11px; color: #555; font-variant-numeric: tabular-nums; }
+/* Volume: the speaker mutes; its slider shows over the bar while the pointer is on the speaker (or it has focus). */
+.row-player .rp-vol { position: relative; flex: none; display: flex; align-items: center; }
+.row-player .rp-speaker {
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  border: 0;
+  border-radius: 50%;
+  background: none;
+  color: #555;
+  cursor: pointer;
+  line-height: 0;
+}
+.row-player .rp-speaker:hover { color: #3875d7; background: #e8eef9; }
+.row-player .rp-vol .rp-x { display: none; }
+.row-player .rp-vol.muted .rp-x { display: inline; }
+.row-player .rp-vol.muted .rp-wave { display: none; }
+.row-player .rp-vol-pop {
+  position: absolute;
+  right: 100%;
+  top: 50%;
+  transform: translateY(-50%);
+  display: none;
+  align-items: center;
+  height: 26px;
+  padding: 0 8px;
+  margin-right: 2px;
+  border: 1px solid #dcdfe4;
+  border-radius: 13px;
+  background: #fff;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.12);
+  z-index: 5;
+}
+.row-player .rp-vol:hover .rp-vol-pop,
+.row-player .rp-vol:focus-within .rp-vol-pop,
+.row-player .rp-vol.open .rp-vol-pop { display: flex; }
+.row-player .rp-volume { width: 90px; margin: 0; accent-color: #3875d7; cursor: pointer; }
+/* Use previews, and what the track playing is heard from (local app). */
+.previews { display: inline-flex; align-items: center; gap: 8px; }
+.playing-source { font-size: 11px; color: #555; background: #eef1f5; border-radius: 9px; padding: 1px 7px; }
+.playing-source:empty { display: none; }
 .row-player.loading .rp-thumb { border-color: #9bb6e6; animation: rp-pulse 0.9s ease-in-out infinite alternate; }
 .row-player.loading .rp-time { color: #8a6d00; }
 @keyframes rp-pulse { from { transform: scale(0.85); } to { transform: scale(1.15); } }

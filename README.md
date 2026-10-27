@@ -39,6 +39,11 @@ reachable, edits are queued on the server and applied by the extension on its ne
   - **Players** (here, the import preview and the extension's page) have their own controls: play/pause, a seek bar
     and current / duration. A click on the bar plays from there, even before the file has loaded (a sleeping drive):
     the thumb waits at the click, "loading…", and playback starts there. Space and ←/→ (5 s) work on the bar.
+    The speaker mutes, and its slider (on hover) sets the volume; ↑/↓ on the bar too. One volume for all players,
+    kept in this browser.
+  - **Use previews** (by the player, on by default): local players stream the server's preview of a file when it
+    has one; off, the original (`preview=0`), to hear the difference. Switching while a track plays carries on from
+    the same moment. Next to it, what the track playing is heard from (preview / original / Bandcamp stream).
   - Test-only actions (Locate / Export latest 10) are in **Settings → Test**.
   - **Nothing runs unasked:** the app reads the music drive or Bandcamp only when you click (Play, Locate, Tools,
     Refresh ownership) or rest on a player: passing over players loads nothing, resting on one for a moment loads
@@ -132,7 +137,7 @@ Runs the extension, server and local app together in a Playwright Chromium with 
   real server (mapping, linking, browser lookups, downloads, re-locate, browse), settings, and rekordbox dry runs
   and a sandbox write.
 
-A full run (83 tests) takes about 2.5 minutes (2026-10-26: 110–147 s). For a quick check, run a subset by
+A full run (85 tests) takes about 2.5 minutes (2026-10-26: 110–147 s). For a quick check, run a subset by
 name. Include `Import \(replace\)`, which loads the test collection the others use:
 
 ```bash

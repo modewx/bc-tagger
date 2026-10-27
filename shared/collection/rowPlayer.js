@@ -11,7 +11,43 @@
 // reads the music drive).
 
 const DWELL_MS = 150;
-const STEP_S = 5; // arrow keys on the bar
+const STEP_S = 5; // ←/→ on the bar
+const VOLUME_STEP = 0.1; // ↑/↓ on the bar
+
+// One volume and mute for every player (only one plays at a time), kept in this browser.
+const VOLUME_KEY = "bc_player_volume";
+const MUTED_KEY = "bc_player_muted";
+const sound = (() => {
+  const out = { volume: 1, muted: false };
+  try {
+    const v = parseFloat(localStorage.getItem(VOLUME_KEY));
+    if (Number.isFinite(v)) out.volume = Math.min(1, Math.max(0, v));
+    out.muted = localStorage.getItem(MUTED_KEY) === "1";
+  } catch (e) {
+    /* storage unavailable: defaults */
+  }
+  return out;
+})();
+function setSound(patch) {
+  Object.assign(sound, patch);
+  sound.volume = Math.min(1, Math.max(0, sound.volume));
+  try {
+    localStorage.setItem(VOLUME_KEY, String(sound.volume));
+    localStorage.setItem(MUTED_KEY, sound.muted ? "1" : "0");
+  } catch (e) {
+    /* not kept */
+  }
+  document.querySelectorAll(".row-player").forEach((p) => p.paintSound && p.paintSound());
+}
+
+const PLAY_ICON = '<svg viewBox="0 0 12 12" width="10" height="10" aria-hidden="true"><path d="M3 1.5v9l7.5-4.5z" fill="currentColor"/></svg>';
+const PAUSE_ICON =
+  '<svg viewBox="0 0 12 12" width="10" height="10" aria-hidden="true"><rect x="2" y="1.5" width="3" height="9" rx="0.6" fill="currentColor"/>' +
+  '<rect x="7" y="1.5" width="3" height="9" rx="0.6" fill="currentColor"/></svg>';
+const SPEAKER =
+  '<svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true"><path d="M2 6h3l4-3v10L5 10H2z" fill="currentColor"/>' +
+  '<path class="rp-wave" d="M11 5.5a3.5 3.5 0 0 1 0 5M12.5 3.5a6 6 0 0 1 0 9" fill="none" stroke="currentColor" stroke-width="1.3"/>' +
+  '<path class="rp-x" d="M11 6l4 4M15 6l-4 4" stroke="currentColor" stroke-width="1.4"/></svg>';
 
 function el(tag, cls, text) {
   const e = document.createElement(tag);
@@ -54,10 +90,40 @@ export function attachRowPlayer(audio, { duration: known = null } = {}) {
   track.append(fill, thumb);
   bar.appendChild(track);
   const time = el("span", "rp-time");
-  wrap.append(play, bar, time, audio);
+  // Volume: the speaker mutes; the slider shows while the pointer is on the speaker (or it has focus).
+  const vol = el("div", "rp-vol");
+  const speaker = el("button", "rp-speaker");
+  speaker.type = "button";
+  speaker.innerHTML = SPEAKER;
+  const slider = el("input", "rp-volume");
+  slider.type = "range";
+  slider.min = "0";
+  slider.max = "1";
+  slider.step = "0.05";
+  slider.setAttribute("aria-label", "Volume");
+  const pop = el("div", "rp-vol-pop");
+  pop.appendChild(slider);
+  vol.append(pop, speaker);
+  wrap.append(play, bar, time, vol, audio);
   audio.bctPlayer = wrap;
 
+  function paintSound() {
+    audio.volume = sound.volume;
+    audio.muted = sound.muted;
+    slider.value = String(sound.muted ? 0 : sound.volume);
+    const silent = sound.muted || sound.volume === 0;
+    vol.classList.toggle("muted", silent);
+    speaker.title = sound.muted ? "Unmute" : "Mute";
+    speaker.setAttribute("aria-label", speaker.title);
+  }
+  wrap.paintSound = paintSound;
+  paintSound();
+  audio.addEventListener("play", paintSound); // a player that was out of the page meanwhile
+  speaker.addEventListener("click", () => setSound({ muted: !sound.muted, volume: sound.volume || 0.5 }));
+  slider.addEventListener("input", () => setSound({ volume: parseFloat(slider.value), muted: false }));
+
   let target = null; // a fraction of the track to start at, once its length is known
+  let resumeAt = null; // seconds to go back to once a swapped source's length is known
   let dragging = null; // the fraction under the pointer while dragging
 
   const duration = () => (audio.readyState >= HTMLMediaElement.HAVE_METADATA && Number.isFinite(audio.duration) && audio.duration > 0 ? audio.duration : 0);
@@ -65,16 +131,20 @@ export function attachRowPlayer(audio, { duration: known = null } = {}) {
 
   function paint() {
     const d = length();
-    const shown = dragging != null ? dragging : target != null ? target : d ? audio.currentTime / d : 0;
+    const now = resumeAt != null ? resumeAt : audio.currentTime;
+    const shown = dragging != null ? dragging : target != null ? target : d ? now / d : 0;
     const pct = `${clamp(shown) * 100}%`;
     fill.style.width = pct;
     thumb.style.left = pct;
-    const loading = target != null || (!audio.paused && audio.readyState < HTMLMediaElement.HAVE_FUTURE_DATA);
+    const loading = target != null || resumeAt != null || (!audio.paused && audio.readyState < HTMLMediaElement.HAVE_FUTURE_DATA);
     wrap.classList.toggle("loading", loading);
     const at = dragging != null ? dragging : target;
-    time.textContent = loading && !d ? "loading…" : `${fmt(at != null && d ? at * d : audio.currentTime)} / ${d ? fmt(d) : "–:––"}`;
+    time.textContent = loading && !d ? "loading…" : `${fmt(at != null && d ? at * d : now)} / ${d ? fmt(d) : "–:––"}`;
     const playing = !audio.paused;
-    play.textContent = playing ? "❚❚" : "▶";
+    if (play.dataset.icon !== String(playing)) {
+      play.innerHTML = playing ? PAUSE_ICON : PLAY_ICON;
+      play.dataset.icon = String(playing);
+    }
     play.title = playing ? "Pause" : "Play";
     play.setAttribute("aria-label", play.title);
     bar.setAttribute("aria-valuemax", String(Math.round(d)));
@@ -98,6 +168,10 @@ export function attachRowPlayer(audio, { duration: known = null } = {}) {
   }
 
   audio.addEventListener("loadedmetadata", () => {
+    if (resumeAt != null && duration()) {
+      audio.currentTime = Math.min(resumeAt, duration());
+      resumeAt = null;
+    }
     if (target != null && duration()) {
       const f = target;
       target = null;
@@ -145,6 +219,9 @@ export function attachRowPlayer(audio, { duration: known = null } = {}) {
     if (e.key === " " || e.key === "Enter") {
       e.preventDefault();
       play.click();
+    } else if (e.key === "ArrowUp" || e.key === "ArrowDown") {
+      e.preventDefault();
+      setSound({ volume: sound.volume + (e.key === "ArrowUp" ? VOLUME_STEP : -VOLUME_STEP), muted: false });
     } else if (e.key === "ArrowLeft" || e.key === "ArrowRight") {
       e.preventDefault();
       const d = duration();
@@ -169,6 +246,23 @@ export function attachRowPlayer(audio, { duration: known = null } = {}) {
   });
   wrap.addEventListener("pointerleave", () => clearTimeout(dwell));
   bar.addEventListener("focus", loadMetadata);
+
+  // Another source for the same track (e.g. the original instead of the preview): a player that has started
+  // carries on from the same moment (playing if it was); one that hasn't loads the new one when asked.
+  wrap.swapSource = (url) => {
+    if (audio.src === new URL(url, location.href).href) return;
+    const started = !audio.paused || audio.currentTime > 0;
+    if (!started) {
+      audio.preload = "none";
+      audio.src = url;
+      return;
+    }
+    const playing = !audio.paused;
+    resumeAt = audio.currentTime;
+    audio.src = url;
+    if (playing) audio.play().catch(() => {});
+    paint();
+  };
 
   paint();
   return wrap;

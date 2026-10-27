@@ -1517,6 +1517,12 @@ test("player: passing over a paused player loads nothing, resting on it loads it
     await page.waitForTimeout(600);
     assert.equal(await playing.evaluate((au) => au.paused), false, "still playing after the hover");
     assert.deepEqual(await page.evaluate(() => window.__audioEvents), [], "not reset or paused");
+    // Global mode: with its row scrolled away, the player (its controls) docks in the top bar, still playing.
+    await page.evaluate(() => window.scrollTo(0, document.body.scrollHeight));
+    await page.waitForSelector("#gpAudioHolder .row-player audio", { state: "attached", timeout: 5000 });
+    assert.equal(await playing.evaluate((au) => au.paused), false, "still playing, docked");
+    if (process.env.E2E_SHOTS) await page.locator("#globalPlayer").screenshot({ path: path.join(process.env.E2E_SHOTS, "docked-player.png") });
+    await page.locator(`tr[data-key="${a}"]`).scrollIntoViewIfNeeded();
     await page.evaluate(() => document.querySelectorAll("audio").forEach((au) => au.pause()));
 
     // The copy button at the right of the Artist cell (the clipboard is stubbed: the real one stays as it is).
@@ -1679,10 +1685,10 @@ function slowWav(wav, delayMs, reads = []) {
       .catch(() => {}); // the page may have moved on
   };
 }
-// Answers a page's /api/files/stream requests with a silent WAV after `delayMs`; marks `count` tracks located
-// (local players), with the server's cached `duration` if given. Nothing on the server changes and no file is
-// read. Returns the requests seen.
-async function slowLocalStreams(page, { delayMs = 1500, count = 12, duration = null } = {}) {
+// Answers a page's /api/files/stream requests with a `seconds` silent WAV after `delayMs`; marks `count` tracks
+// located (local players), with the server's cached `duration` and `preview` flag if given. Nothing on the server
+// changes and no file is read. Returns the requests seen.
+async function slowLocalStreams(page, { delayMs = 1500, count = 12, duration = null, preview = null, seconds = 3 } = {}) {
   // Right after an import the items are still getting their "#" (each re-renders the table): start after.
   await waitFor(
     () => api("/api/items").then((d) => (Array.isArray(d) ? d : d.items).every((i) => i.source === "other" || Number.isFinite(i.order))),
@@ -1695,13 +1701,13 @@ async function slowLocalStreams(page, { delayMs = 1500, count = 12, duration = n
       .filter((i) => i.tralbum_type === "t" && i.source !== "other")
       .slice(0, count)
       .forEach((it) => {
-        const best = { path: `/e2e/not-a-real-folder/${it.id}.wav`, ...(duration ? { duration } : {}) };
+        const best = { path: `/e2e/not-a-real-folder/${it.id}.wav`, ...(duration ? { duration } : {}), ...(preview != null ? { preview } : {}) };
         it.local = { status: "located", best, candidates: [] };
       });
     await route.fulfill({ response: res, json: data });
   });
   const reads = [];
-  await page.route("**/api/files/stream**", slowWav(silentWav(3), delayMs, reads));
+  await page.route("**/api/files/stream**", slowWav(silentWav(seconds), delayMs, reads));
   return reads;
 }
 // The local players shown, in order.
@@ -1765,6 +1771,98 @@ test("local app: a player shows the file's cached length before anything is load
     assert.ok(s.at > 0.4 * s.d && s.at < 0.65 * s.d && Math.abs(s.d - 3) < 0.1, `half of the file's own length: ${s.at} of ${s.d}`);
     assert.match(await app.textContent(`tr[data-key="${key}"] .rp-time`), / \/ 0:03$/);
   } finally {
+    await app.evaluate(() => document.querySelectorAll("audio").forEach((au) => au.pause())).catch(() => {});
+    await app.close();
+  }
+});
+
+test("local app: \"Use previews\" off asks for the originals (preview=0), and a track playing carries on from the same moment on the new source", async () => {
+  const app = await context.newPage();
+  const reads = await slowLocalStreams(app, { delayMs: 0, seconds: 10, preview: true });
+  const rest = async (key) => {
+    const b = await app.locator(`tr[data-key="${key}"] .row-player`).boundingBox();
+    await app.mouse.move(b.x + b.width / 2, b.y + b.height / 2);
+    await app.waitForFunction((k) => document.querySelector(`tr[data-key="${k}"] audio`).readyState >= 1, key, { timeout: 10000 });
+    await app.mouse.move(5, 5);
+  };
+  try {
+    await app.goto(SERVER + "/");
+    const [key, other] = await localPlayers(app);
+    assert.equal(await app.isChecked("#usePreviews"), true, "on by default");
+    await app.locator(`tr[data-key="${key}"]`).scrollIntoViewIfNeeded();
+    await rest(key);
+    assert.ok(reads.length >= 1 && reads.every((u) => !/[?&]preview=0/.test(u)), `previews on: ${reads.join(", ")}`);
+    // Play, then turn previews off mid-play: the same moment, on the original.
+    await clickBar(app, key, 0.3);
+    await app.waitForFunction((k) => {
+      const au = document.querySelector(`tr[data-key="${k}"] audio`);
+      return !au.paused && au.readyState >= 3 && au.currentTime > 3.2;
+    }, key, { timeout: 10000 });
+    assert.equal(await app.textContent("#playingSource"), "▶ preview");
+    await watchStart(app, key);
+    const before = await app.$eval(`tr[data-key="${key}"] audio`, (au) => au.currentTime);
+    reads.length = 0;
+    await app.uncheck("#usePreviews");
+    const s = await started(app, key);
+    assert.ok(Math.abs(s.at - before) < 0.5 && !s.paused, `went on at ${s.at} (was at ${before})`);
+    assert.match(await app.getAttribute(`tr[data-key="${key}"] audio`, "src"), /[?&]preview=0$/);
+    assert.ok(reads.length >= 1 && reads.every((u) => /[?&]preview=0/.test(u)), `previews off: ${reads.join(", ")}`);
+    assert.equal(await app.textContent("#playingSource"), "▶ original");
+    await app.$eval(`tr[data-key="${key}"] audio`, (au) => au.pause());
+    // The others take it when they next load; and it's kept in this browser.
+    reads.length = 0;
+    await app.locator(`tr[data-key="${other}"]`).scrollIntoViewIfNeeded();
+    await rest(other);
+    assert.ok(reads.length >= 1 && reads.every((u) => /[?&]preview=0/.test(u)), `another player: ${reads.join(", ")}`);
+    await app.reload();
+    await app.waitForSelector("#usePreviews", { state: "attached" });
+    assert.equal(await app.isChecked("#usePreviews"), false, "kept");
+  } finally {
+    await app.evaluate(() => localStorage.removeItem("bc_use_previews")).catch(() => {});
+    await app.evaluate(() => document.querySelectorAll("audio").forEach((au) => au.pause())).catch(() => {});
+    await app.close();
+  }
+});
+
+test("players: one volume and mute for all (the speaker, its slider, ↑/↓ on the bar), kept across a reload", async () => {
+  const app = await context.newPage();
+  await slowLocalStreams(app, { delayMs: 0 });
+  const audioOf = (key) => app.$eval(`tr[data-key="${key}"] audio`, (au) => ({ volume: au.volume, muted: au.muted }));
+  try {
+    await app.goto(SERVER + "/");
+    const [key, other] = await localPlayers(app);
+    await app.locator(`tr[data-key="${key}"]`).scrollIntoViewIfNeeded();
+    // The slider shows while the pointer is on the speaker.
+    assert.equal(await app.isVisible(`tr[data-key="${key}"] .rp-volume`), false);
+    await app.hover(`tr[data-key="${key}"] .rp-speaker`);
+    await app.waitForSelector(`tr[data-key="${key}"] .rp-volume`, { state: "visible" });
+    if (process.env.E2E_SHOTS) await app.locator(`tr[data-key="${key}"] td.player-cell`).screenshot({ path: path.join(process.env.E2E_SHOTS, "row-player-volume.png") });
+    await app.$eval(`tr[data-key="${key}"] .rp-volume`, (r) => {
+      r.value = "0.3";
+      r.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+    assert.deepEqual(await audioOf(key), { volume: 0.3, muted: false });
+    assert.deepEqual(await audioOf(other), { volume: 0.3, muted: false }, "every player");
+    // Playing, it applies at once; the speaker mutes.
+    await clickBar(app, key, 0.1);
+    await app.waitForFunction((k) => !document.querySelector(`tr[data-key="${k}"] audio`).paused, key);
+    await app.click(`tr[data-key="${key}"] .rp-speaker`);
+    assert.deepEqual(await audioOf(key), { volume: 0.3, muted: true });
+    await app.click(`tr[data-key="${key}"] .rp-speaker`);
+    assert.equal((await audioOf(key)).muted, false);
+    // ↓ on the bar.
+    await app.focus(`tr[data-key="${key}"] .rp-bar`);
+    await app.keyboard.press("ArrowDown");
+    assert.ok(Math.abs((await audioOf(key)).volume - 0.2) < 0.001);
+    await app.click(`tr[data-key="${key}"] .rp-speaker`); // muted, at 0.2
+    await app.$eval(`tr[data-key="${key}"] audio`, (au) => au.pause());
+    // Kept in this browser.
+    await app.reload();
+    const [k2] = await localPlayers(app);
+    const after = await app.$eval(`tr[data-key="${k2}"] audio`, (au) => ({ volume: Math.round(au.volume * 100) / 100, muted: au.muted }));
+    assert.deepEqual(after, { volume: 0.2, muted: true });
+  } finally {
+    await app.evaluate(() => ["bc_player_volume", "bc_player_muted"].forEach((k) => localStorage.removeItem(k))).catch(() => {});
     await app.evaluate(() => document.querySelectorAll("audio").forEach((au) => au.pause())).catch(() => {});
     await app.close();
   }

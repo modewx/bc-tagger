@@ -7,7 +7,8 @@ import { ExtensionBridge } from "../../shared/datasource/extensionBridge";
 import { pageEvents } from "../../shared/datasource/serverEvents";
 import { Jobs, progressText, resultText } from "./jobs";
 import { buildNav } from "./nav";
-import { appColumns, downloadable, isLocated, localPlayUrl, localDuration } from "./columns";
+import { appColumns, downloadable, isLocated, localPlayUrl, localDuration, playSource } from "./columns";
+import { previewToggle } from "./previews";
 import { downloadFlow, fullReleasesToggle } from "./downloads";
 import { startDevReload } from "./devReload";
 import { createStatusFilter, createSourceFilter, sourceOf, playableItem } from "./statusFilter";
@@ -351,6 +352,9 @@ async function refreshHealth() {
   });
   document.getElementById("rescanDrive").after(indexStatus.el, indexStatus.hint);
   document.getElementById("downloadOwnedMissing").after(fullReleases.el);
+  // Use previews (top bar, by the player): the players take the new source, a playing one from the same moment.
+  const previews = previewToggle({ onChange: () => page.refreshLocalSources(), sourceOf: (key) => playSource(page.getItems()[key]) });
+  document.getElementById("playerArea").appendChild(previews.el);
   const exportHint = document.createElement("span");
   exportHint.id = "exportHint";
   exportHint.className = "export-hint";

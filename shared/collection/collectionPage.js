@@ -286,6 +286,7 @@ export function createCollectionPage(opts) {
   // plays from there); the controls are what goes in the cell (playerOf).
   function makeRowAudio(url, item, key, duration = null) {
     const audio = document.createElement("audio");
+    audio.dataset.key = key;
     audio.src = url;
     attachRowPlayer(audio, { duration });
     audio.addEventListener("play", () => onAudioPlay(audio, item, key));
@@ -1601,6 +1602,17 @@ export function createCollectionPage(opts) {
     if (changed.length && opts.onItemsUpdated) opts.onItemsUpdated(changed);
   }
 
+  // The local players' sources again (opts.localPlayUrl changed, e.g. "Use previews"): one that's playing
+  // carries on from the same moment on the new source.
+  function refreshLocalSources() {
+    if (!opts.localPlayUrl) return;
+    document.querySelectorAll("audio.local-audio").forEach((audio) => {
+      const key = audio.dataset.key;
+      const url = allItems[key] ? opts.localPlayUrl(allItems[key], key) : null;
+      if (url && audio.bctPlayer && audio.bctPlayer.swapSource) audio.bctPlayer.swapSource(url);
+    });
+  }
+
   // Re-fetch items (e.g. after a local-app job, or an edit made elsewhere);
   // keeps the filters, the sort and the playing track.
   async function reload() {
@@ -1613,6 +1625,7 @@ export function createCollectionPage(opts) {
     refreshRow,
     refilter: () => computeView(),
     refreshTagOptions, // e.g. the new tags changed (opts.newTags)
+    refreshLocalSources,
     // The highlight (rows clicked, Shift / Cmd-clicked): in the order shown.
     highlightedKeys: () => shownKeys().filter((k) => highlighted.has(k)),
     isHighlighted: (key) => highlighted.has(key),
