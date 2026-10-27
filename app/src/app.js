@@ -14,6 +14,7 @@ import { createStatusFilter, createSourceFilter, sourceOf, playableItem } from "
 import { runExport } from "./exportFlow";
 import { createIndexStatus } from "./indexStatus";
 import { logNote } from "./importLogs";
+import { selectLastImportButton } from "./lastImport";
 
 const bridge = new ExtensionBridge();
 const events = new ServerEvents();
@@ -28,7 +29,7 @@ const fullReleases = fullReleasesToggle();
 let page = null;
 
 // Toolbar buttons that use the file index wait while the drive is scanned.
-const SCAN_BLOCKED = ["locateLatest", "exportLatest", "locateShown", "exportShown"];
+const SCAN_BLOCKED = ["locateShown", "exportShown"];
 let indexStatus = null;
 
 function updateScanBlocked() {
@@ -81,8 +82,26 @@ async function refreshOwnership(onProgress) {
 }
 
 // The rows the bulk buttons act on: the selected ones (checkbox column) when
-// there are any, else the rows currently shown (search + tags + Show).
-const selected = new Set();
+// there are any, else the rows currently shown (search + tags + Show). The
+// selection is kept in this browser across pages and reloads.
+const SELECTION_KEY = "bc_app_selection";
+const selected = new Set(
+  (() => {
+    try {
+      const ids = JSON.parse(localStorage.getItem(SELECTION_KEY) || "[]");
+      return Array.isArray(ids) ? ids : [];
+    } catch (e) {
+      return [];
+    }
+  })()
+);
+function saveSelection() {
+  try {
+    localStorage.setItem(SELECTION_KEY, JSON.stringify([...selected]));
+  } catch (e) {
+    /* not kept */
+  }
+}
 function selectedIds() {
   const items = page.getItems();
   return [...selected].filter((k) => k in items);
@@ -116,7 +135,7 @@ function updateShownButtons() {
   // Export sends located items only: count those, and say how many selected ones are skipped.
   const items = page.getItems();
   const located = selectedIds().filter((k) => isLocated(items[k])).length;
-  if (exp) exp.textContent = sel ? `Export Selected to RB (${located})…` : `Export shown (${shown})…`;
+  if (exp) exp.textContent = sel ? `Export selected to RB (${located})…` : `Export shown (${shown})…`;
   const hint = document.getElementById("exportHint");
   if (hint) hint.textContent = sel > located ? `${sel - located} not located ${sel - located > 1 ? "are" : "is"} skipped` : "";
   if (dl) dl.textContent = sel ? "Download owned missing (selected)" : "Download owned missing";
@@ -129,7 +148,7 @@ function updateShownButtons() {
 
 // After an import (the preview hands over what it imported and merged): those
 // items selected, all others not, newest Modified first, ready for "Export
-// Selected to RB". Consumed once.
+// selected to RB". Consumed once.
 const AFTER_IMPORT_KEY = "bc_after_import";
 function takeImportedSelection() {
   let handoff = null;
@@ -141,6 +160,23 @@ function takeImportedSelection() {
   }
   if (!handoff || !Array.isArray(handoff.ids) || Date.now() - (handoff.at || 0) > 10 * 60 * 1000) return null;
   return handoff;
+}
+
+// Exactly these items selected (all filters off), newest Modified first: after
+// an import, and "Select last import". Items not in the collection yet (new
+// Bandcamp items the extension is still adding) are selected as they appear.
+// Returns how many are in the collection now.
+function selectOnly(ids) {
+  selected.clear();
+  ids.forEach((id) => selected.add(id));
+  saveSelection();
+  statusFilter.reset();
+  sourceFilter.reset();
+  page.refilter();
+  page.sortBy("modified", -1);
+  updateShownButtons();
+  const items = page.getItems();
+  return ids.filter((id) => id in items).length;
 }
 
 // The checkbox column: select rows for the bulk buttons; the header box
@@ -169,6 +205,7 @@ function selectColumn() {
       all.addEventListener("change", () => {
         const shown = Object.keys(page.getView());
         shown.forEach((k) => (all.checked ? selected.add(k) : selected.delete(k)));
+        saveSelection();
         document.querySelectorAll("#collectionTable .row-check").forEach((b) => (b.checked = selected.has(b.closest("tr").dataset.key)));
         updateShownButtons();
       });
@@ -184,6 +221,7 @@ function selectColumn() {
       box.addEventListener("change", () => {
         if (box.checked) selected.add(key);
         else selected.delete(key);
+        saveSelection();
         updateShownButtons();
       });
       cell.appendChild(box);
@@ -221,29 +259,9 @@ async function refreshHealth() {
         statusEl: () => page.statusEl,
       }),
     ],
+    // Toolbar: what to do with the selected (or shown) items; the drive; Tools ▾ (maintenance) and Columns ▾.
+    // Locate / Export latest 10 are in Settings → Test.
     extraToolbarButtons: [
-      jobButton("locateLatest", "Locate latest 10", "Match the 10 most recently tagged items to local files", (p) =>
-        jobs.run("/api/locate", { latest: 10 }, p)
-      ),
-      jobButton(
-        "exportLatest",
-        "Export latest 10 to rekordbox",
-        "Add the 10 most recent located items to rekordbox, one playlist per tag",
-        (p) => runExport(jobs, { latest: 10 }, p) // asks first when the target is the main library
-      ),
-      jobButton("refreshOwnership", "Refresh ownership", "Check which items you own on Bandcamp", refreshOwnership),
-      {
-        id: "rescanDrive",
-        label: "Rescan drive",
-        title: "Full rescan of the music folders. Locate/Export only do a quick scan of files added since the items were tagged.",
-        className: "job-btn",
-        run: async (statusEl, button) => {
-          button.disabled = true;
-          await indexStatus.rescan(statusEl);
-          button.disabled = false;
-          await page.reload();
-        },
-      },
       jobButton("locateShown", "Locate", "Match the selected items (or, with none selected, the ones shown) to local files", locateShown),
       jobButton(
         "exportShown",
@@ -251,16 +269,6 @@ async function refreshHealth() {
         "Add the selected located items (or, with none selected, the ones shown) to rekordbox (previews the changes first)",
         exportShown
       ),
-      {
-        id: "clearSelection",
-        label: "Clear selection",
-        title: "Unselect every row (the buttons then act on the rows shown)",
-        run: () => {
-          selected.clear();
-          document.querySelectorAll("#collectionTable .row-check").forEach((b) => (b.checked = false));
-          updateShownButtons();
-        },
-      },
       {
         id: "downloadOwnedMissing",
         label: "Download owned missing",
@@ -279,6 +287,32 @@ async function refreshHealth() {
           button.disabled = false;
         },
       },
+      selectLastImportButton((ids) => selectOnly(ids)),
+      {
+        id: "clearSelection",
+        label: "Clear selection",
+        title: "Unselect every row (the buttons then act on the rows shown)",
+        run: () => {
+          selected.clear();
+          saveSelection();
+          document.querySelectorAll("#collectionTable .row-check").forEach((b) => (b.checked = false));
+          updateShownButtons();
+        },
+      },
+      {
+        id: "rescanDrive",
+        label: "Rescan drive",
+        title: "Full rescan of the music folders. Locate/Export only do a quick scan of files added since the items were tagged.",
+        className: "job-btn",
+        sepBefore: true,
+        run: async (statusEl, button) => {
+          button.disabled = true;
+          await indexStatus.rescan(statusEl);
+          button.disabled = false;
+          await page.reload();
+        },
+      },
+      { ...jobButton("refreshOwnership", "Refresh ownership", "Check which items you own on Bandcamp", refreshOwnership), group: "tools" },
     ],
     localPlayUrl,
     playable: playableItem,
@@ -334,16 +368,16 @@ async function refreshHealth() {
     page.statusEl.textContent = `Could not load the collection from the server: ${e.message}`;
   }
 
+  // The kept selection: only items still in the collection.
+  const items = page.getItems();
+  [...selected].forEach((k) => !(k in items) && selected.delete(k));
+  saveSelection();
+  updateShownButtons();
+
   const imported = takeImportedSelection();
   if (imported) {
     // New Bandcamp items join as the extension adds them: they're selected as they appear.
-    selected.clear();
-    imported.ids.forEach((id) => selected.add(id));
-    statusFilter.reset();
-    sourceFilter.reset();
-    page.refilter();
-    page.sortBy("modified", -1);
-    updateShownButtons();
+    selectOnly(imported.ids);
     page.statusEl.textContent =
       `${imported.summary ? `${imported.summary} ` : ""}The ${imported.ids.length} imported and merged items are selected, ` +
       "newest Modified first: Export Selected to RB adds them to rekordbox.";

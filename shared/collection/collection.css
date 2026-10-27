@@ -173,3 +173,31 @@ audio { width: 100%; height: 36px; vertical-align: middle; }
 #collectionTable .col-modified { width: 92px; }
 #collectionTable .col-track { width: 64px; }
 .track-cell { font-size: 12px; color: #555; white-space: nowrap; }
+
+/* The toolbar: groups of actions, and the Tools ▾ menu (maintenance). */
+.toolbar-sep { width: 1px; align-self: stretch; background: #d5d5d5; margin: 2px 4px; }
+.tools-menu {
+  position: absolute;
+  z-index: 50;
+  display: flex;
+  flex-direction: column;
+  min-width: 200px;
+  padding: 4px;
+  background: #fff;
+  border: 1px solid #ccc;
+  border-radius: 6px;
+  box-shadow: 0 6px 18px rgba(0, 0, 0, 0.15);
+}
+.tools-menu[hidden] { display: none; }
+.tools-menu .tools-item {
+  font: inherit;
+  font-size: 13px;
+  text-align: left;
+  padding: 6px 10px;
+  border: 0;
+  border-radius: 4px;
+  background: none;
+  cursor: pointer;
+}
+.tools-menu .tools-item:hover:not(:disabled) { background: #eef3ff; }
+.tools-menu .tools-item:disabled { color: #aaa; cursor: default; }

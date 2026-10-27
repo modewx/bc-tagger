@@ -8,12 +8,14 @@ import { buildNav } from "./nav";
 import { startDevReload } from "./devReload";
 import { confirmDialog } from "./dialog";
 import { createMappingEditor } from "./mappingEditor";
+import { createTestTab } from "./testTab";
 import { createImportTab } from "./importTab";
 
 const TABS = [
   ["general", "General"],
   ["rekordbox", "Rekordbox"],
   ["import", "Import"],
+  ["test", "Test"], // test-only actions (Locate / Export latest 10)
 ];
 let importTab = null;
 
@@ -610,6 +612,7 @@ function render(main, data) {
     folderInput.addEventListener("input", () => mapping.setTargetFolder(folderInput.value));
   }
   importTab = createImportTab(main, { bridge });
+  createTestTab(main);
   const start = fromHash();
   showTab(start ? start.tab : "general", start && start.arg);
 }
@@ -622,9 +625,9 @@ function showTab(id, arg) {
   document.querySelectorAll("main section[data-tab]").forEach((sec) => (sec.hidden = sec.dataset.tab !== id));
   const hash = arg ? `#${id}/${encodeURIComponent(arg)}` : `#${id}`;
   if (location.hash !== hash) history.replaceState(null, "", `${location.search}${hash}`);
-  // The Import tab isn't settings: no save bar there.
+  // The Import and Test tabs aren't settings: no save bar there.
   const bar = document.getElementById("saveBar");
-  if (bar) bar.hidden = id === "import";
+  if (bar) bar.hidden = id === "import" || id === "test";
   if (id === "import" && importTab) importTab.show(arg);
   if (id === "rekordbox" && mapping && arg && arg.startsWith("tags=")) mapping.focusTags(arg.slice(5).split(",").filter(Boolean));
 }

@@ -207,3 +207,6 @@ section[hidden] { display: none; }
 .mapping-focus-note { margin: 8px 0; padding: 6px 10px; background: #fff8e1; border: 1px solid #f0d68a; border-radius: 6px; font-size: 13px; }
 .mapping-focus-note[hidden] { display: none; }
 .map-row.map-focus { background: #fff8e1; }
+/* Settings → Test: a discreet tab at the end (test-only actions). */
+#tabs #tab_test { margin-left: auto; color: #999; font-size: 12px; }
+.test-actions button { margin-right: 6px; }

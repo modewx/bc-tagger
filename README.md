@@ -24,9 +24,16 @@ reachable, edits are queued on the server and applied by the extension on its ne
 - **Collection** (`/`): Owned / Located / Rekordbox columns, Bandcamp and Other collections, a selection
   column (select-all for the rows shown), **Columns ▾** to show or hide columns (remembered per page; Track # is
   off by default), and **Modified** (when an item's tags last changed) next to **Added**.
-  - The bulk buttons act on the selected rows, or on the rows shown when none are selected: **Locate**,
-    **Export Selected to RB** (always a dry run, then confirm), **Download owned missing** (with **Download Full
-    Releases** ticked: each track's whole album or EP).
+  - The toolbar, in groups:
+    - What to do with the selected rows (or the rows shown when none are selected): **Locate**, **Export selected to
+      RB** (always a dry run, then confirm), **Download owned missing** (with **Download Full Releases** ticked: each
+      track's whole album or EP), **Select last import** (exactly the last committed import's items), **Clear
+      selection**;
+    - **Rescan drive**;
+    - **Tools ▾**: maintenance (Refresh player files, Refresh thumbnails, Fix artists, Fix album IDs, Refresh
+      ownership); **Columns ▾**.
+  - The selection is kept in this browser across pages and reloads.
+  - Test-only actions (Locate / Export latest 10) are in **Settings → Test**.
   - The Located popover: candidates, Locate again, **Download File** for owned items that aren't on the drive, and
     **Download Full Release** when a track's album or EP is owned. Downloads start at once, several releases at a
     time (Settings → Downloads → Parallel downloads, default 4). Each row shows its progress, and a retry shows its
@@ -104,7 +111,7 @@ Runs the extension, server and local app together in a Playwright Chromium with 
   real server (mapping, linking, browser lookups, downloads, re-locate, browse), settings, and rekordbox dry runs
   and a sandbox write.
 
-A full run (66 tests) takes about 112 s (2026-10-26: 110–114 s). For a quick check, run a subset by
+A full run (67 tests) takes about 2 minutes (2026-10-26: 110–147 s). For a quick check, run a subset by
 name. Include `Import \(replace\)`, which loads the test collection the others use:
 
 ```bash

@@ -38,6 +38,11 @@ const EXPORT_JSON =
 const ITEM = "t283914533"; // "The System Works", in the export
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+// The collection pages keep maintenance actions in the Tools ▾ menu.
+const tool = async (page, id) => {
+  await page.click("#toolsMenuBtn");
+  await page.click(`#toolsMenu #${id}`);
+};
 const exportData = JSON.parse(fs.readFileSync(EXPORT_JSON, "utf8"));
 const exportCount = Object.keys(exportData.taggedItems).length;
 
@@ -388,7 +393,13 @@ test("the bundled collection page renders with the shared code", async () => {
   const headers = await page.$$eval("#collectionTable thead th", (ths) => ths.map((t) => t.firstChild.textContent));
   assert.deepEqual(headers, ["#", "Added", "Modified", "Thumbnail", "Title", "Artist", "Player", "Tags"]);
   const buttons = await page.$$eval("#toolbar button", (bs) => bs.map((b) => b.textContent));
-  assert.deepEqual(buttons, ["Refresh player files", "Refresh thumbnails", "Fix artists", "Fix album IDs", "Columns ▾"]);
+  assert.deepEqual(buttons, ["Tools ▾", "Columns ▾"]);
+  assert.deepEqual(await page.$$eval("#toolsMenu .tools-item", (bs) => bs.map((b) => b.textContent)), [
+    "Refresh player files",
+    "Refresh thumbnails",
+    "Fix artists",
+    "Fix album IDs",
+  ]);
   await page.waitForSelector("select.tag-editor", { state: "attached" });
   await page.close();
 });
@@ -466,7 +477,7 @@ test("ownership from Bandcamp via the extension (recorded collection summary)", 
   const app = await context.newPage();
   await app.goto(SERVER + "/");
   await app.waitForFunction(() => /extension connected/.test(document.getElementById("navExt").textContent));
-  await app.click("#refreshOwnership");
+  await tool(app, "refreshOwnership");
   await app.waitForFunction(() => /done|failed/.test(document.getElementById("refreshStatus").textContent), null, {
     timeout: 60000,
   });
@@ -517,7 +528,7 @@ test("Fix album IDs reads the real album from track pages (recorded Bandcamp pag
   const page = await context.newPage();
   await page.goto(extPage("collection.html"));
   await page.waitForFunction(() => document.querySelectorAll("#collectionTable tbody tr").length > 0);
-  await page.click("#fixAlbumIds");
+  await tool(page, "fixAlbumIds");
   await page.waitForFunction(
     () => {
       const t = document.getElementById("refreshStatus").textContent;
@@ -852,11 +863,11 @@ test("Main target: every export runs a dry run and writes only after confirming"
     await route.fulfill({ json: { job_id: id } });
   });
   await app.route("**/api/jobs/export-e2e-*", (route) => route.fulfill({ json: jobs[route.request().url().split("/").pop()] }));
-  await app.goto(SERVER + "/");
+  await app.goto(SERVER + "/settings/#test");
   await app.waitForSelector("#mainLibraryBanner:not([hidden])");
-  await app.waitForFunction(() => document.querySelectorAll("#collectionTable tbody tr").length > 0);
+  await app.waitForSelector("#exportLatest");
 
-  // Export latest 10: dry run, then the dialog; Cancel writes nothing.
+  // Export latest 10 (Settings → Test): dry run, then the dialog; Cancel writes nothing.
   await app.click("#exportLatest");
   await app.waitForSelector("#exportConfirm");
   assert.equal(calls.length, 1);
@@ -876,6 +887,8 @@ test("Main target: every export runs a dry run and writes only after confirming"
   assert.deepEqual(calls[2], { latest: 10, confirm_token: "tok-2" });
 
   // The per-row button and "Export shown…" go through the same dry run + confirm.
+  await app.goto(SERVER + "/");
+  await app.waitForFunction(() => document.querySelectorAll("#collectionTable tbody tr").length > 0);
   await app.evaluate(() => {
     const s = document.getElementById("searchInput");
     s.value = "System Works";
@@ -943,9 +956,9 @@ test("Main target, real server: dry run, confirm, and write to a sandbox copy", 
   const before = stat();
 
   const app = await context.newPage();
-  await app.goto(SERVER + "/");
+  await app.goto(SERVER + "/settings/#test");
   await app.waitForSelector("#mainLibraryBanner:not([hidden])");
-  await app.waitForFunction(() => document.querySelectorAll("#collectionTable tbody tr").length > 0);
+  await app.waitForSelector("#exportLatest");
   await app.click("#exportLatest");
   await app.waitForSelector("#exportConfirm", { timeout: 120000 });
   const dialog = await app.textContent("#exportConfirm");
@@ -1153,7 +1166,7 @@ async function rescanFromApp(app) {
     window.__indexSamples = [];
     const st = document.getElementById("indexStatus");
     new MutationObserver(() =>
-      window.__indexSamples.push(`${st.textContent}${document.getElementById("locateLatest").disabled ? " [blocked]" : ""}`)
+      window.__indexSamples.push(`${st.textContent}${document.getElementById("locateShown").disabled ? " [blocked]" : ""}`)
     ).observe(st, { childList: true, characterData: true, subtree: true });
     document.getElementById("rescanDrive").click();
     return true;
@@ -1172,7 +1185,7 @@ test("Rescan drive: live progress, Locate/Export wait, then the status line", as
   assert.ok(samples.some((s) => /Scanning the drive/.test(s)), `live progress: ${samples.slice(0, 4).join(" | ")}`);
   assert.ok(samples.some((s) => /\[blocked\]/.test(s)), "Locate/Export are disabled while scanning");
   assert.match(await app.textContent("#refreshStatus"), /Rescan drive: done/);
-  assert.equal(await app.isDisabled("#locateLatest"), false, "re-enabled after the scan");
+  assert.equal(await app.isDisabled("#locateShown"), false, "re-enabled after the scan");
   if (await hasIndexStatus()) {
     await app.waitForFunction(() => /^Full scan (just now|\d+ min ago) · [\d,.]+ files$/.test(document.getElementById("indexStatus").textContent));
   }
@@ -1232,7 +1245,7 @@ test("Locate never runs a full scan; its status shows what the quick scan did", 
   const lastFull = (await api("/api/index/status")).last_scan_at;
   const scanJobsBefore = (await api("/api/jobs")).filter((j) => j.kind === "scan").length;
   const app = await context.newPage();
-  await app.goto(SERVER + "/");
+  await app.goto(SERVER + "/settings/#test");
   await app.waitForSelector("#locateLatest:not([disabled])");
   await app.click("#locateLatest");
   await app.waitForFunction(() => /^Locate latest 10: (done|failed)/.test(document.getElementById("refreshStatus").textContent), null, {
@@ -1830,7 +1843,7 @@ test("collection: with rows selected, Locate / Export / Download act on them; wi
     for (const k of keys) await app.check(`tr[data-key="${k}"] .row-check`);
     assert.equal(await app.textContent("#locateShown"), "Locate selected (2)");
     const locatedSel = await locatedOf(keys);
-    assert.equal(await app.textContent("#exportShown"), `Export Selected to RB (${locatedSel})…`, "the located ones");
+    assert.equal(await app.textContent("#exportShown"), `Export selected to RB (${locatedSel})…`, "the located ones");
     assert.equal(await app.textContent("#exportHint"), skippedHint(2 - locatedSel));
     assert.equal(await app.textContent("#downloadOwnedMissing"), "Download owned missing (selected)");
     assert.equal(await app.textContent("#clearSelection"), "Clear selection (2)");
@@ -2097,7 +2110,7 @@ test("Download owned missing: releases download together, each row with its own 
     await app.fill("#searchInput", "");
     await app.waitForFunction(([a, b]) => document.querySelector(`tr[data-key="${a}"]`) && document.querySelector(`tr[data-key="${b}"]`), [A.id, B.id]);
     // Neither is located yet: Export Selected counts none, and says so.
-    assert.equal(await app.textContent("#exportShown"), "Export Selected to RB (0)…");
+    assert.equal(await app.textContent("#exportShown"), "Export selected to RB (0)…");
     assert.equal(await app.textContent("#exportHint"), "2 not located are skipped");
     // Everything each row and the status line show while it runs.
     await app.evaluate(([a, b]) => {
@@ -2125,7 +2138,7 @@ test("Download owned missing: releases download together, each row with its own 
       await waitFor(() => api(`/api/items/${r.id}`).then((it) => it.local && it.local.status === "located"), { what: `${r.title} located` });
     }
     // Located now: the count follows, live.
-    await app.waitForFunction(() => document.getElementById("exportShown").textContent === "Export Selected to RB (2)…");
+    await app.waitForFunction(() => document.getElementById("exportShown").textContent === "Export selected to RB (2)…");
     assert.equal(await app.textContent("#exportHint"), "");
   } finally {
     await restore();
@@ -2418,7 +2431,7 @@ test("bot check: the first challenged page stops all page fetching and is shown"
   });
   await page.goto(extPage("collection.html"));
   await page.waitForFunction(() => document.querySelectorAll("#collectionTable tbody tr").length > 0);
-  await page.click("#fixAlbumIds");
+  await tool(page, "fixAlbumIds");
   await page.waitForFunction(() => /^Album IDs: stopped by Bandcamp's bot check/.test(document.getElementById("refreshStatus").textContent));
   assert.match(await page.textContent("#bcChallenge"), /Client Challenge/);
   assert.match(await page.getAttribute("#bcChallenge a", "href"), /^https:\/\/e2e-challenge\.bandcamp\.com\/track\/challenged-/);
@@ -2428,7 +2441,7 @@ test("bot check: the first challenged page stops all page fetching and is shown"
   assert.ok(seen.every((u) => /e2e-challenge/.test(u)), `fetched after the challenge: ${seen.join(", ")}`);
   const items = (await storage("taggedItems")).taggedItems;
   ids.forEach((id) => assert.equal(items[id].album_checked, undefined, "a challenged item isn't marked checked"));
-  await page.click("#refreshThumbs").catch(() => {});
+  await tool(page, "refreshThumbs").catch(() => {});
   await page.waitForTimeout(500);
   assert.ok(seen.every((u) => /e2e-challenge/.test(u)) && seen.length <= 2, "no fetches after the challenge");
   await probe.evaluate((ids) => Promise.all(ids.map((id) => chrome.runtime.sendMessage({ type: "removeTaggedItem", id }))), ids);
@@ -2442,14 +2455,14 @@ test("bot check: ownership reports it and stops refreshing in the background", a
   const app = await context.newPage();
   await app.goto(SERVER + "/");
   await app.waitForFunction(() => /extension connected/.test(document.getElementById("navExt").textContent));
-  await app.click("#refreshOwnership");
+  await tool(app, "refreshOwnership");
   await app.waitForFunction(() => /failed|error/i.test(document.getElementById("refreshStatus").textContent), null, { timeout: 30000 });
   assert.match(await app.textContent("#refreshStatus"), /bot check/);
   const status = await probe.evaluate(() => chrome.storage.session.get("bcSyncStatus").then((s) => s.bcSyncStatus));
   assert.equal(status.ownership.challenge, true);
   // The user's own refresh clears it once Bandcamp answers again.
   await context.unroute(SUMMARY, challenge);
-  await app.click("#refreshOwnership");
+  await tool(app, "refreshOwnership");
   await app.waitForFunction(() => /owned: \d+/.test(document.getElementById("refreshStatus").textContent), null, { timeout: 30000 });
   const after = await probe.evaluate(() => chrome.storage.session.get("bcSyncStatus").then((s) => s.bcSyncStatus));
   assert.ok(!after.ownership.challenge);
@@ -2719,7 +2732,7 @@ test("import end to end (real server): resolve, map tags, paste a URL, link from
   assert.deepEqual(top.slice().sort(), chosen.slice().sort(), "the imported items come first");
   assert.match(await page.textContent("#refreshStatus"), new RegExp(`The ${chosen.length} imported and merged items are selected`));
   const locatedChosen = await locatedOf(chosen);
-  assert.equal(await page.textContent("#exportShown"), `Export Selected to RB (${locatedChosen})…`);
+  assert.equal(await page.textContent("#exportShown"), `Export selected to RB (${locatedChosen})…`);
   assert.equal(await page.textContent("#exportHint"), skippedHint(chosen.length - locatedChosen));
 
   // Export Selected to RB: the dry run is exactly the selection (cancelled here; the sandbox run writes).
@@ -3060,5 +3073,67 @@ test("import preview: a row's new tag is never dropped (edits, reloads), other r
   } finally {
     await api(`/api/import/${batchId}`, { method: "DELETE" }).catch(() => {});
     await page.close();
+  }
+});
+
+test("collection: the toolbar is everyday actions (test ones in Settings → Test); the selection survives Settings and back and a reload; Select last import selects the last import's items", async () => {
+  const app = await context.newPage();
+  const checked = () => app.$$eval("#collectionTable .row-check:checked", (b) => b.map((x) => x.closest("tr").dataset.key).sort());
+  const batchIds = [];
+  try {
+    await app.goto(SERVER + "/");
+    await app.waitForFunction(() => document.querySelectorAll("#collectionTable tbody tr").length > 2);
+    // The toolbar: selection actions, the drive, Tools ▾, Columns ▾; no test buttons.
+    const bar = await app.$$eval("#toolbar button", (bs) => bs.map((b) => b.id));
+    assert.deepEqual(bar.slice(0, 6), ["locateShown", "exportShown", "downloadOwnedMissing", "selectLastImport", "clearSelection", "rescanDrive"]);
+    assert.ok(bar.includes("toolsMenuBtn") && bar.includes("columnsChooser"));
+    assert.ok(!bar.includes("locateLatest") && !bar.includes("exportLatest"), "no test buttons");
+    assert.ok(await app.$("#toolsMenu #refreshOwnership"), "Refresh ownership is in Tools");
+
+    // A selection survives going to Settings and back, and a reload.
+    await app.evaluate(() => localStorage.removeItem("bc_app_selection"));
+    await app.reload();
+    await app.waitForFunction(() => document.querySelectorAll("#collectionTable tbody tr").length > 2);
+    const keys = (await app.$$eval("#collectionTable tbody tr", (r) => r.slice(0, 3).map((x) => x.dataset.key))).sort();
+    for (const k of keys) await app.check(`tr[data-key="${k}"] .row-check`);
+    assert.equal(await app.textContent("#clearSelection"), "Clear selection (3)");
+    await app.click("#navLink_settings");
+    await app.waitForSelector("#tabs");
+    // The test buttons are in Settings → Test.
+    await app.click("#tab_test");
+    assert.ok((await app.isVisible("#locateLatest")) && (await app.isVisible("#exportLatest")));
+    await app.click("#navLink_collection");
+    await app.waitForFunction((n) => document.querySelectorAll("#collectionTable .row-check:checked").length === n, keys.length);
+    assert.deepEqual(await checked(), keys, "kept across pages");
+    assert.equal(await app.textContent("#clearSelection"), "Clear selection (3)");
+    await app.reload();
+    await app.waitForFunction((n) => document.querySelectorAll("#collectionTable .row-check:checked").length === n, keys.length);
+    assert.deepEqual(await checked(), keys, "kept across a reload");
+
+    // Select last import: exactly the last committed import's items, newest Modified first.
+    // (Its own small import: two rows merged into collection items.)
+    const items = [
+      { line: 1, raw: "TSVI - Futuro Lontano", artist: "TSVI", title: "Futuro Lontano", existing_id: "t1002746421", tags: ["must"] },
+      { line: 2, raw: "x - y", artist: exportData.taggedItems[ITEM].artist, title: exportData.taggedItems[ITEM].title, existing_id: ITEM, tags: ["must"] },
+    ];
+    const { batch_id: lastBatch } = await post("/api/import", { file: { format: "bc-tagger-import/1", source: "e2e-last.txt", items }, default_tags: [], name: "e2e-last" });
+    batchIds.push(lastBatch);
+    await waitFor(() => api(`/api/import/${lastBatch}`).then((b) => b.status === "ready"), { what: "the batch", timeout: 30000 });
+    await post(`/api/import/${lastBatch}/commit`, {});
+    await waitFor(() => api("/api/import/last-committed").then((l) => l.batch_id === lastBatch), { what: "the commit", timeout: 30000 });
+    const last = await api("/api/import/last-committed");
+    assert.deepEqual(last.item_ids.slice().sort(), ["t1002746421", ITEM].sort());
+    await app.click("#selectLastImport");
+    const want = last.item_ids.slice().sort();
+    await app.waitForFunction((n) => document.querySelectorAll("#collectionTable .row-check:checked").length === n, want.length);
+    assert.deepEqual(await checked(), want);
+    assert.match(await app.textContent("th.col-modified"), /▼/);
+    assert.match(await app.textContent("#refreshStatus"), new RegExp(`^Selected the ${want.length} items of the last import`));
+    await app.click("#clearSelection");
+    assert.deepEqual(await checked(), []);
+  } finally {
+    await app.evaluate(() => localStorage.removeItem("bc_app_selection")).catch(() => {});
+    for (const id of batchIds) await api(`/api/import/${id}`, { method: "DELETE" }).catch(() => {});
+    await app.close();
   }
 });

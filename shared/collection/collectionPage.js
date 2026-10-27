@@ -67,7 +67,8 @@ const SHELL_HTML = `
  * @param {string} [opts.colWidthKey]       localStorage key for the resized column widths (by column id)
  * @param {object} [opts.legacyColWidths]   {key, order}: older position-based widths to migrate once
  * @param {Array}  [opts.extraColumns]      [{id, label, after, sortKey?, compare?(a,b), render(cell,key,item)}]
- * @param {Array}  [opts.extraToolbarButtons] [{id, label, run(statusEl, button)}] after the base buttons
+ * @param {Array}  [opts.extraToolbarButtons] [{id, label, run(statusEl, button), group?: "tools", sepBefore?}]:
+ *   on the toolbar, or (group "tools") in the Tools ▾ menu with the base maintenance buttons
  * @param {function} [opts.localPlayUrl]    (item, key) -> url of a local file to play, or null
  * @param {function} [opts.filterItem]      (item) -> false hides the row (extra filters, e.g. statuses)
  * @param {function} [opts.onView]          (shown, total) after each filter/search
@@ -111,15 +112,60 @@ export function createCollectionPage(opts) {
   ];
   const toolbar = document.getElementById("toolbar");
   const statusEl = document.getElementById("refreshStatus");
-  [...(opts.baseToolbar === false ? [] : BASE_TOOLBAR), ...(opts.extraToolbarButtons || [])].forEach((b) => {
+  // Everyday actions on the toolbar; maintenance (the base buttons, group "tools") in the Tools ▾ menu.
+  const toolsMenu = document.createElement("div");
+  toolsMenu.id = "toolsMenu";
+  toolsMenu.className = "tools-menu";
+  toolsMenu.hidden = true;
+  const toolsBtn = document.createElement("button");
+  toolsBtn.id = "toolsMenuBtn";
+  toolsBtn.type = "button";
+  toolsBtn.className = "toolbar-btn tools-btn";
+  toolsBtn.textContent = "Tools ▾";
+  toolsBtn.title = "Maintenance: refresh player files and thumbnails, fix artists and album IDs, …";
+  const closeTools = () => (toolsMenu.hidden = true);
+  toolsBtn.addEventListener("click", (e) => {
+    e.stopPropagation();
+    if (!toolsMenu.hidden) return closeTools();
+    const r = toolsBtn.getBoundingClientRect();
+    toolsMenu.style.top = `${r.bottom + window.scrollY + 4}px`;
+    toolsMenu.style.left = `${r.left + window.scrollX}px`;
+    toolsMenu.hidden = false;
+  });
+  toolsMenu.addEventListener("click", (e) => e.stopPropagation());
+  document.addEventListener("click", closeTools);
+  document.addEventListener("keydown", (e) => e.key === "Escape" && closeTools());
+  [...(opts.baseToolbar === false ? [] : BASE_TOOLBAR.map((b) => ({ ...b, group: "tools" }))), ...(opts.extraToolbarButtons || [])].forEach((b) => {
     const btn = document.createElement("button");
     btn.id = b.id;
-    btn.className = "toolbar-btn" + (b.className ? " " + b.className : "");
+    btn.className = (b.group === "tools" ? "tools-item" : "toolbar-btn") + (b.className ? " " + b.className : "");
     btn.textContent = b.label;
     if (b.title) btn.title = b.title;
+    if (b.group === "tools") {
+      btn.addEventListener("click", () => {
+        closeTools();
+        b.run(statusEl, btn);
+      });
+      toolsMenu.appendChild(btn);
+      return;
+    }
     btn.addEventListener("click", () => b.run(statusEl, btn));
+    if (b.sepBefore) {
+      const sep = document.createElement("span");
+      sep.className = "toolbar-sep";
+      toolbar.insertBefore(sep, statusEl);
+    }
     toolbar.insertBefore(btn, statusEl);
   });
+  if (toolsMenu.children.length) {
+    if (toolbar.querySelector("button")) {
+      const sep = document.createElement("span");
+      sep.className = "toolbar-sep";
+      toolbar.insertBefore(sep, statusEl);
+    }
+    toolbar.insertBefore(toolsBtn, statusEl);
+    document.body.appendChild(toolsMenu);
+  }
 
   // ---------------------------------------------------------------------------
   // Players

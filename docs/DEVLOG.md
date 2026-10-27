@@ -145,6 +145,13 @@ npm run test:e2e                         # Playwright e2e: own profile, server :
     - The reported "lost" tags: neither the editor (a row's own tags are always options), nor the row save, nor a
       reload or the commit dropped them. What was missing: other rows couldn't add a row's new tag, and nothing
       showed which tags were new.
+  - Collection toolbar tidied (user request):
+    - selection actions first, then Rescan drive, then **Tools ▾** (maintenance, `group: "tools"` in the shared
+      toolbar; the extension's page too) and Columns ▾;
+    - Locate / Export latest 10 moved to Settings → **Test**;
+    - **Select last import** (`lastImport.js`, A's `GET /api/import/last-committed`, easy to remove);
+    - the selection is kept in localStorage (`bc_app_selection`): restored on load, items no longer in the collection
+      dropped.
   - Popup: **Checkout / PayPal automation** (`checkoutAutomation`, on unless false). Off, `checkout.js` returns
     before doing anything: no listeners, no DOM changes, no clicks. e2e on a stand-in PayPal page.
   - **New tags reach open pages again:** an update or a dev reload cuts off the content script in tabs already
