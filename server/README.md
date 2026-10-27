@@ -165,9 +165,18 @@ current DB first, and resets this data dir's export tracking for that DB.
 
 ## Writing to your main collection
 
-Off by default. Turn it on in the app's Settings → Rekordbox ("Allow bc-tagger to write to my main
-rekordbox collection"), or with
-`./bct settings --set allow_main_writes=true --set rekordbox_target='"main"'`.
+Two separate settings in Settings → Rekordbox:
+
+- **Which library** (`rekordbox_target`: `test` | `main`): a free choice. With `main`, the playlist tree, the
+  mapping marks and every export/transfer dry run read your main library (always a snapshot copy, never the
+  live file).
+- **Permission to write to main** (`allow_main_writes`, off by default: "Allow bc-tagger to write to my main
+  rekordbox collection"). With `main` chosen and this off, the dry run shows the blocker `main_writes_locked`
+  ("Writing to your main collection is locked: tick …"), `can_confirm` is false and a confirmed export is
+  refused (409); unticking it never switches the library back to `test`. Settings' `derived.main_writes_locked`
+  says so too.
+
+`./bct settings --set allow_main_writes=true --set rekordbox_target='"main"'` sets both.
 
 **Before your first export, make your own backup in rekordbox: *File → Library → Backup
 Library*.** bc-tagger also copies `master.db` and `masterPlaylists6.xml` to
@@ -187,8 +196,8 @@ Library*.** bc-tagger also copies `master.db` and `masterPlaylists6.xml` to
   bc-tagger only removes entries it added. Playlists are never deleted.
 - `masterPlaylists6.xml` gets the new folders/playlists, and only the playlists the export changed
   get a new timestamp (verified on a copy of your library: 4 added, 5 updated, 1,549 untouched).
-- The switch is only in settings; no request can point an export at another library. Turning
-  the checkbox off sets the target back to `test`.
+- Both are only in settings; no request can point an export at another library or skip the permission.
+  Unticking the permission keeps `main` chosen (reads go on; writes stop at the dry run).
 
 ### Tag → playlist mapping
 

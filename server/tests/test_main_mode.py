@@ -145,8 +145,13 @@ def test_settings_rules(svc):
     assert svc.settings_derived()["mapping_warning"] is None
     svc.settings.update({"tag_playlist_map": {"must": [], "pool": []}})
     assert "No tag is mapped" in svc.settings_derived()["mapping_warning"]
+    # unticking "allow" keeps the chosen library: main, read-only for bc-tagger
     svc.settings.update({"allow_main_writes": False})
-    assert svc.settings.get("rekordbox_target") == "test" and svc.target().kind == "test"
+    assert svc.settings.get("rekordbox_target") == "main" and svc.target().kind == "main"
+    assert svc.settings_derived()["main_writes_locked"] is True
+    svc.settings.update({"rekordbox_target": "test"})
+    svc.settings.update({"rekordbox_target": "main"})  # choosing main needs no "allow"
+    assert svc.target().kind == "main"
 
 
 def test_playlist_tree_and_resolve(svc):
@@ -281,14 +286,16 @@ def test_refuses_when_setting_is_off_or_path_differs(svc, main_db, tmp_path):
     target = rbguard.Target("main", str(main_db), {"allow": lambda: allow["on"], "configured": str(main_db)})
     assert target.check().allowed
     allow["on"] = False
-    assert "turned off" in target.check().reason
+    assert target.check().code == "main_writes_locked" and "locked" in target.check().reason
     other = rbguard.Target("main", str(main_db), {"allow": True, "configured": str(tmp_path / "other.db")})
     assert "not the configured main collection" in other.check().reason
     # Switching the setting off between dry run and confirm stops the write.
     dry = svc.export(ids=["t200"], dry_run=True)
     svc.settings.update({"allow_main_writes": False})
-    with pytest.raises(ExportError, match="target library changed"):
+    before = _files(main_db.parent)
+    with pytest.raises(WriteRefused, match="locked"):
         svc.export(ids=["t200"], confirm_token=dry["confirm_token"])
+    assert _files(main_db.parent) == before
 
 
 def test_refuses_changed_plan_or_library(svc, main_db):
@@ -380,7 +387,34 @@ def test_dry_run_reports_blockers_before_confirm(svc, monkeypatch, main_db):
     assert [b["code"] for b in svc.export(ids=["t200"], dry_run=True)["blockers"]] == ["test_library_switched_in"]
     (main_db.parent / MARKER_NAME).unlink()
     off = svc.export(ids=["t200"], dry_run=True, guard_kwargs={"allow": False})
-    assert [b["code"] for b in off["blockers"]] == ["main_writes_off"]
+    assert [b["code"] for b in off["blockers"]] == ["main_writes_locked"]
     svc.settings.update({"tag_playlist_map": {"pool": ["/DJ/Smart"]}})
     bad = svc.export(ids=["t200"], dry_run=True)
     assert [b["code"] for b in bad["blockers"]] == ["playlist_errors"] and not bad["can_confirm"]
+
+
+def test_main_chosen_with_writes_locked_reads_but_never_writes(svc, main_db):
+    """The library choice and the permission are separate: main + locked reads the main library (a copy) and
+    stops every write at the dry run's blocker."""
+    svc.settings.update({"allow_main_writes": False})
+    assert svc.target().kind == "main"
+    before = _files(main_db.parent)
+    tree = {r["path"] for r in svc.rekordbox_playlists()}  # reads work: the playlist tree and names
+    assert "/DJ/Status/Must" in tree
+    assert {r["name"]: r["status"] for r in svc.resolve_playlist_names(["/DJ/Status/Must"])} == {"/DJ/Status/Must": "exists"}
+    dry = svc.export(ids=["t200"], dry_run=True)
+    assert dry["target"] == "main" and dry["changed"] and dry["can_confirm"] is False
+    assert dry["blockers"] == [{"code": "main_writes_locked", "message": rbguard.MAIN_WRITES_LOCKED}]
+    with TestClient(create_app(svc)) as c:
+        r = c.post("/api/rekordbox/export", json={"ids": ["t200"], "confirm_token": dry["confirm_token"]})
+        assert r.status_code == 409 and "locked" in r.json()["detail"]
+        assert c.get("/api/settings").json()["derived"]["main_writes_locked"] is True
+    with pytest.raises(WriteRefused, match="locked"):
+        svc.export(ids=["t200"], confirm_token=dry["confirm_token"])
+    assert _files(main_db.parent) == before  # nothing written, no backup taken
+    # allowed again, rekordbox closed, the test library not switched in: the same export goes through
+    svc.settings.update({"allow_main_writes": True})
+    dry = svc.export(ids=["t200"], dry_run=True)
+    assert dry["blockers"] == [] and dry["can_confirm"]
+    done = svc.export(ids=["t200"], confirm_token=dry["confirm_token"])
+    assert done["changed"] and done["backup"]

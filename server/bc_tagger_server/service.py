@@ -97,6 +97,8 @@ class Service:
         s = self.settings.all()
         return {
             "target": s["rekordbox_target"],
+            # main chosen but writing to it not allowed: reads work, exports stop at the dry run
+            "main_writes_locked": s["rekordbox_target"] == "main" and not s["allow_main_writes"],
             "target_db_path": self.db_path(),
             "mapping_warning": mapping_warning(s["tag_playlist_mode"], s["tag_playlist_map"]),
         }

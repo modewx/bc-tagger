@@ -442,9 +442,13 @@ def create_app(service: Service | None = None) -> FastAPI:
 
     @app.post("/api/rekordbox/export")
     def rb_export(body: ExportBody = Body(default_factory=ExportBody)) -> dict:
-        if not body.dry_run and not body.confirm_token and svc.target().is_main:
-            # No client can skip the dry run on the main collection.
-            raise HTTPException(409, "dry run required")
+        if not body.dry_run and svc.target().is_main:
+            if not body.confirm_token:  # no client can skip the dry run on the main collection
+                raise HTTPException(409, "dry run required")
+            if not svc.settings.get("allow_main_writes"):
+                from .rbguard import MAIN_WRITES_LOCKED
+
+                raise HTTPException(409, MAIN_WRITES_LOCKED)
         if body.rows is not None and (body.ids is not None or body.latest is not None):
             raise HTTPException(400, "send rows or ids/latest, not both")
         if body.rows is not None and not body.rows:
