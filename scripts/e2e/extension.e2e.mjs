@@ -2698,6 +2698,20 @@ test("import end to end (real server): resolve, map tags, paste a URL, link from
 
   // Exactly those selected (new Bandcamp items join as the extension adds them), newest Modified first.
   await page.waitForFunction((n) => document.querySelectorAll("#collectionTable .row-check:checked").length === n, chosen.length, { timeout: 30000 });
+  // Located as the server says, also for the items the extension added after the page opened (user bug: "–").
+  const serverLocal = await api(`/api/items?ids=${chosen.join(",")}`).then((d) => (Array.isArray(d) ? d : d.items));
+  const locatedIds = serverLocal.filter((i) => i.local && i.local.status === "located").map((i) => i.id);
+  assert.ok(locatedIds.length > 0, "some imported rows are located");
+  try {
+    await page.waitForFunction(
+      (ids) => ids.every((id) => (document.querySelector(`tr[data-key="${id}"] .col-located .chip`) || {}).textContent?.startsWith("✓")),
+      locatedIds,
+      { timeout: 15000 }
+    );
+  } catch (e) {
+    const shown = await page.$$eval("#collectionTable tbody tr", (trs, ids) => trs.filter((tr) => ids.includes(tr.dataset.key)).map((tr) => [tr.dataset.key, (tr.querySelector(".col-located") || {}).textContent]), locatedIds);
+    throw new Error(`located on the server, not on the page: ${JSON.stringify(shown.filter(([, t]) => !/^✓/.test(t)))}`);
+  }
   const checked = await page.$$eval("#collectionTable .row-check:checked", (b) => b.map((x) => x.closest("tr").dataset.key));
   assert.deepEqual(checked.slice().sort(), chosen.slice().sort());
   assert.match(await page.textContent("th.col-modified"), /▼/);
@@ -2952,6 +2966,23 @@ test("Import from Files: folders prefilled with their dates, rows by folder unde
     assert.ok(committed.committed_at || committed.status === "committed", JSON.stringify(committed).slice(0, 300));
     const created = await api("/api/items?source=other").then((d) => (Array.isArray(d) ? d : d.items)).then((items) => items.filter((i) => ["First", "Second", "Thing"].includes(i.title)));
     const orders = ["First", "Second", "Thing"].map((t) => (created.find((i) => i.title === t) || {}).order);
+    // The collection shows them located, as the server says (user bug: "–" after an import).
+    const createdIds = created.map((i) => i.id);
+    // Located on the server by the commit (the rows' files), then on the page without a reload.
+    await waitFor(
+      () => api(`/api/items?ids=${createdIds.join(",")}`).then((d) => (Array.isArray(d) ? d : d.items).every((i) => i.local && i.local.status === "located")),
+      { what: "the new items located on the server", timeout: 15000 }
+    );
+    try {
+      await page.waitForFunction(
+        (ids) => ids.every((id) => (document.querySelector(`tr[data-key="${id}"] .col-located .chip`) || {}).textContent?.startsWith("✓")),
+        createdIds,
+        { timeout: 15000 }
+      );
+    } catch (e) {
+      const shown = await page.$$eval("#collectionTable tbody tr", (trs, ids) => trs.filter((tr) => ids.includes(tr.dataset.key)).map((tr) => [tr.dataset.key, (tr.querySelector(".col-located") || {}).textContent]), createdIds);
+      throw new Error(`located on the server, not on the page: ${JSON.stringify(shown)}`);
+    }
     assert.ok(orders.every((o, i) => o > maxOrderBefore && (i === 0 || o > orders[i - 1])), `"#" in row order after everything: ${orders} (> ${maxOrderBefore})`);
     assert.deepEqual((await api("/api/items/t1002746421")).tags, tsviTags, "the unticked duplicate's tags are left alone");
     const tsvi = await api("/api/items/t1002746421");
