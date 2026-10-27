@@ -378,6 +378,20 @@ import: rows, review, commit, log (`source: "files"`), `modified_at` and "#".
 default_tags: ["pool"], lookup}`: the owned root and the not-owned `complete` root. Each `since` is the date of
 that folder's last files-import (remembered when one is created), else 7 days ago. It only reads.
 
+### Import rows straight to rekordbox
+
+`POST /api/rekordbox/export {rows: ["<batch_id>:<n>", …], dry_run, confirm_token}` sends import rows to
+rekordbox without adding them to the collection. It's the same job, result, guard and dry-run/confirm rule
+(on the main library) as exporting items, with playlists from the rows' tags.
+
+- Rows use the file they're located to, with no scan. Rows that aren't located, and refs that aren't
+  import rows, come back in `skipped_items`.
+- Each row's playlist claims are its own (claim id = the ref), so a later export of a collection item never
+  removes them, and exporting a row never changes a collection item's playlists. Re-exporting a row with new
+  tags updates its entries.
+- Rows sent for real get `exported: {at, target}`. The result has `rows: true`.
+- Sending `rows` together with `ids`/`latest`, or an empty `rows`, is a 400.
+
 ### Import logs
 
 Every commit writes a log to `import_log_dir`: `YYYY-MM-DD_HHMMSS_<batch name>_<batch_id>.json` (local time),

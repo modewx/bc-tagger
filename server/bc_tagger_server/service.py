@@ -547,9 +547,49 @@ class Service:
             raise ExportError("the target library changed since the dry run; run the dry run again")
         return {"plan_fingerprint": row["plan_fingerprint"], "source_fingerprint": row["source_fingerprint"]}
 
+    def import_row_items(self, refs: list[str]) -> tuple[list[dict], list[dict]]:
+        """Import rows (``<batch_id>:<n>``) as export items, without adding them to the collection: the row's
+        item with ``id`` = the ref (so its playlist claims are its own, never a collection item's), the row's
+        tags and the file it's located to. Returns (items, refs that aren't import rows)."""
+        from . import importer
+
+        rows: dict[str, dict[str, dict]] = {}
+        items, missing = [], []
+        for ref in refs:
+            batch_id, _, n = str(ref).rpartition(":")
+            if batch_id not in rows:
+                rows[batch_id] = {str(r["n"]): r for r in importer.load_rows(self.store, batch_id)}
+            row = rows[batch_id].get(n)
+            if row is None:
+                missing.append({"id": ref, "title": None, "status": "no such import row"})
+                continue
+            located = row.get("located") or {}
+            item = importer.row_item(row)
+            items.append({**item, "id": ref, "item_id": item["id"], "tags": list(row.get("tags") or []),
+                          "_located": {"status": located.get("status") or "unknown", "best": located.get("best")}})
+        return items, missing
+
+    def _mark_exported(self, refs: list[str], target) -> None:
+        """Import rows sent to rekordbox: ``row.exported = {at, target}`` (rows change live in the preview)."""
+        from . import importer
+
+        by_batch: dict[str, set[str]] = {}
+        for ref in refs:
+            batch_id, _, n = ref.rpartition(":")
+            by_batch.setdefault(batch_id, set()).add(n)
+        for batch_id, ns in by_batch.items():
+            rows = importer.load_rows(self.store, batch_id)
+            done = [r for r in rows if str(r["n"]) in ns]
+            for r in done:
+                r["exported"] = {"at": now_iso(), "target": target.kind}
+            importer._save_rows(self.store, batch_id, done)
+            for r in done:
+                importer._row_event(self, batch_id, r["n"], len(rows))
+
     def export(self, ids=None, latest=None, dry_run=False, ctx=None, guard_kwargs=None,
-               confirm_token: str | None = None, scan: str | None = None) -> dict[str, Any]:
-        """Export to the configured target. The main collection needs ``confirm_token`` from a dry run."""
+               confirm_token: str | None = None, scan: str | None = None, rows: list[str] | None = None) -> dict[str, Any]:
+        """Export to the configured target. The main collection needs ``confirm_token`` from a dry run.
+        ``rows``: import rows instead of collection items (nothing is added to the collection)."""
         from .rbexport import ExportError, build_selection, export
 
         target = self.target(guard_kwargs)
@@ -559,9 +599,15 @@ class Service:
                 expect = self._token_expectation(confirm_token, target)
             elif target.is_main:
                 raise ExportError("dry run required: exports to your main collection need a confirmed dry run")
-        items = self.select_located(ids=ids, latest=latest, ctx=ctx, scan=scan)
-        scan_stats = self.last_prepare
+        missing: list[dict] = []
+        if rows is not None:  # already located: no scan
+            items, missing = self.import_row_items(rows)
+            scan_stats = None
+        else:
+            items = self.select_located(ids=ids, latest=latest, ctx=ctx, scan=scan)
+            scan_stats = self.last_prepare
         selection = build_selection(self.store, items, self.store.get_tags(), self.playlist_rule())
+        selection.skipped += missing
         progress = (lambda cur, tot, msg: ctx.progress(cur, tot, msg)) if ctx else None
         diff = export(
             self.store,
@@ -580,16 +626,20 @@ class Service:
         elif confirm_token:
             with self.store.tx() as c:
                 c.execute("UPDATE confirm_tokens SET used_at = ? WHERE token = ?", (now_iso(), confirm_token))
-        if ctx:
+        if rows is not None:
+            diff["rows"] = True
+            if not dry_run:
+                self._mark_exported([it["id"] for it in selection.items], target)
+        elif ctx:
             for it in items:
                 ctx.item_updated(it["id"])
         return diff
 
-    def start_export(self, ids=None, latest=None, dry_run=False, confirm_token=None, scan=None):
+    def start_export(self, ids=None, latest=None, dry_run=False, confirm_token=None, scan=None, rows=None):
         return self.jobs.submit(
             "export",
             lambda ctx: self.export(ids=ids, latest=latest, dry_run=dry_run, ctx=ctx,
-                                    confirm_token=confirm_token, scan=scan),
+                                    confirm_token=confirm_token, scan=scan, rows=rows),
         )
 
     def rekordbox_playlists(self) -> list[dict[str, Any]]:

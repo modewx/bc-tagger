@@ -103,7 +103,7 @@ def build_selection(
     used_items: list[dict] = []
     unmapped: set[str] = set()
     for item in items:
-        local = local_status(store, item["id"])
+        local = item.get("_located") or local_status(store, item["id"])  # import rows bring their own file
         files = located_tracks(local["best"]) if local["status"] == "located" else []
         if not files:
             skipped.append({"id": item["id"], "title": item.get("title"), "status": local["status"]})

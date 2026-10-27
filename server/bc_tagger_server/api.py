@@ -73,6 +73,8 @@ class SelectionBody(BaseModel):
 
 class ExportBody(SelectionBody):
     confirm_token: Optional[str] = None
+    # import rows ("<batch_id>:<n>") instead of items: sent to rekordbox without adding them to the collection
+    rows: Optional[list[str]] = None
 
 
 class NamesBody(BaseModel):
@@ -433,8 +435,12 @@ def create_app(service: Service | None = None) -> FastAPI:
         if not body.dry_run and not body.confirm_token and svc.target().is_main:
             # No client can skip the dry run on the main collection.
             raise HTTPException(409, "dry run required")
+        if body.rows is not None and (body.ids is not None or body.latest is not None):
+            raise HTTPException(400, "send rows or ids/latest, not both")
+        if body.rows is not None and not body.rows:
+            raise HTTPException(400, "no rows selected")
         job = svc.start_export(ids=body.ids, latest=body.latest, dry_run=body.dry_run,
-                               confirm_token=body.confirm_token, scan=body.scan)
+                               confirm_token=body.confirm_token, scan=body.scan, rows=body.rows)
         return {"job_id": job.id}
 
     @app.get("/api/rekordbox/playlists")
