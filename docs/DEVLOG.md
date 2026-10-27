@@ -175,8 +175,11 @@ Tests never touch Bandcamp, the music drive or a real rekordbox library: Bandcam
       AIFF-C `sowt` as is; `fl32`/`fl64` as float WAV; 8-bit signed to unsigned).
     - The layout is read at index time (scan, quick scan, Import from Files, the watcher, downloads) with a few
       small reads. Rows indexed before this get one on first play.
-    - FLACs already in the transcode cache are still served first (no drive read at all). ALAC and other
-      AIFF-C are still transcoded.
+    - ALAC and compressed AIFF-C are still transcoded to FLAC.
+    - Follow-up (the internal disk had 6.5 GB free): AIFF never goes through the FLAC cache, and FLACs of AIFFs
+      cached before aren't served. 64 of the cache's 66 files (2.01 of 2.07 GB) came from AIFF; the cache is
+      left as it is until the user decides. A file changed since it was indexed is indexed again when played,
+      instead of transcoded. All 802 located AIFFs are plain 16 or 24-bit stereo, so all stream as WAV.
   - Item views give each located file `duration`, `sample_rate`, `bits` and `channels`, from one bulk query:
     no file access.
   - On the live server, for AIFFs not in the FLAC cache, with the drive awake:

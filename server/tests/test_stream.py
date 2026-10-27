@@ -213,23 +213,31 @@ def test_ranges_past_the_end_and_odd_ranges(music):
 
 
 @needs_ffmpeg
-def test_compressed_aiff_c_and_cached_flac_use_flac(music, counting):
+def test_aiff_never_goes_through_the_flac_cache(music, counting):
+    """Compressed AIFF-C is transcoded; plain AIFF is WAV even when an older FLAC of it is in the cache."""
     svc, root, add = music
     ulaw = add("ulaw", "pcm_mulaw", 2, seconds=0.2)
     assert layout_of(svc, ulaw)["compression"] == "ulaw"
     pcm = add("pcm", "pcm_s16be", 2, seconds=0.2)
     row = svc.store.query_one("SELECT size, mtime FROM files WHERE path = ?", (str(pcm),))
-    stream.transcode_to_flac(pcm, row["size"], row["mtime"])  # played before this change
+    old = stream.transcode_to_flac(pcm, row["size"], row["mtime"])  # made before AIFF streamed as WAV
     with TestClient(create_app(svc)) as c:
         r = get(c, ulaw, "bytes=0-99")
         assert r.status_code == 206 and r.headers["content-type"] == "audio/flac"
+        cached = set(stream.cache_dir().iterdir())
         r = get(c, pcm, "bytes=0-99")
-        assert r.status_code == 206 and r.headers["content-type"] == "audio/flac"  # from the cache
-        assert [f for f in counting if f.read_bytes] == []  # the cached FLAC: no read of the source
-        # a file changed since it was indexed: its kept layout can't be trusted, so it's transcoded
+        assert r.status_code == 206 and r.headers["content-type"] == "audio/wav"
+        assert old.is_file() and set(stream.cache_dir().iterdir()) == cached  # left alone, nothing added
+        # a file changed since it was indexed is indexed again and still plays as WAV
         changed = add("changed", "pcm_s16be", 2, seconds=0.2)
-        os.utime(changed, (1_000_000_000, 1_000_000_000))
-        assert get(c, changed, "bytes=0-99").headers["content-type"] == "audio/flac"
+        make_aiff(changed, "pcm_s24be", 1, seconds=0.3)
+        r = get(c, changed)
+        assert r.status_code == 200 and r.headers["content-type"] == "audio/wav"
+        assert r.content[44:] == decode(changed, "s24le") and set(stream.cache_dir().iterdir()) == cached
+        layout = layout_of(svc, changed)
+        assert (layout["bits"], layout["channels"], 44 + layout["size"]) == (24, 1, len(r.content))
+        assert svc.store.query_one("SELECT size FROM files WHERE path = ?", (str(changed),))["size"] == (
+            changed.stat().st_size)
 
 
 def test_read_layout_walks_odd_chunks_and_the_ssnd_offset(tmp_path):

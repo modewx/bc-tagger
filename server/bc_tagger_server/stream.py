@@ -1,13 +1,13 @@
 """Serve indexed audio files to the browser with HTTP Range support.
 
-Chrome can't play AIFF (or ALAC). In order:
+Chrome can't play AIFF (or ALAC). So:
 
-* a FLAC already in the transcode cache (under the data dir) is served from there, with no read of the
-  music drive;
 * an uncompressed AIFF is served as a WAV built on the fly: the 44-byte header comes from the layout the
   index keeps (``files.aiff_layout``, see ``aiff``), and each requested range reads only that slice of the
-  samples. So the first byte goes out before the drive is read, and a seek reads only what it plays;
-* anything else (ALAC, compressed AIFF-C) is transcoded once to FLAC with ffmpeg into the cache.
+  samples. So the header goes out before the drive is read, and a seek reads only what it plays. It never
+  goes through the FLAC cache (the internal disk is short of space), not even an entry made before;
+* ALAC, and AIFF that can't be read as PCM (compressed AIFF-C, more than two channels), are transcoded
+  once to FLAC with ffmpeg into a cache under the data dir.
 
 Only files that are in the index can be streamed.
 """
@@ -73,15 +73,6 @@ def _flac_key(src: Path, size: int, mtime: float) -> str:
     return hashlib.sha1(f"{src}|{size}|{mtime}".encode()).hexdigest()
 
 
-def cached_flac(src: Path, size: int, mtime: float) -> Path | None:
-    """The cache's FLAC of this version of ``src``, if there is one (only the data dir is looked at)."""
-    out = cache_dir() / f"{_flac_key(src, size, mtime)}.flac"
-    if not out.is_file():
-        return None
-    out.touch()
-    return out
-
-
 def transcode_to_flac(src: Path, size: int, mtime: float) -> Path:
     key = _flac_key(src, size, mtime)
     out = cache_dir() / f"{key}.flac"
@@ -111,7 +102,8 @@ def _prune_cache() -> None:
 
 
 def stream_response(store: Store, path: str, range_header: str | None = None) -> Response:
-    row = store.query_one("SELECT path, format, size, mtime, ext, aiff_layout FROM files WHERE path = ?", (path,))
+    row = store.query_one("SELECT path, root, root_kind, format, size, mtime, ext, aiff_layout FROM files WHERE path = ?",
+                          (path,))
     if row is None:
         raise HTTPException(404, "not an indexed audio file")
     if not is_mounted(row["path"]):
@@ -119,9 +111,6 @@ def stream_response(store: Store, path: str, range_header: str | None = None) ->
     src = Path(row["path"])
     headers = {"Cache-Control": CACHE_CONTROL}
     if row["format"] in TRANSCODE_FORMATS:
-        out = cached_flac(src, row["size"], row["mtime"])
-        if out is not None:
-            return FileResponse(out, media_type="audio/flac", headers=headers)
         if row["format"] == "aiff":
             response = wav_response(store, row, range_header)
             if response is not None:
@@ -145,18 +134,22 @@ def _open_source(path: Path) -> BinaryIO:
     return open(path, "rb", buffering=0)
 
 
-def _open_unchanged(row) -> BinaryIO | None:
-    """The file opened for reading, or None if it changed since it was indexed (its layout may have too)."""
+def _open_current(store: Store, row):
+    """``(file opened for reading, row)``. A file changed since it was indexed is indexed again first, so its
+    kept layout (and length) match what is read."""
     try:
         f = _open_source(Path(row["path"]))
     except FileNotFoundError:
         raise HTTPException(404, "file is gone (re-scan the index)") from None
     st = os.fstat(f.fileno())
     if (st.st_size, st.st_mtime) != (row["size"], row["mtime"]):
-        log.info("%s changed since it was indexed: transcoding it (re-scan to stream it directly)", row["path"])
-        f.close()
-        return None
-    return f
+        from .indexer import _flush, file_record
+
+        log.info("%s changed since it was indexed: indexing it again", row["path"])
+        _flush(store, [file_record(Path(row["path"]), row["root"], row["root_kind"], st)])
+        row = store.query_one("SELECT path, root, root_kind, format, size, mtime, ext, aiff_layout FROM files "
+                              "WHERE path = ?", (row["path"],))
+    return f, row
 
 
 def wav_response(store: Store, row, range_header: str | None) -> Response | None:
@@ -164,21 +157,22 @@ def wav_response(store: Store, row, range_header: str | None) -> Response | None
     layout = json.loads(row["aiff_layout"]) if row["aiff_layout"] else None
     source = None
     if layout is None:  # indexed before layouts were kept: read it now (a few small reads), once
-        source = _open_unchanged(row)
-        if source is None:
-            return None
+        source, fresh = _open_current(store, row)
+        if fresh is not row:  # indexed again just now, layout included
+            row, layout = fresh, json.loads(fresh["aiff_layout"]) if fresh["aiff_layout"] else None
         try:
-            layout = read_layout(source, row["size"])
+            layout = layout or read_layout(source, row["size"])
         except Exception:  # noqa: BLE001 - a broken header: let ffmpeg try
             layout = None
         if layout is None:
             source.close()
             return None
-        with store.tx() as c:
-            c.execute("UPDATE files SET aiff_layout = ?, channels = ? WHERE path = ? AND size = ? AND mtime = ?",
-                      (json.dumps(layout), layout["channels"], row["path"], row["size"], row["mtime"]))
+        if not row["aiff_layout"]:
+            with store.tx() as c:
+                c.execute("UPDATE files SET aiff_layout = ?, channels = ? WHERE path = ? AND size = ? AND mtime = ?",
+                          (json.dumps(layout), layout["channels"], row["path"], row["size"], row["mtime"]))
     fmt = wav_format(layout)
-    if fmt is None:  # compressed AIFF-C
+    if fmt is None:  # compressed AIFF-C, or more than two channels
         if source is not None:
             source.close()
         return None
@@ -194,9 +188,10 @@ def wav_response(store: Store, row, range_header: str | None) -> Response | None
         return Response(status_code=416, headers={**headers, "Content-Range": f"bytes */{total}"})
     start, end = span or (0, total - 1)
     if end >= len(header) and source is None:  # sample data asked for: only now is the drive read
-        source = _open_unchanged(row)
-        if source is None:
-            return None
+        source, fresh = _open_current(store, row)
+        if fresh is not row:  # changed since it was indexed: describe it as it is now
+            source.close()
+            return wav_response(store, fresh, range_header)
     elif end < len(header) and source is not None:
         source.close()
         source = None
