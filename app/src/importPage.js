@@ -11,7 +11,7 @@ import { ExtensionBridge } from "../../shared/datasource/extensionBridge";
 import { pageEvents } from "../../shared/datasource/serverEvents";
 import { Jobs, progressText, resultText } from "./jobs";
 import { buildNav } from "./nav";
-import { sourceColumn, localPlayUrl } from "./columns";
+import { sourceColumn, localPlayUrl, localDuration } from "./columns";
 import { openPopover, closePopover } from "./popover";
 import { createTags, mapTagsUrl, getBatch, updateRow, commitBatch, discardBatch, resumeLookups, setDefaultTags, relocateRows, relocateRow, searchFiles, listFolder, rowToItem, matchSource, bandcampSearchUrl, openOnBandcampUrl, cleanBandcampUrl } from "./importApi";
 import { statsLine } from "./importTab";
@@ -1150,6 +1150,7 @@ async function discard(statusEl) {
       { id: "discardImport", label: "Discard", run: discard },
     ],
     localPlayUrl,
+    localDuration,
     playable: playableItem,
     rowClass: (item) => {
       const row = rowOf(item);

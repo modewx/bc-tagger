@@ -177,6 +177,17 @@ npm run test:e2e                         # Playwright e2e: own profile, server :
 
 ### 2026-10-27
 
+- **Our own player controls** (user: a click on the timeline still needed a second click). On the user's drive the
+  metadata takes 1–2 s, and Chrome's native timeline drops a click that lands before it. `shared/collection/
+  rowPlayer.js` replaces the native controls (rows, the docked player, both pages): play/pause, a seek bar the page
+  hit-tests (a click is an exact fraction, kept until the length arrives, then applied and played; a later click
+  replaces it), current / duration, "loading…", space and ←/→ on the bar. The 150 ms dwell stays as a head start.
+  Raising `preload` already resumes the fetch, so `load()` is only called when nothing is loading (it made a second
+  request). e2e with a stream that answers 1.5 s late (app and extension page): one click at 60% before load starts
+  at 60% (fails on 52c107c), a second click replaces it, a click after load seeks at once.
+- **Cached lengths** (user: faster playback): when the server sends a located file's cached `duration`
+  (`local.best.duration`, A), the player shows it before anything loads (`0:00 / 5:12`), and a click shows the time
+  it'll start at; the file's own length wins once it's in. Without it (Bandcamp streams, an older server), as above.
 - **A click on a player's timeline plays from there again** (regression from the hover change): without metadata
   the element has no duration, so the click couldn't seek. Now the metadata loads once the pointer rests on that
   player for 150 ms (cancelled when it leaves), on focus, or when it's pressed (a click that lands too early makes

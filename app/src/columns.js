@@ -377,9 +377,19 @@ export function appColumns(ctx) {
 }
 
 // Play located tracks from disk (the server transcodes what Chrome can't play).
-export function localPlayUrl(item) {
+function playableFile(item) {
   if (item.tralbum_type === "a") return null;
   const files = locatedFiles(localOf(item));
-  if (localOf(item).status !== "located" || files.length !== 1) return null;
-  return `/api/files/stream?path=${encodeURIComponent(files[0].path)}`;
+  return localOf(item).status === "located" && files.length === 1 ? files[0] : null;
+}
+
+export function localPlayUrl(item) {
+  const f = playableFile(item);
+  return f ? `/api/files/stream?path=${encodeURIComponent(f.path)}` : null;
+}
+
+// The file's length the server has cached (no file read), so the player shows it before loading anything.
+export function localDuration(item) {
+  const f = playableFile(item);
+  return f && Number(f.duration) > 0 ? Number(f.duration) : null;
 }

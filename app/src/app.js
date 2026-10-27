@@ -7,7 +7,7 @@ import { ExtensionBridge } from "../../shared/datasource/extensionBridge";
 import { pageEvents } from "../../shared/datasource/serverEvents";
 import { Jobs, progressText, resultText } from "./jobs";
 import { buildNav } from "./nav";
-import { appColumns, downloadable, isLocated, localPlayUrl } from "./columns";
+import { appColumns, downloadable, isLocated, localPlayUrl, localDuration } from "./columns";
 import { downloadFlow, fullReleasesToggle } from "./downloads";
 import { startDevReload } from "./devReload";
 import { createStatusFilter, createSourceFilter, sourceOf, playableItem } from "./statusFilter";
@@ -323,6 +323,7 @@ async function refreshHealth() {
       { ...jobButton("refreshOwnership", "Refresh ownership", "Check which items you own on Bandcamp", refreshOwnership), group: "tools" },
     ],
     localPlayUrl,
+    localDuration,
     playable: playableItem,
     autoFetchArt: false, // no Bandcamp fetches on scroll: stored art only (Tools → Refresh thumbnails)
     filterItem: (item) => sourceFilter.filterItem(item) && statusFilter.filterItem(item),

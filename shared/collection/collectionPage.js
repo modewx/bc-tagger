@@ -21,6 +21,7 @@ import {
 import { fmtDate, cmpDate, cmpModified, cmpTrack, cmpText, cmpTags, matchesSearch } from "./sorting";
 import { setupColumnResizing } from "./columnResize";
 import { buildTagEditorWrap, syncChosenOptions, whenChosenFree, redrawChosen, chosenDrawn, chosenInUse } from "./tagEditor";
+import { attachRowPlayer, playerOf } from "./rowPlayer";
 
 const SHELL_HTML = `
   <div id="topBar">
@@ -70,6 +71,7 @@ const SHELL_HTML = `
  * @param {Array}  [opts.extraToolbarButtons] [{id, label, run(statusEl, button), group?: "tools", sepBefore?}]:
  *   on the toolbar, or (group "tools") in the Tools ▾ menu with the base maintenance buttons
  * @param {function} [opts.localPlayUrl]    (item, key) -> url of a local file to play, or null
+ * @param {function} [opts.localDuration]   (item, key) -> that file's length in seconds, if known (shown before loading)
  * @param {function} [opts.filterItem]      (item) -> false hides the row (extra filters, e.g. statuses)
  * @param {function} [opts.onView]          (shown, total) after each filter/search
  * @param {function} [opts.clearExtraFilters] reset the extra filters (Go To Playing)
@@ -190,7 +192,7 @@ export function createCollectionPage(opts) {
   })();
   let playingKey = null;
   let playingItem = null;
-  let playingAudio = null; // the single <audio> that is (or last was) current
+  let playingAudio = null; // the single <audio> that is (or last was) current (moved with its controls: playerOf)
   let playingTagWrap = null; // the playing track's tag editor (teleports with it)
 
   // Reposition the live player on scroll/resize (header-aware), rAF-throttled, so
@@ -280,38 +282,12 @@ export function createCollectionPage(opts) {
     return btn;
   }
 
-  // A real per-row <audio>. Its metadata (the duration, which a click on the
-  // timeline needs to seek) loads once the pointer rests on this player, it gets
-  // focus, or it's pressed; never while the pointer passes over rows (in the
-  // local app every load reads the music drive). Clicking the timeline while
-  // paused starts playback there.
-  const DWELL_MS = 150;
-  function makeRowAudio(url, item, key) {
+  // A per-row <audio> with our own controls (rowPlayer.js: a click on the bar
+  // plays from there); the controls are what goes in the cell (playerOf).
+  function makeRowAudio(url, item, key, duration = null) {
     const audio = document.createElement("audio");
-    audio.controls = true;
-    audio.preload = "none";
     audio.src = url;
-
-    let dwell = null;
-    const loadMetadata = () => {
-      clearTimeout(dwell);
-      if (audio.preload !== "none") return; // once
-      audio.preload = "metadata";
-      // Not once it has started (Play, a row click): load() would reset and stop it.
-      if (audio.paused && audio.readyState === HTMLMediaElement.HAVE_NOTHING) audio.load();
-    };
-    audio.addEventListener("pointerenter", () => {
-      clearTimeout(dwell);
-      dwell = setTimeout(loadMetadata, DWELL_MS);
-    });
-    audio.addEventListener("pointerleave", () => clearTimeout(dwell));
-    audio.addEventListener("focus", loadMetadata);
-    // Pressed before the metadata is in (a quick click on the timeline): load it
-    // now, so the next click seeks.
-    audio.addEventListener("pointerdown", loadMetadata);
-    audio.addEventListener("seeked", () => {
-      if (audio.paused) audio.play().catch(() => {});
-    });
+    attachRowPlayer(audio, { duration });
     audio.addEventListener("play", () => onAudioPlay(audio, item, key));
     // On end, keep the player in place (shows the play button at the end of the
     // track); it only moves/changes when another track starts.
@@ -321,13 +297,13 @@ export function createCollectionPage(opts) {
   // A local-file <audio> (local app). If the file can't be decoded/streamed,
   // fall back to the Bandcamp player for this row and stop trying local.
   function makeLocalAudio(url, item, key) {
-    const audio = makeRowAudio(url, item, key);
+    const audio = makeRowAudio(url, item, key, opts.localDuration ? opts.localDuration(item, key) : null);
     audio.classList.add("local-audio");
     audio.addEventListener("error", () => {
       item._localFailed = true;
       const wasCurrent = playingAudio === audio;
       if (wasCurrent) playingAudio = null;
-      audio.remove(); // may be docked in the top bar (global mode)
+      playerOf(audio).remove(); // may be docked in the top bar (global mode)
       const cell = document.querySelector(`#collectionTable tr[data-key="${key}"] td.player-cell`);
       if (!cell) return;
       renderPlayerCell(cell, key, item);
@@ -368,13 +344,14 @@ export function createCollectionPage(opts) {
   // there (a fresh player rendered meanwhile, a Play button) is dropped, so a
   // row never shows two players for its track.
   function dockInto(cell, audio) {
+    const player = playerOf(audio);
     [...cell.children].forEach((child) => {
-      if (child === audio) return;
+      if (child === player) return;
       child.querySelectorAll("audio").forEach((a) => a.pause());
       if (child.tagName === "AUDIO") child.pause();
       child.remove();
     });
-    if (audio.parentElement !== cell) cell.appendChild(audio);
+    if (player.parentElement !== cell) cell.appendChild(player);
   }
 
   // Move a no-longer-current audio back into its own row cell, or drop it.
@@ -382,8 +359,8 @@ export function createCollectionPage(opts) {
     const cell = document.querySelector(`#collectionTable tr[data-key="${key}"] td.player-cell`);
     if (cell) {
       dockInto(cell, audio);
-    } else if (audio.parentElement) {
-      audio.remove();
+    } else if (playerOf(audio).parentElement) {
+      playerOf(audio).remove();
     }
   }
 
@@ -410,11 +387,12 @@ export function createCollectionPage(opts) {
       }
       wrap.classList.add("hidden");
     } else {
-      if (playingAudio.parentElement !== holder) {
-        [...holder.querySelectorAll("audio")].forEach((a) => {
-          if (a !== playingAudio) a.remove();
+      const player = playerOf(playingAudio);
+      if (player.parentElement !== holder) {
+        [...holder.children].forEach((x) => {
+          if (x !== player) x.remove();
         });
-        holder.appendChild(playingAudio);
+        holder.appendChild(player);
       }
       if (playingTagWrap && playingTagWrap.parentElement !== tagHolder) {
         [...tagHolder.querySelectorAll(".tag-editor-wrap")].forEach((w) => {
@@ -458,7 +436,7 @@ export function createCollectionPage(opts) {
     }
     cell.innerHTML = "";
     const audio = makeRowAudio(url, item, key);
-    cell.appendChild(audio);
+    cell.appendChild(playerOf(audio));
     audio.play().catch(() => {});
   }
 
@@ -788,20 +766,20 @@ export function createCollectionPage(opts) {
     // Global mode: the currently-playing track reuses the one live (teleporting)
     // audio element; placePlaying() may relocate it to the top bar afterwards.
     if (globalMode && key === playingKey && playingAudio) {
-      cell.appendChild(playingAudio);
+      cell.appendChild(playerOf(playingAudio));
       return;
     }
 
     // Local app: prefer the located local file.
     const localUrl = !item._localFailed && opts.localPlayUrl ? opts.localPlayUrl(item, key) : null;
     if (localUrl) {
-      cell.appendChild(makeLocalAudio(localUrl, item, key));
+      cell.appendChild(playerOf(makeLocalAudio(localUrl, item, key)));
       return;
     }
 
     // A live link -> inline <audio>; else a Play button that resolves one.
     if (isPlayable(item)) {
-      cell.appendChild(makeRowAudio(streamUrlOf(item), item, key));
+      cell.appendChild(playerOf(makeRowAudio(streamUrlOf(item), item, key)));
       return;
     }
     const btn = playButton("▶ Play");
@@ -968,7 +946,7 @@ export function createCollectionPage(opts) {
   // Finder-style highlight, separate from any ticks: a click highlights a row,
   // Shift extends from the last clicked row (in the order shown), Cmd/Ctrl adds
   // or removes one. A page's checkboxes can act on all highlighted rows at once.
-  const ROW_CONTROLS = "a, img, .no-thumb, button, audio, iframe, input, select, label, .chosen-container, .tags-cell, .thumb-cell, .sel-cell, .note-open, .popover";
+  const ROW_CONTROLS = "a, img, .no-thumb, button, .row-player, audio, iframe, input, select, label, .chosen-container, .tags-cell, .thumb-cell, .sel-cell, .note-open, .popover";
   const highlighted = new Set();
   let highlightAnchor = null;
   const shownKeys = () => [...document.querySelectorAll("#collectionTable tbody tr[data-key]")].map((tr) => tr.dataset.key);
@@ -1020,7 +998,7 @@ export function createCollectionPage(opts) {
     // Preserve the live playing audio across the rebuild (global mode) by docking
     // it in the top bar before the table is cleared.
     if (globalMode && playingAudio && collectionTable.contains(playingAudio)) {
-      document.getElementById("gpAudioHolder").appendChild(playingAudio);
+      document.getElementById("gpAudioHolder").appendChild(playerOf(playingAudio));
     }
     if (globalMode && playingTagWrap && collectionTable.contains(playingTagWrap)) {
       document.getElementById("gpTagHolder").appendChild(playingTagWrap);
@@ -1107,7 +1085,7 @@ export function createCollectionPage(opts) {
       row.addEventListener("click", (e) => {
         const playerCell = e.target.closest("td.player-cell");
         if (playerCell) {
-          if (!e.target.closest("audio, button, a, iframe, input, select")) togglePlayRow(key, allItems[key] || item, playerCell);
+          if (!e.target.closest(".row-player, audio, button, a, iframe, input, select")) togglePlayRow(key, allItems[key] || item, playerCell);
           return;
         }
         if (!e.target.closest(ROW_CONTROLS)) highlightRow(key, e);
@@ -1465,7 +1443,7 @@ export function createCollectionPage(opts) {
         try { localStorage.setItem("bc_global_player_mode", globalMode ? "1" : "0"); } catch (e) { /* ignore */ }
         // Stop playback and reset, then re-render in the new mode.
         try { if (playingAudio) playingAudio.pause(); } catch (e) { /* ignore */ }
-        if (playingAudio && playingAudio.parentElement) playingAudio.remove();
+        if (playingAudio && playerOf(playingAudio).parentElement) playerOf(playingAudio).remove();
         if (playingTagWrap && playingTagWrap.parentElement) playingTagWrap.remove();
         playingAudio = null;
         playingKey = null;

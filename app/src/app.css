@@ -127,7 +127,7 @@ button.chip:hover { filter: brightness(0.95); border-color: #bbb; }
   #searchBar, #tagFilter { flex-wrap: wrap; gap: 6px; margin: 6px 0; }
   #searchInput { width: 100%; }
   #tagFilterSelect_chosen { width: 100% !important; }
-  #gpAudioHolder audio { width: 92vw; max-width: 92vw; }
+  #gpAudioHolder .row-player { width: 92vw; max-width: 92vw; }
   #globalPlayer { flex-wrap: wrap; }
   .toolbar-btn { padding: 5px 8px; font-size: 12px; }
 }

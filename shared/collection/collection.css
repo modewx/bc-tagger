@@ -29,8 +29,8 @@ body { font-family: -apple-system, system-ui, sans-serif; margin: 0; }
 }
 #globalPlayer.hidden { display: none; }
 #gpPlayerCol { display: flex; flex-direction: column; align-items: center; gap: 4px; }
-#gpAudioHolder audio { height: 46px; width: 460px; max-width: 48vw; }
-#collectionTable td.player-cell audio { width: 100%; height: 36px; }
+#gpAudioHolder .row-player { width: 460px; max-width: 48vw; height: 40px; }
+#collectionTable td.player-cell .row-player { width: 100%; }
 #gpTagHolder { width: 220px; }
 #gpTagHolder:empty { display: none; }
 .tag-editor-wrap { width: 100%; }
@@ -143,7 +143,52 @@ body { font-family: -apple-system, system-ui, sans-serif; margin: 0; }
   white-space: nowrap;
 }
 .player-btn:disabled { opacity: 0.6; cursor: default; }
-audio { width: 100%; height: 36px; vertical-align: middle; }
+/* The players' own controls (rowPlayer.js): play/pause, a seek bar, current / duration. */
+.row-player {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  height: 32px;
+  padding: 0 10px 0 4px;
+  border: 1px solid #dcdfe4;
+  border-radius: 16px;
+  background: #f6f7f9;
+  box-sizing: border-box;
+  user-select: none;
+}
+.row-player .rp-play {
+  flex: none;
+  width: 24px;
+  height: 24px;
+  border: 0;
+  border-radius: 50%;
+  background: #3875d7;
+  color: #fff;
+  font-size: 10px;
+  line-height: 24px;
+  padding: 0;
+  cursor: pointer;
+}
+.row-player .rp-play:hover { background: #2c62bb; }
+.row-player .rp-bar { flex: 1 1 auto; min-width: 40px; height: 24px; display: flex; align-items: center; cursor: pointer; outline: none; }
+.row-player .rp-track { position: relative; width: 100%; height: 4px; border-radius: 2px; background: #cfd5de; }
+.row-player .rp-fill { position: absolute; left: 0; top: 0; bottom: 0; border-radius: 2px; background: #3875d7; }
+.row-player .rp-thumb {
+  position: absolute;
+  top: 50%;
+  width: 12px;
+  height: 12px;
+  margin: -6px 0 0 -6px;
+  border-radius: 50%;
+  background: #fff;
+  border: 2px solid #3875d7;
+  box-sizing: border-box;
+}
+.row-player .rp-bar:focus-visible .rp-track { box-shadow: 0 0 0 3px rgba(56, 117, 215, 0.3); }
+.row-player .rp-time { flex: none; min-width: 74px; text-align: right; font-size: 11px; color: #555; font-variant-numeric: tabular-nums; }
+.row-player.loading .rp-thumb { border-color: #9bb6e6; animation: rp-pulse 0.9s ease-in-out infinite alternate; }
+.row-player.loading .rp-time { color: #8a6d00; }
+@keyframes rp-pulse { from { transform: scale(0.85); } to { transform: scale(1.15); } }
 .tags-cell { white-space: normal; font-size: 12px; color: #444; }
 /* Local app: a tag edit queued on the server (extension not reachable). */
 .tag-editor-wrap.tags-pending .chosen-choices { border-color: #e0a800; background: #fff8e1; }
