@@ -47,6 +47,9 @@ reachable, edits are queued on the server and applied by the extension on its ne
   - Tracks already in the collection show as duplicates, unticked.
   - **Locations to update (N):** collection items that aren't located yet get these files on Import selected,
     whether or not their rows are ticked.
+- **Import preview:** **Select all** / **Select new only** (everything not already in the collection), and
+  **Transfer to rekordbox** sends the ticked rows' files to rekordbox (playlists from their tags, the usual dry run
+  and confirm) without adding them to the collection.
   - An open import survives leaving the page; the header shows where it is.
 - **Settings → General:** music folders, matching, downloads (folder and format), Bandcamp request pacing, the
   lookup source (Bandcamp / MusicBrainz / both), the import log folder (not inside a music folder or on the music

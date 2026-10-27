@@ -124,6 +124,12 @@ npm run test:e2e                         # Playwright e2e: own profile, server :
     FLAC + AIFF pair as one row with "+1", and lists **Locations to update**: collection items that get located
     on commit, ticked or not. The preview's "#" is the row's own place. e2e uses a fixture tree with real file
     dates on the test server.
+  - Import preview: **Select all**, **Select new only**, and **Transfer to rekordbox** (A's `rows` export: the ticked
+    rows, not added to the collection).
+  - **New tags reach open pages again:** an update or a dev reload cuts off the content script in tabs already
+    open. The background now injects a fresh one into Bandcamp and local-app tabs (the `scripting` permission). It
+    drops the old copy's widgets, and a cut-off app bridge stays quiet. The Bandcamp tagger also follows storage
+    changes, so an import's new tags reach it.
 - **Extension:**
   - Syncs to the server (diffs, a guarded full sync) and is the bridge for the local app (tag edits, page fetches,
     pending adds from imports).

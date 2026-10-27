@@ -2718,6 +2718,30 @@ test("Import from Files: folders prefilled with their dates, rows by folder unde
     assert.equal(await page.isChecked(`tr[data-key="${first}"] .row-check`), true);
     assert.match(await page.getAttribute(`tr[data-key="${first}"] .located-cell .chip`, "title"), /E2E Artist B - New EP \(2026\)\/01 First\.(flac|aiff)/, "the file, on hover");
     assert.match(await page.getAttribute(`tr[data-key="${first}"] .formats-icon`, "title"), /Also here as:\n.*01 First\.(aiff|flac)/);
+    // Select all ticks the duplicates too; Select new only goes back to the rows that aren't in the collection.
+    await page.click("#selectAllRows");
+    await page.waitForFunction((k) => document.querySelector(`tr[data-key="${k}"] .row-check`).checked, dup);
+    await page.click("#selectNewOnly");
+    await page.waitForFunction((k) => !document.querySelector(`tr[data-key="${k}"] .row-check`).checked, dup);
+    await waitFor(() => api(`/api/import/${batchId}`).then((b) => b.rows.every((r) => r.checked === !r.duplicate)), { what: "the ticks saved" });
+    assert.equal(await page.isChecked(`tr[data-key="${first}"] .row-check`), true);
+    // Transfer to rekordbox: the ticked rows, a dry run first (cancelled here: nothing written, nothing added).
+    const exportPosts = [];
+    page.on("request", (r) => r.method() === "POST" && new URL(r.url()).pathname === "/api/rekordbox/export" && exportPosts.push(r.postDataJSON()));
+    assert.equal(await page.textContent("#transferToRekordbox"), "Transfer to rekordbox (3)…");
+    await page.click("#transferToRekordbox");
+    await waitFor(async () => exportPosts.length > 0, { what: "the transfer's dry run", timeout: 60000 });
+    assert.equal(exportPosts[0].dry_run, true);
+    const ticked = (await api(`/api/import/${batchId}`)).rows.filter((r) => r.checked).map((r) => `${batchId}:${r.n}`);
+    assert.deepEqual(exportPosts[0].rows.slice().sort(), ticked.sort());
+    await page.waitForFunction(
+      () => document.querySelector(".confirm-dialog .dialog-cancel") || /^Transfer to rekordbox: (done|error)/.test(document.getElementById("refreshStatus").textContent),
+      null,
+      { timeout: 60000 }
+    );
+    if (await page.$(".confirm-dialog .dialog-cancel")) await page.click(".confirm-dialog .dialog-cancel");
+    await page.waitForFunction(() => /^Transfer to rekordbox: (done|error)/.test(document.getElementById("refreshStatus").textContent));
+    assert.equal(exportPosts.length, 1, "only the dry run");
     // Locations to update: the duplicate's collection item isn't located, so it gets this file on commit,
     // ticked or not; an item already located isn't listed.
     await page.waitForSelector("#locationUpdates:not([hidden])");
