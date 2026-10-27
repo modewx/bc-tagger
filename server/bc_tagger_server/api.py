@@ -50,6 +50,14 @@ class OwnershipBody(BaseModel):
     full: bool = False
 
 
+class FilesImportBody(BaseModel):
+    folders: list[dict[str, Any]]  # [{path, since: "YYYY-MM-DD" | ISO date-time}]
+    default_tags: list[str] = Field(default_factory=list)
+    default_tags_all: bool = False
+    lookup: Literal["server", "browser"] = "server"
+    name: Optional[str] = None
+
+
 class RevealLogBody(BaseModel):
     name: Optional[str] = None  # a log file; none: the logs folder
 
@@ -259,6 +267,22 @@ def create_app(service: Service | None = None) -> FastAPI:
     @app.get("/api/import/open-rows")
     def import_open_rows() -> list[dict]:
         return imp.open_rows(svc)
+
+    @app.get("/api/import/files/defaults")
+    def import_files_defaults() -> dict:
+        """Import from Files: the default folders, each with "since" = its last run (7 days ago at first)."""
+        from . import filesimport
+
+        return filesimport.defaults(svc)
+
+    @app.post("/api/import/files")
+    def import_files(body: FilesImportBody) -> dict:
+        try:
+            batch, job = svc.start_files_import(body.folders, body.default_tags, body.default_tags_all, body.lookup,
+                                                body.name)
+        except imp.ImportError_ as e:
+            raise HTTPException(400, str(e)) from e
+        return {"batch_id": batch["batch_id"], "job_id": job.id, "estimate": batch["estimate"]}
 
     from . import importlog
 

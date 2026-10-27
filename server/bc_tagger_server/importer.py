@@ -343,10 +343,24 @@ def _locate(svc, rows: list[dict], index=None) -> None:
     index = index or svc.file_index()
     cfg = svc.match_config()
     for row in rows:
-        if (row.get("located") or {}).get("manual"):
-            continue  # a file the user picked: later locates leave it alone
+        if _pinned(row):
+            continue  # a file the user picked, or the file the row came from: later locates leave it alone
         result = locate_item(row_item(row), index, cfg)
         row["located"] = {"status": result["status"], "best": result["best"], "candidates": result["candidates"][:3]}
+
+
+def _pinned(row: dict) -> bool:
+    located = row.get("located") or {}
+    return bool(located.get("manual") or located.get("source") == "file")
+
+
+def _uncheck_duplicates(batch: dict, rows: list[dict]) -> None:
+    """Files imports: rows already in the collection start unchecked (once: the user may tick them)."""
+    if batch.get("kind") != "files":
+        return
+    for row in rows:
+        if row.get("duplicate") and not row.get("duplicate_unchecked") and not row.get("committed"):
+            row.update(checked=False, duplicate_unchecked=True)
 
 
 def _lookup(fetcher, row: dict, source: str = "bandcamp", mb_fetcher=None) -> None:
@@ -411,18 +425,8 @@ def _with_defaults(own: list[str], defaults: list[str], to_all: bool) -> tuple[l
     return own + added, added
 
 
-def create_batch(svc, file_obj: dict, default_tags: list[str], name: str | None = None,
-                 default_tags_all: bool = False, lookup: str = "server") -> dict:
-    if not isinstance(file_obj, dict) or file_obj.get("format") != FORMAT:
-        raise ImportError_(f"not a {FORMAT} file")
-    if lookup not in ("server", "browser"):
-        raise ImportError_("lookup must be 'server' or 'browser'")
-    items = file_obj.get("items")
-    if not isinstance(items, list) or not items:
-        raise ImportError_("the file has no items")
-    default_tags = _clean_tags(default_tags)
-    vocab = set(svc.store.get_tags())
-    suggestions = file_obj.get("unknown_tags") or {}
+def new_rows(items: list[dict], default_tags: list[str], default_tags_all: bool) -> list[dict]:
+    """Import rows from items (``ROW_FIELDS``), with the default tags applied."""
     rows: list[dict] = []
     for n, it in enumerate(items):
         if not isinstance(it, dict) or not (it.get("title") or it.get("album")):
@@ -438,21 +442,43 @@ def create_batch(svc, file_obj: dict, default_tags: list[str], name: str | None 
         )
         _refresh(row)
         rows.append(row)
+    return rows
+
+
+def new_batch(svc, name: str, default_tags: list[str], default_tags_all: bool, lookup: str, **fields) -> dict:
+    return {
+        "batch_id": "imp-" + secrets.token_hex(4), "name": name, "kind": "json",
+        "created_at": now_iso(), "status": "resolving", "error": None, "default_tags": default_tags,
+        "default_tags_all": bool(default_tags_all), "lookup": lookup,
+        "lookup_source": svc.settings.get("lookup_source"), "logs": [],
+        "unknown_tags": {}, "new_tags": [], "tag_mapping": None, "source_file": None,
+        "revision": None, "pending_releases": [],
+        "job_id": None, "job_kind": None, "job_boot": svc.boot_id, "phase": "resolving", "stats": {},
+        "committed_at": None, "commit_result": None, **fields,
+    }
+
+
+def create_batch(svc, file_obj: dict, default_tags: list[str], name: str | None = None,
+                 default_tags_all: bool = False, lookup: str = "server") -> dict:
+    if not isinstance(file_obj, dict) or file_obj.get("format") != FORMAT:
+        raise ImportError_(f"not a {FORMAT} file")
+    if lookup not in ("server", "browser"):
+        raise ImportError_("lookup must be 'server' or 'browser'")
+    items = file_obj.get("items")
+    if not isinstance(items, list) or not items:
+        raise ImportError_("the file has no items")
+    default_tags = _clean_tags(default_tags)
+    rows = new_rows(items, default_tags, default_tags_all)
+    vocab = set(svc.store.get_tags())
+    suggestions = file_obj.get("unknown_tags") or {}
     unknown = {}
     for row in rows:
         for t in row["tags"]:
             if t not in vocab and t not in unknown:
                 unknown[t] = _clean_tags(suggestions.get(t) or [])
-    batch = {
-        "batch_id": "imp-" + secrets.token_hex(4), "name": name or file_obj.get("source") or "import",
-        "created_at": now_iso(), "status": "resolving", "error": None, "default_tags": default_tags,
-        "default_tags_all": bool(default_tags_all), "lookup": lookup,
-        "lookup_source": svc.settings.get("lookup_source"), "logs": [],
-        "unknown_tags": unknown, "new_tags": [], "tag_mapping": None, "source_file": file_obj.get("source"),
-        "revision": file_obj.get("revision"), "pending_releases": list(file_obj.get("pending_releases") or []),
-        "job_id": None, "job_kind": None, "job_boot": svc.boot_id, "phase": "resolving", "stats": {},
-        "committed_at": None, "commit_result": None,
-    }
+    batch = new_batch(svc, name or file_obj.get("source") or "import", default_tags, default_tags_all, lookup,
+                      unknown_tags=unknown, source_file=file_obj.get("source"), revision=file_obj.get("revision"),
+                      pending_releases=list(file_obj.get("pending_releases") or []))
     batch["estimate"] = _plan(svc, svc.bandcamp_fetcher(), rows, _needs_lookup)[0]
     _save_rows(svc.store, batch["batch_id"], rows)
     _refresh_stats(svc.store, batch, rows)
@@ -478,11 +504,13 @@ def run_batch(svc, batch_id: str, ctx=None) -> dict:
     try:
         batch["phase"] = "resolving"
         fetcher = _lookup_rows(svc, batch, rows, _needs_lookup, "resolving", ctx)
-        event("locating", 0, len(rows))
-        batch["phase"] = "locating"
-        _save_batch(store, batch)
-        batch["scan"] = _refresh_index(svc, ctx)
-        _locate(svc, rows)
+        _uncheck_duplicates(batch, rows)
+        if batch.get("kind") != "files":  # files rows are their file already
+            event("locating", 0, len(rows))
+            batch["phase"] = "locating"
+            _save_batch(store, batch)
+            batch["scan"] = _refresh_index(svc, ctx)
+            _locate(svc, rows)
         _save_rows(store, batch_id, rows)
         batch.update(status="ready", phase=None)
         event("done", len(rows), len(rows))
@@ -550,6 +578,10 @@ def resume_batch(svc, batch_id: str, ctx=None) -> dict:
     from the cache), then locate."""
     store = svc.store
     batch = load_batch(store, batch_id)
+    if batch.get("kind") == "files" and not batch.get("scanned"):  # stopped while scanning: start over
+        from . import filesimport
+
+        return filesimport.run(svc, batch_id, ctx)
     rows = load_rows(store, batch_id)
     interrupted = batch["status"] == "resolving"  # prepare_job reopened an interrupted batch
     if batch.get("lookup") == "browser":  # the browser goes on; the server only clears the pause
@@ -565,7 +597,8 @@ def resume_batch(svc, batch_id: str, ctx=None) -> dict:
         r["match"] = _empty_match()
     try:
         _lookup_rows(svc, batch, rows, lambda r: any(r is t for t in targets), "resolving", ctx)
-        if interrupted:  # it may not have located anything yet
+        _uncheck_duplicates(batch, rows)
+        if interrupted and batch.get("kind") != "files":  # it may not have located anything yet
             batch["phase"] = "locating"
             _save_batch(store, batch)
             batch["scan"] = _refresh_index(svc, ctx)
@@ -740,8 +773,10 @@ def _finish_browser(svc, batch: dict) -> None:
     def finish(ctx):
         b = load_batch(svc.store, batch_id)
         rows = load_rows(svc.store, batch_id)
-        b["scan"] = _refresh_index(svc, ctx, b)
-        _locate(svc, rows)
+        _uncheck_duplicates(b, rows)
+        if b.get("kind") != "files":
+            b["scan"] = _refresh_index(svc, ctx, b)
+            _locate(svc, rows)
         _save_rows(svc.store, batch_id, rows)
         b.update(status="ready", phase=None)
         _refresh_stats(svc.store, b, rows)
@@ -962,7 +997,7 @@ def relocate_batch(svc, batch_id: str, which: Any = "missing", scan: str | None 
     else:
         wanted = {int(x) for x in which}
         targets = [r for r in rows if r["n"] in wanted]
-    targets = [r for r in targets if not (r.get("located") or {}).get("manual") and not r.get("committed")]
+    targets = [r for r in targets if not _pinned(r) and not r.get("committed")]
     if ctx:
         ctx.progress(0, len(targets), "scanning for new files")
     scan_stats = _refresh_index(svc, ctx, batch, scan)
@@ -1236,7 +1271,8 @@ def _commit(svc, batch: dict, earlier: set[int] = frozenset()) -> dict:
             result["other_added"] += 1
             ids["other_added"].append(item["id"])
         located = row.get("located") or {}
-        if located.get("manual") and located.get("best"):  # the hand-picked file: confirmed for the new item
+        from_file = located.get("source") == "file" and row["committed"] in ("pending_add", "other")
+        if (located.get("manual") or from_file) and located.get("best"):  # confirmed for the item
             item_id = (row["duplicate"] or {}).get("of") or row_item(row)["id"]
             with store.tx() as c:
                 c.execute("DELETE FROM match_overrides WHERE item_id = ? AND decision = 'confirm'", (item_id,))

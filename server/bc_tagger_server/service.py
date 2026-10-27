@@ -724,6 +724,17 @@ class Service:
         batch["job_id"] = job.id
         return batch, job
 
+    def start_files_import(self, folders: Any, default_tags: list[str], default_tags_all: bool = False,
+                           lookup: str = "server", name: str | None = None):
+        """Import from Files: check the folders, make the batch, then scan + look up as a job."""
+        from . import filesimport, importer
+
+        batch = filesimport.create(self, folders, default_tags, default_tags_all, lookup, name)
+        job = self.jobs.submit("import", lambda ctx: filesimport.run(self, batch["batch_id"], ctx))
+        importer.set_job(self, batch["batch_id"], job)
+        batch["job_id"] = job.id
+        return batch, job
+
     def start_relocate(self, batch_id: str, rows: Any = "missing", scan: str | None = "quick"):
         from . import importer
 
