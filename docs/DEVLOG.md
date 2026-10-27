@@ -96,6 +96,13 @@ Tests never touch Bandcamp, the music drive or a real rekordbox library: Bandcam
     timeout is 180 s instead of the tool's 50 s.
   - Each release's progress and retry reason (e.g. "retry 1/3: read timed out") are read from the tool's
     parallel output.
+- **Random native crashes fixed (segfault / bus error):** an automatic garbage-collection pass, in any thread,
+  freed pyrekordbox/SQLAlchemy reference cycles in the middle of a SQLCipher query.
+  - Now automatic collection pauses while any rekordbox database is open, and the last close collects at a safe
+    point.
+  - Every `MasterDatabase` is opened and closed through `rbguard.open_master_database` / `close_database`.
+  - Tests close every `Store` and fail if a rekordbox connection is left open.
+  - Before, the full suite crashed on nearly every run; after, 9/9 runs passed (`-q` and `-v`).
 
 ## App and extension (`app/`, `extension/`, `shared/`, branch `claude/local-collection-ui-e8f6f6`)
 

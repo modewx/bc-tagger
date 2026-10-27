@@ -32,8 +32,6 @@ PIONEER = Path.home() / "Library" / "Pioneer"
 
 
 def make(dest: Path, playlists: list[str], test_marker: bool) -> Path:
-    from pyrekordbox.masterdb import MasterDatabase
-
     template = Path(os.environ.get("BCT_TEST_TEMPLATE_DB", TEST_LIBRARY_DIR / "master.db"))
     dest = Path(os.path.realpath(dest.expanduser()))
     for protected in (PIONEER, PROTECTED_VOLUME):
@@ -52,8 +50,7 @@ def make(dest: Path, playlists: list[str], test_marker: bool) -> Path:
     open_in_rekordbox = rbguard.options_db_path()
     if open_in_rekordbox is not None and rbguard.resolve(open_in_rekordbox) == rbguard.resolve(db_path):
         raise SystemExit(f"refusing: rekordbox is set to use {db_path}")
-    rbguard._quiet_pyrekordbox()
-    db = MasterDatabase(path=db_path, db_dir=dest)
+    db = rbguard.open_master_database(db_path, dest)
     try:
         for path in playlists:
             parts = [p for p in path.strip("/").split("/") if p]
@@ -67,8 +64,7 @@ def make(dest: Path, playlists: list[str], test_marker: bool) -> Path:
         with mock.patch("pyrekordbox.masterdb.database.get_rekordbox_pid", return_value=0):
             db.commit()
     finally:
-        db.close()
-        db.engine.dispose()
+        rbguard.close_database(db)
     if test_marker:
         (dest / rbguard.MARKER_NAME).write_text("bc-tagger sandbox test library\n")
     return db_path

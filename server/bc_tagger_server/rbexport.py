@@ -659,8 +659,7 @@ def _export(
         db.rollback()
         raise
     finally:
-        db.close()
-        db.engine.dispose()
+        rbguard.close_database(db)
 
     # 5. Record what we did (only after a successful commit).
     ts = now_iso()
@@ -792,5 +791,4 @@ def read_back(target: rbguard.Target | str | Path, folder_name: str, keys: list[
         out["duplicate_content_paths"] = [d[0] for d in dup]
         return out
     finally:
-        db.close()
-        db.engine.dispose()
+        rbguard.close_database(db)

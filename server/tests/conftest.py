@@ -89,3 +89,43 @@ def make_service(tmp_path):
     for svc in services:
         svc.jobs.shutdown()
         svc.store.close()
+
+
+@pytest.fixture(autouse=True)
+def _no_open_databases_left(monkeypatch):
+    """Every ``Store`` a test makes is closed afterwards, and no rekordbox (SQLCipher) connection may be left open.
+
+    An open sqlite connection left to the garbage collector, with its statements in the same cycle, is freed in
+    no fixed order; that corrupted memory and crashed later tests at random (a segfault mid-query while the
+    collector ran). Closing explicitly avoids it; the check catches code that forgets to close a ``MasterDatabase``.
+    """
+    import gc
+
+    from sqlcipher3 import dbapi2 as sqlcipher
+
+    from bc_tagger_server import store as store_module
+
+    made = []
+    real_init = store_module.Store.__init__
+
+    def init(self, *a, **kw):
+        real_init(self, *a, **kw)
+        made.append(self)
+
+    monkeypatch.setattr(store_module.Store, "__init__", init)
+    yield
+    for store in made:
+        store.close()
+    gc.collect()
+    left = []
+    for obj in gc.get_objects():
+        if type(obj) is sqlcipher.Connection:
+            try:
+                obj.total_changes
+                left.append(obj)
+            except sqlcipher.ProgrammingError:  # closed
+                pass
+    assert not left, f"{len(left)} rekordbox database connection(s) left open"
+    from bc_tagger_server import rbguard
+
+    assert rbguard.open_databases() == 0, "a rekordbox database was opened and not closed (close_database)"
