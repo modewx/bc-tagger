@@ -105,6 +105,9 @@ body { font-family: -apple-system, system-ui, sans-serif; margin: 0; }
   border-top: 2px solid #d5dce6;
   overflow-wrap: anywhere;
 }
+/* Tags not in the vocabulary yet (opts.newTags): highlighted chips and dropdown entries. */
+.tag-editor-wrap .chosen-container-multi .chosen-choices li.search-choice.new-tag { background: #fff3c4; border-color: #e0b84a; }
+.tag-editor-wrap .chosen-results li.new-tag::after { content: " · new"; color: #9a6b00; font-size: 11px; }
 /* Artist, with the copy button at the cell's right edge. */
 .artist-wrap { display: flex; align-items: flex-start; gap: 4px; }
 .artist-wrap .artist-name { flex: 1 1 auto; min-width: 0; }

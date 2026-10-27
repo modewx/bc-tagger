@@ -2899,7 +2899,7 @@ test("Import from Files: folders prefilled with their dates, rows by folder unde
     await page.reload();
     await page.waitForSelector("#newTagsBar:not([hidden]) #createNewTags");
     await shot("files-new-tags.png", ".import-info");
-    assert.match(await page.textContent("#newTagsBar"), new RegExp(`isn't in your tag list yet: ${NEW_TAG}\\.`));
+    assert.match(await page.textContent("#newTagsBar"), new RegExp(`^1 new tag will be created when you import or transfer: ${NEW_TAG}\\.`));
     assert.equal(await page.evaluate(() => document.querySelector(".import-info").firstElementChild.nextElementSibling.id), "newTagsBar", "at the top");
     // Transfer to rekordbox: the ticked rows, a dry run first (cancelled here: nothing written, nothing added).
     // It doesn't wait for the new tag: the dialog says where each tag goes, the new one pointed out.
@@ -2927,8 +2927,7 @@ test("Import from Files: folders prefilled with their dates, rows by folder unde
     assert.equal(exportPosts.length, 1, "only the dry run");
     // Create New Tags: in the tag list now; then a link to map it, which Settings opens with the tag pointed out.
     await page.click("#createNewTags");
-    await page.waitForSelector("#mapNewTags");
-    assert.match(await page.textContent("#newTagsBar"), new RegExp(`^Created: ${NEW_TAG}\\.`));
+    await page.waitForFunction((t) => document.getElementById("newTagsBar").textContent.startsWith(`Created: ${t}.`), NEW_TAG);
     assert.ok((await api("/api/tags")).includes(NEW_TAG));
     const mapUrl = await page.getAttribute("#mapNewTags", "href");
     const settings = await context.newPage();
@@ -2967,6 +2966,65 @@ test("Import from Files: folders prefilled with their dates, rows by folder unde
     if (batchId) await api(`/api/import/${batchId}`, { method: "DELETE" }).catch(() => {});
     await put({ owned_root: before.owned_root, not_owned_roots: before.not_owned_roots, downloads_dir: before.downloads_dir || "" });
     fs.rmSync(base, { recursive: true, force: true });
+    await page.close();
+  }
+});
+
+// New tags (not in the vocabulary) in an import: kept on the rows, offered to every row,
+// highlighted, and created when the rows are imported.
+test("import preview: a row's new tag is never dropped (edits, reloads), other rows can add it, it's highlighted, and Import selected creates it", async () => {
+  const NEW = "e2e-fresh";
+  const items = [
+    { line: 1, raw: "TSVI - Futuro Lontano", artist: "TSVI", title: "Futuro Lontano", existing_id: "t1002746421", tags: ["must", NEW] },
+    { line: 2, raw: "E2E Nobody - Lonely Thing", artist: "E2E Nobody", title: "Lonely Thing", tags: ["must"] },
+  ];
+  const file = { format: "bc-tagger-import/1", source: "e2e-newtags.txt", unknown_tags: { [NEW]: [] }, items };
+  const { batch_id: batchId } = await post("/api/import", { file, default_tags: [], name: "e2e-newtags" });
+  const page = await context.newPage();
+  page.on("dialog", (d) => d.accept());
+  const rowTags = (n) => api(`/api/import/${batchId}`).then((b) => b.rows.find((r) => r.n === n).tags);
+  const editorTags = (key) => page.$eval(`tr[data-key='${key}'] select.tag-editor`, (s) => [...s.selectedOptions].map((o) => o.value));
+  const editorReady = (key) => page.waitForSelector(`tr[data-key='${key}'] select.tag-editor`, { state: "attached" });
+  try {
+    await waitFor(() => api(`/api/import/${batchId}`).then((b) => b.status === "ready"), { what: "the batch", timeout: 30000 });
+    await post(`/api/import/${batchId}/tags`, { map: {}, unmapped: "create" });
+    assert.deepEqual(await rowTags(0), ["must", NEW]);
+    await page.goto(`${SERVER}/import/?batch=${batchId}`);
+    await page.waitForFunction(() => document.querySelectorAll("#collectionTable tbody tr[data-key]").length === 2);
+    await editorReady("r0");
+    assert.deepEqual(await editorTags("r0"), ["must", NEW], "shown");
+    // Editing another tag keeps it.
+    await page.evaluate(() => $("tr[data-key='r0'] select.tag-editor").val([...$("tr[data-key='r0'] select.tag-editor").val(), "pool"]).trigger("change"));
+    await waitFor(async () => (await rowTags(0)).includes("pool"), { what: "the edit saved" });
+    assert.deepEqual((await rowTags(0)).sort(), ["must", NEW, "pool"].sort(), "kept on save");
+    // A reload keeps it.
+    await page.reload();
+    await page.waitForFunction(() => document.querySelectorAll("#collectionTable tbody tr[data-key]").length === 2);
+    await editorReady("r0");
+    assert.deepEqual((await editorTags("r0")).sort(), ["must", NEW, "pool"].sort(), "kept after a reload");
+    // Highlighted: its chip and its option.
+    await page.waitForFunction((t) => [...document.querySelectorAll("tr[data-key='r0'] li.search-choice.new-tag")].some((li) => li.textContent.trim() === t), NEW);
+    assert.equal(await page.$eval(`tr[data-key='r0'] select.tag-editor option[value="${NEW}"]`, (o) => o.classList.contains("new-tag")), true);
+    assert.equal(await page.$eval("tr[data-key='r0'] select.tag-editor option[value='pool']", (o) => o.classList.contains("new-tag")), false);
+    // The top bar says it'll be created, and links to mapping it.
+    assert.match(await page.textContent("#newTagsBar"), new RegExp(`^1 new tag will be created when you import or transfer: ${NEW}\\.`));
+    assert.match(await page.getAttribute("#mapNewTags", "href"), new RegExp(`tags%3D${NEW}$`));
+    // Another row can add it like any tag.
+    await editorReady("r1");
+    assert.equal(await page.$eval(`tr[data-key='r1'] select.tag-editor option[value="${NEW}"]`, (o) => o.classList.contains("new-tag")), true, "offered");
+    await page.evaluate((t) => $("tr[data-key='r1'] select.tag-editor").val(["must", t]).trigger("change"), NEW);
+    await waitFor(async () => (await rowTags(1)).includes(NEW), { what: "added to the other row" });
+    // Import selected creates it: in the vocabulary, on the merged item and on the new Other item.
+    assert.ok(!(await api("/api/tags")).includes(NEW), "not created yet");
+    await page.click("#importSelected");
+    await page.waitForURL(SERVER + "/", { timeout: 30000 });
+    await waitFor(async () => (await api("/api/tags")).includes(NEW), { what: "the tag in the vocabulary" });
+    await waitFor(() => api("/api/items/t1002746421").then((it) => it.tags.includes(NEW)), { what: "the merged item carrying it" });
+    const other = (await api("/api/items?source=other").then((d) => (Array.isArray(d) ? d : d.items))).find((i) => i.title === "Lonely Thing");
+    assert.ok(other && other.tags.includes(NEW), JSON.stringify(other && other.tags));
+    await waitFor(async () => (await storage("tags")).tags.includes(NEW), { what: "the tag in the extension" });
+  } finally {
+    await api(`/api/import/${batchId}`, { method: "DELETE" }).catch(() => {});
     await page.close();
   }
 });

@@ -78,6 +78,7 @@ const SHELL_HTML = `
  * @param {string[]} [opts.hideColumns]     ids of columns hidden until shown with the Columns chooser (e.g. "date")
  * @param {(item) => string|null} [opts.groupBy] a header row (e.g. a folder) above each group, in "#" order
  * @param {(keys) => void} [opts.onItemsUpdated] items changed in place (no re-render of the view)
+ * @param {() => string[]} [opts.newTags] tags offered beyond the vocabulary, highlighted (an import's new ones)
  * @param {string} [opts.columnsKey]        localStorage key for the shown/hidden columns (default: from colWidthKey)
  * @param {function} [opts.playable]        (item) -> false: nothing to play (no Bandcamp page, no local file)
  *
@@ -569,8 +570,11 @@ export function createCollectionPage(opts) {
     { rootMargin: "300px" }
   );
 
+  // Tags to offer beyond the vocabulary, highlighted (opts.newTags: an import's new ones).
+  const newTagsOf = () => (opts.newTags && opts.newTags()) || [];
+
   function makeTagEditor(item, key) {
-    const wrap = buildTagEditorWrap(item, key, allTagsVocab, onTagsEdited);
+    const wrap = buildTagEditorWrap(item, key, allTagsVocab, onTagsEdited, newTagsOf());
     if (item._tagsPending) wrap.classList.add("tags-pending");
     return wrap;
   }
@@ -633,9 +637,15 @@ export function createCollectionPage(opts) {
   // refresh the filter and every open inline tag editor live — no reload needed.
   function onVocabChanged(tags) {
     allTagsVocab = Array.isArray(tags) ? tags : [];
+    refreshTagOptions();
+  }
+
+  // Every tag editor (and the tag filter) offers the vocabulary plus the new tags.
+  function refreshTagOptions() {
+    const fresh = newTagsOf();
     const filter = document.getElementById("tagFilterSelect");
-    if (filter) syncChosenOptions(filter, allTagsVocab);
-    document.querySelectorAll("select.tag-editor").forEach((sel) => syncChosenOptions(sel, allTagsVocab));
+    if (filter) syncChosenOptions(filter, allTagsVocab, fresh);
+    document.querySelectorAll("select.tag-editor").forEach((sel) => syncChosenOptions(sel, allTagsVocab, fresh));
   }
 
   function renderTagsCell(cell, key, item) {
@@ -1474,6 +1484,7 @@ export function createCollectionPage(opts) {
     reload,
     refreshRow,
     refilter: () => computeView(),
+    refreshTagOptions, // e.g. the new tags changed (opts.newTags)
     getView: () => currentView,
     render: () => renderCollectionTable(currentView),
     // Sort by a column's sortKey; dir 1 = ascending, -1 = descending (newest first for dates).

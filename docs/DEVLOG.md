@@ -134,9 +134,13 @@ npm run test:e2e                         # Playwright e2e: own profile, server :
     rows, not added to the collection). Transfer doesn't wait for tags to be created or mapped.
     - The dialog lists `tag_playlists` (new tags and tags that won't be exported are pointed out) with a link to map
       them.
-    - **Create New Tags** at the top of the preview (`uncreated_tags`, `POST /api/tags/create`) is followed by "Map
-      them to rekordbox playlists →". `#rekordbox/tags=a,b` opens Settings with those tags pointed out in the mapping
-      editor.
+    - New tags (`uncreated_tags`) are offered in every row's tag editor (`opts.newTags` in the shared table),
+      highlighted in the chips and the dropdown, and created at commit or transfer. The top bar says so and has an
+      optional "Create now" (`POST /api/tags/create`) and "Map them to rekordbox playlists →". `#rekordbox/tags=a,b`
+      opens Settings with those tags pointed out in the mapping editor.
+    - The reported "lost" tags: neither the editor (a row's own tags are always options), nor the row save, nor a
+      reload or the commit dropped them. What was missing: other rows couldn't add a row's new tag, and nothing
+      showed which tags were new.
   - Popup: **Checkout / PayPal automation** (`checkoutAutomation`, on unless false). Off, `checkout.js` returns
     before doing anything: no listeners, no DOM changes, no clicks. e2e on a stand-in PayPal page.
   - **New tags reach open pages again:** an update or a dev reload cuts off the content script in tabs already

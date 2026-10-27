@@ -51,8 +51,10 @@ reachable, edits are queued on the server and applied by the extension on its ne
 - **Import preview:** **Select all** / **Select new only** (everything not already in the collection), and
   **Transfer to rekordbox** sends the ticked rows' files to rekordbox (playlists from their tags, the usual dry run
   and confirm) without adding them to the collection. Its count, like Export Selected to RB's, is the located rows;
-  the hint next to it says how many aren't located (skipped). The dialog shows where each tag goes. Tags the rows use that
-  aren't in the tag list yet get **Create New Tags** at the top, then a link to map them in Settings → Rekordbox.
+  the hint next to it says how many aren't located (skipped). The dialog shows where each tag goes.
+  - **New tags** (in the rows, not in the tag list yet) are offered in every row's tag editor, highlighted, and
+    created when the rows are imported or transferred. The bar at the top lists them, links to mapping them in
+    Settings → Rekordbox, and has an optional **Create now**.
   - An open import survives leaving the page; the header shows where it is.
 - **Settings → General:** music folders, matching, downloads (folder and format), Bandcamp request pacing, the
   lookup source (Bandcamp / MusicBrainz / both), the import log folder (not inside a music folder or on the music
@@ -102,7 +104,7 @@ Runs the extension, server and local app together in a Playwright Chromium with 
   real server (mapping, linking, browser lookups, downloads, re-locate, browse), settings, and rekordbox dry runs
   and a sandbox write.
 
-A full run (65 tests) takes about 112 s (2026-10-26: 110–114 s). For a quick check, run a subset by
+A full run (66 tests) takes about 112 s (2026-10-26: 110–114 s). For a quick check, run a subset by
 name. Include `Import \(replace\)`, which loads the test collection the others use:
 
 ```bash
