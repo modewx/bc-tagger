@@ -83,6 +83,10 @@ class ExportBody(SelectionBody):
     add_same_song: bool = False
 
 
+class PreviewBuildBody(BaseModel):
+    ids: list[str] = Field(max_length=10000)
+
+
 class NamesBody(BaseModel):
     names: list[str]
     target: Optional[Literal["test", "main"]] = None  # also as ?target=: read that library, not the saved one
@@ -173,7 +177,7 @@ def create_app(service: Service | None = None) -> FastAPI:
         allow_origin_regex=ALLOWED_ORIGIN_RE,
         allow_methods=["*"],
         allow_headers=["*"],
-        expose_headers=["X-Total-Count"],
+        expose_headers=["X-Total-Count", "X-Bc-Source"],
     )
 
     @app.middleware("http")
@@ -612,13 +616,38 @@ def create_app(service: Service | None = None) -> FastAPI:
             updated = svc.settings.update(changes)
         except (SettingsError, ValueError, TypeError) as e:
             raise HTTPException(400, str(e)) from e
+        if "preview_cache_gb" in changes:  # a smaller cap drops the least recently played now
+            svc.previews.prune()
         return {**updated, "presets": PRESETS, "derived": svc.settings_derived()}
 
     # -- files & dev -------------------------------------------------------------------
 
     @app.get("/api/files/stream")
-    def stream_file(request: Request, path: str) -> Response:
-        return svc.stream_file(request, path)
+    def stream_file(request: Request, path: str, preview: bool = True) -> Response:
+        """``preview=0``: always the original (WAV for AIFF, FLAC for ALAC, else the file), and no preview is
+        made or used. ``X-Bc-Source``: preview | wav | flac | native."""
+        return svc.stream_file(request, path, use_preview=preview)
+
+    # -- previews (previews.py) --------------------------------------------------------
+
+    @app.get("/api/previews/status")
+    def previews_status() -> dict:
+        return svc.previews.status()
+
+    @app.post("/api/previews/build")
+    def previews_build(body: PreviewBuildBody) -> dict:
+        return {"job_id": svc.start_preview_build(body.ids).id}
+
+    @app.post("/api/previews/build/{job_id}/cancel")
+    def previews_cancel(job_id: str) -> dict:
+        try:
+            return svc.cancel_preview_build(job_id)
+        except KeyError:
+            raise HTTPException(404, f"no preview build {job_id}") from None
+
+    @app.delete("/api/previews")
+    def previews_clear() -> dict:
+        return svc.previews.clear()
 
     @app.get("/api/dev/build-id")
     def build_id() -> dict:

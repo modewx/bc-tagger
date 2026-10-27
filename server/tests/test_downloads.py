@@ -85,6 +85,8 @@ def test_download_then_locate(svc, tmp_path):
         assert items["t300"]["state"] == "failed"
         album = (tmp_path / "owned" / "Artist A" / "2024 - Album A").resolve()
         assert result["releases"][0]["folder"] == str(album) and result["releases"][0]["indexed"] == 2
+        # previews of what was just downloaded, while it's fresh
+        assert set(svc.previews.queued()) >= {str(p) for p in album.glob("*.aiff")} and list(album.glob("*.aiff"))
         view = c.get("/api/items/t100").json()
         assert view["local"]["status"] == "located" and view["local"]["best"]["path"].endswith("01 Song A.aiff")
         # downloaded before: the downloader's cache, nothing new; force downloads again

@@ -52,7 +52,11 @@ cd server
 ## Playback
 
 `GET /api/files/stream?path=` serves an indexed file with Range support (`Accept-Ranges: bytes`, 206, 416 with
-`Content-Range: bytes */N`). Chrome can't play AIFF or ALAC, so:
+`Content-Range: bytes */N`). `X-Bc-Source` says what was served: `preview`, `wav`, `flac` or `native`.
+
+An AIFF or ALAC file with a preview (below) plays the preview: it starts at once and needs no music drive, even
+unplugged. `preview=0` always plays the original and makes or uses no preview (for comparing the two). Without a
+preview, Chrome can't play AIFF or ALAC, so:
 
 1. Uncompressed AIFF (big-endian PCM; AIFF-C `sowt`, `fl32`, `fl64`; 1–32 bits, mono or stereo) is served as a
    WAV made on the fly (`audio/wav`). Its 44-byte header comes from the layout the index keeps
@@ -65,9 +69,33 @@ cd server
 2. Anything else (ALAC, compressed AIFF-C, AIFF with more than two channels) is transcoded once to FLAC with
    ffmpeg into `transcode-cache/` (2 GB, least recently played dropped first).
 
-Item views give each located file `duration` (seconds), `sample_rate`, `bits` and `channels` from the index
-(`local.best` for a track, `local.best.tracks[i]` for a release); null where the index doesn't know.
-`channels` is filled when a file is (re)indexed, or for AIFF when first played.
+Item views give each located file `duration` (seconds), `sample_rate`, `bits`, `channels` and `preview` (a
+preview exists) from the index (`local.best` for a track, `local.best.tracks[i]` for a release; a release's own
+`preview` is true when all its tracks have one). Null where the index doesn't know. `channels` is filled when a
+file is (re)indexed, or for AIFF when first played.
+
+### Previews
+
+Opus 96 kbps in WebM (cues at the front, so it seeks) under `<data dir>/previews/`, one per AIFF/ALAC file, for
+the version (size, mtime) it was made from. About 4 MB for 5 minutes, so 3 GB holds about 750 tracks.
+
+- **Made only by work you started**, which is also the only time they read the drive: an import commit (the
+  files its rows are located to), a finished download, a first play (in the background, 3 s after the stream
+  starts, not with `preview=0`), and `POST /api/previews/build {ids}`. Page loads and timers only read the
+  `previews` table. At most two encodes run at a time, under `nice`, on their own workers (other jobs don't
+  wait for them).
+- **Kept to `preview_cache_gb`** (default 3; 0 turns them off): the least recently played go first, at once
+  when the setting is lowered. **Never written when the internal disk would drop below 2 GB free**: that
+  preview is skipped and the status counts it.
+- `GET /api/previews/status` → `{count, bytes, cap_bytes, free_bytes, min_free_bytes, building, queued, jobs,
+  skipped_low_space, last_skip}`.
+- `POST /api/previews/build {ids}` → `{job_id}`: a `previews` job (progress on SSE `job`) for the items' located
+  AIFF/ALAC files. Its result: `{items, files, native, already, built, exists, skipped, failed, cancelled, left,
+  off, problems}`. `POST /api/previews/build/<job_id>/cancel` → `{job_id, cancelled}` stops what only that job
+  asked for (`left`: still queued for a play or an import).
+- `DELETE /api/previews` → `{deleted, bytes}` deletes them all.
+- SSE `preview` `{path, preview: true, bytes}` when one is made, `{path, preview: false}` when one is dropped
+  (`skipped: "low_space"` when it wasn't made), `{cleared: true}` after a delete.
 
 ## CLI
 

@@ -94,6 +94,13 @@ class JobContext:
     def item_updated(self, item_id: str) -> None:
         self._m.bus.publish("item", {"id": item_id})
 
+    def finish(self, result: Any = None, error: str | None = None) -> None:
+        """End a job started with ``JobManager.track``."""
+        self.job.result, self.job.error = result, error
+        self.job.status = "error" if error else "done"
+        self.job.finished_at = now_iso()
+        self._m.bus.publish("job", self.job.to_dict())
+
 
 class JobManager:
     def __init__(self, bus: EventBus | None = None, keep: int = 200):
@@ -115,6 +122,15 @@ class JobManager:
         self.bus.publish("job", job.to_dict())
         self._pool.submit(self._run, job, fn)
         return job
+
+    def track(self, kind: str) -> JobContext:
+        """A job its caller runs (not on the worker, so it neither waits for nor holds up the others): listed,
+        and its progress sent, like any job; ``ctx.finish`` ends it."""
+        with self._lock:
+            job = Job(id=f"{kind}-{next(self._ids)}", kind=kind, status="running")
+            self._jobs[job.id] = job
+        self.bus.publish("job", job.to_dict())
+        return JobContext(self, job)
 
     def _run(self, job: Job, fn: Callable[[JobContext], Any]) -> None:
         ctx = JobContext(self, job)

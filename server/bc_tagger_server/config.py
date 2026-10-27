@@ -113,6 +113,9 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     # Imports: a JSON + Markdown log of each commit goes here; empty: <data dir>/import-logs. Never on the
     # music drive or inside a root.
     "import_log_dir": "",
+    # Opus previews of AIFF/ALAC files on the internal disk (previews.py): at most this many GB, least recently
+    # played dropped first; 0 turns them off.
+    "preview_cache_gb": 3,
     # Opt-in file watcher (docs/fsevents-watcher.md): keeps the index current while the server runs.
     "watch_roots": False,
     "watch_debounce_seconds": 3,
@@ -222,6 +225,9 @@ def _validate(merged: dict[str, Any]) -> dict[str, Any]:
     timeout = out.get("download_timeout_s")
     if isinstance(timeout, bool) or not isinstance(timeout, (int, float)) or timeout < 30:
         raise SettingsError("download_timeout_s must be a number of seconds, at least 30")
+    cap = out.get("preview_cache_gb")
+    if isinstance(cap, bool) or not isinstance(cap, (int, float)) or not 0 <= cap <= 1000:
+        raise SettingsError("preview_cache_gb must be a number of GB from 0 to 1000")
     out["import_log_dir"] = out.get("import_log_dir") or ""
     if not isinstance(out["import_log_dir"], str):
         raise SettingsError("import_log_dir must be a string path")

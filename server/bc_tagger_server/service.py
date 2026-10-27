@@ -12,6 +12,7 @@ from . import __version__
 from .config import Settings
 from .items import is_valid_id, item_tags, matches_query, seed_from_export
 from .jobs import JobManager
+from .previews import Previews
 from .store import Store, now_iso
 from .views import ViewData, item_view
 
@@ -25,6 +26,7 @@ class Service:
         self.settings = settings or Settings()
         self.store = store or Store()
         self.jobs = JobManager()
+        self.previews = Previews(self.store, self.settings, self.jobs.bus.publish)
         # Jobs live in memory: a batch whose job ran under another boot_id was interrupted by a restart.
         self.boot_id = __import__("secrets").token_hex(4)
         self.committing: set[str] = set()  # import batches being committed by this process
@@ -795,10 +797,56 @@ class Service:
         return self.jobs.submit("download-items",
                                 lambda ctx: downloads.run(self, refs, force, ctx, full_release=full_release))
 
-    def stream_file(self, request, path: str):
+    def stream_file(self, request, path: str, use_preview: bool = True):
+        """``use_preview=False``: the original file, and no preview is made or used for this request."""
         from .stream import stream_response
 
-        return stream_response(self.store, path, request.headers.get("range"))
+        return stream_response(self.store, path, request.headers.get("range"),
+                               self.previews if use_preview else None)
+
+    # -- previews ---------------------------------------------------------------------------
+
+    def start_preview_build(self, ids: list[str]):
+        """Make previews for the located AIFF/ALAC files of these items, alongside other jobs (previews have
+        their own two encoders). Progress over SSE ``job``; ``cancel_preview_build`` stops it."""
+        from collections import Counter
+
+        from .previews import PREVIEW_FORMATS, located_paths
+
+        paths = located_paths(self.store, ids)
+        formats = {r["path"]: r["format"] for r in self.store.query_all(
+            "SELECT path, format FROM files WHERE path IN (SELECT value FROM json_each(?))", ["path", "format"],
+            (json.dumps(paths),))}
+        ctx = self.jobs.track("previews")
+        tasks = self.previews.enqueue(paths, owner=ctx.job.id)
+        total = len(tasks)
+        base = {"items": len(ids), "files": len(paths),
+                "native": sum(formats.get(p) not in PREVIEW_FORMATS for p in paths)}
+        base["already"] = len(paths) - base["native"] - total if self.previews.cap_bytes() > 0 else 0
+        ctx.progress(0, total, f"previews 0/{total}")
+
+        def watch() -> None:
+            try:
+                self.previews.wait(tasks, lambda done: ctx.progress(done, total, f"previews {done}/{total}"),
+                                   owner=ctx.job.id)
+                # cancelled: "left" are still queued because something else (a play, an import) asked for them too
+                counts = Counter(t.result["status"] if t.done.is_set() else "left" for t in tasks)
+                skips = [t.result for t in tasks if t.done.is_set() and t.result["status"] in ("skipped", "failed")]
+                ctx.finish({**base, **{k: counts.get(k, 0) for k in ("built", "exists", "skipped", "failed",
+                                                                      "cancelled", "left")},
+                            "off": self.previews.cap_bytes() <= 0, "problems": skips[:20]})
+            except Exception as e:  # noqa: BLE001 - surfaced on the job
+                log.exception("preview build failed")
+                ctx.finish(error=f"{type(e).__name__}: {e}")
+
+        threading.Thread(target=watch, name=f"bct-{ctx.job.id}", daemon=True).start()
+        return ctx.job
+
+    def cancel_preview_build(self, job_id: str) -> dict[str, Any]:
+        job = self.jobs.get(job_id)
+        if job is None or job.kind != "previews":
+            raise KeyError(job_id)
+        return {"job_id": job_id, "cancelled": self.previews.cancel(job_id)}
 
     # -- imports (Phase 3) --------------------------------------------------------------
 

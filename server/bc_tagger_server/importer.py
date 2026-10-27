@@ -1451,7 +1451,19 @@ def _commit(svc, batch: dict, earlier: set[int] = frozenset()) -> dict:
     _save_rows(store, batch_id, rows)
     _refresh_stats(store, batch, rows)
     svc.jobs.bus.publish("import", {"batch_id": batch_id, "phase": "committed", "current": len(rows), "total": len(rows)})
+    svc.previews.enqueue(_located_files(store, rows, result["location_updates"], earlier))
     return result
+
+
+def _located_files(store, rows: list[dict], updates: list[dict], earlier: set[int]) -> list[str]:
+    """The files this commit's rows are located to, and those of the items it located (previews.py makes
+    previews of the AIFF/ALAC ones)."""
+    from .previews import located_paths
+    from .views import located_tracks
+
+    paths = [t["path"] for r in rows if r.get("committed") and r["n"] not in earlier
+             and (r.get("located") or {}).get("status") == "located" for t in located_tracks(r["located"].get("best"))]
+    return paths + located_paths(store, [u["item_id"] for u in updates if u.get("applied")])
 
 
 _ID_KEYS = {"pending_add": "added", "tag_merge": "merged", "other": "other_added", "other_merge": "other_merged"}

@@ -189,6 +189,16 @@ Tests never touch Bandcamp, the music drive or a real rekordbox library: Bandcam
     - A real 58 MB Bandcamp AIFF served whole decodes to exactly ffmpeg's samples.
   - A sleeping drive still adds its spin-up (disk sleep is 10 min) to the first range that reads samples;
     these numbers had the drive awake.
+- **Previews (user decided: "Cap at 3GB"):** Opus 96 kbps WebM copies of AIFF/ALAC files on the internal disk
+  (about 4 MB per 5-minute track), played instead of the original when there is one: no drive spin-up, and
+  they play with the drive unplugged.
+  - Made only by work the user started: an import commit, a finished download, a first play (in the
+    background), and a build job for a selection (with progress and cancel, on its own two workers under
+    `nice`, so scans and exports don't wait for it). Page loads only read the `previews` table.
+  - Capped at `preview_cache_gb` (3), least recently played first. Never written when the internal disk would
+    drop below 2 GB free; that's skipped and counted in the status.
+  - `preview=0` on the stream always plays the original and builds nothing, so the app can compare the two.
+    `X-Bc-Source` says what was served (`preview`, `wav`, `flac`, `native`).
 
 ## App and extension (`app/`, `extension/`, `shared/`, branch `claude/local-collection-ui-e8f6f6`)
 

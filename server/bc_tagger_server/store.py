@@ -53,6 +53,17 @@ CREATE TABLE IF NOT EXISTS files (
     aiff_layout TEXT  -- AIFF only: where the samples are and how they're stored (aiff.read_layout)
 );
 CREATE INDEX IF NOT EXISTS files_root ON files(root);
+-- Opus previews of AIFF/ALAC files (previews.py), one per source path, for the version it was made from.
+CREATE TABLE IF NOT EXISTS previews (
+    path TEXT PRIMARY KEY,
+    size INTEGER NOT NULL,
+    mtime REAL NOT NULL,
+    file TEXT NOT NULL,  -- under <data dir>/previews/
+    bytes INTEGER NOT NULL,
+    created_at REAL NOT NULL,
+    played_at REAL NOT NULL
+);
+CREATE INDEX IF NOT EXISTS previews_played ON previews(played_at);
 CREATE INDEX IF NOT EXISTS files_release_dir ON files(release_dir);
 
 -- Files per root, kept by triggers on every write to files, so the index status never counts them.

@@ -1,6 +1,8 @@
 """Serve indexed audio files to the browser with HTTP Range support.
 
-Chrome can't play AIFF (or ALAC). So:
+A preview (``previews``: Opus on the internal disk) is played when there is one: it starts at once and needs no
+music drive. Asked for the original (``previews=None``, ``preview=0`` on the API), or without a preview, Chrome
+can't play AIFF (or ALAC), so:
 
 * an uncompressed AIFF is served as a WAV built on the fly: the 44-byte header comes from the layout the
   index keeps (``files.aiff_layout``, see ``aiff``), and each requested range reads only that slice of the
@@ -9,7 +11,8 @@ Chrome can't play AIFF (or ALAC). So:
 * ALAC, and AIFF that can't be read as PCM (compressed AIFF-C, more than two channels), are transcoded
   once to FLAC with ffmpeg into a cache under the data dir.
 
-Only files that are in the index can be streamed.
+Only files that are in the index can be streamed. ``X-Bc-Source`` says what was served: ``preview``, ``wav``,
+``flac`` or ``native``. Playing an AIFF or ALAC without a preview queues one (in the background, a moment later).
 """
 
 from __future__ import annotations
@@ -31,6 +34,7 @@ from fastapi.responses import FileResponse, Response, StreamingResponse
 from .aiff import WavFormat, read_layout, to_wav, wav_format, wav_header
 from .config import data_dir
 from .fsguard import is_mounted
+from .previews import PLAY_DELAY_S, PREVIEW_FORMATS, Previews
 from .store import Store
 
 log = logging.getLogger(__name__)
@@ -101,13 +105,30 @@ def _prune_cache() -> None:
             f.unlink(missing_ok=True)
 
 
-def stream_response(store: Store, path: str, range_header: str | None = None) -> Response:
+def stream_response(store: Store, path: str, range_header: str | None = None,
+                    previews: Previews | None = None) -> Response:
+    """``previews``: play the file's preview when it has one, and queue one when it needs one; None: the
+    original, with no preview made or used."""
     row = store.query_one("SELECT path, root, root_kind, format, size, mtime, ext, aiff_layout FROM files WHERE path = ?",
                           (path,))
     if row is None:
         raise HTTPException(404, "not an indexed audio file")
+    wants_preview = previews is not None and row["format"] in PREVIEW_FORMATS
+    if wants_preview:
+        out = previews.lookup(row)
+        if out is not None:  # the internal disk only: no music drive needed
+            previews.touch(row["path"])
+            return FileResponse(out, media_type="audio/webm",
+                                headers={"Cache-Control": CACHE_CONTROL, "X-Bc-Source": "preview"})
     if not is_mounted(row["path"]):
         raise HTTPException(404, "music drive not mounted")
+    response = _original(store, row, range_header)
+    if wants_preview and response.status_code < 400:  # a first play: its preview, once the stream has started
+        previews.enqueue([row["path"]], delay=PLAY_DELAY_S, play=True)
+    return response
+
+
+def _original(store: Store, row, range_header: str | None) -> Response:
     src = Path(row["path"])
     headers = {"Cache-Control": CACHE_CONTROL}
     if row["format"] in TRANSCODE_FORMATS:
@@ -118,13 +139,13 @@ def stream_response(store: Store, path: str, range_header: str | None = None) ->
         if not src.is_file():
             raise HTTPException(404, "file is gone (re-scan the index)")
         out = transcode_to_flac(src, row["size"], row["mtime"])
-        return FileResponse(out, media_type="audio/flac", headers=headers)
+        return FileResponse(out, media_type="audio/flac", headers={**headers, "X-Bc-Source": "flac"})
     if not src.is_file():
         raise HTTPException(404, "file is gone (re-scan the index)")
     media = NATIVE_TYPES.get(row["ext"])
     if media is None:
         raise HTTPException(415, f"can't stream {row['ext']} files")
-    return FileResponse(src, media_type=media, headers=headers)
+    return FileResponse(src, media_type=media, headers={**headers, "X-Bc-Source": "native"})
 
 
 # -- AIFF as WAV -----------------------------------------------------------------------------
@@ -178,7 +199,7 @@ def wav_response(store: Store, row, range_header: str | None) -> Response | None
         return None
     header = wav_header(layout, fmt)
     total = len(header) + layout["size"]
-    headers = {"Accept-Ranges": "bytes", "Cache-Control": CACHE_CONTROL,
+    headers = {"Accept-Ranges": "bytes", "Cache-Control": CACHE_CONTROL, "X-Bc-Source": "wav",
                "ETag": f'"{_flac_key(Path(row["path"]), row["size"], row["mtime"])[:20]}-wav"'}
     try:
         span = parse_range(range_header, total)
