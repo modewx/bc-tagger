@@ -38,6 +38,12 @@ const EXPORT_JSON =
 const ITEM = "t283914533"; // "The System Works", in the export
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+// Only the player column plays: click its empty space (a corner, away from the controls).
+const playerSpace = async (rowLocator) => {
+  const cell = rowLocator.locator("td.player-cell");
+  const box = await cell.boundingBox();
+  await cell.click({ position: { x: box.width - 4, y: box.height - 4 } });
+};
 // The collection pages keep maintenance actions in the Tools ▾ menu.
 const tool = async (page, id) => {
   await page.click("#toolsMenuBtn");
@@ -1285,7 +1291,7 @@ test("local app: re-clicking a row after item updates keeps one player in it", a
       { timeout: 10000 }
     );
     await row.scrollIntoViewIfNeeded();
-    await row.locator(".col-date").click(); // the row's "white space" plays it in global mode
+    await playerSpace(row); // the player column's empty space plays it
     await app.waitForTimeout(600);
   }
   assert.equal(await audiosIn(app, key) + (await app.$$eval("#gpAudioHolder audio", (a) => a.length)), 1, "one player for the track");
@@ -1318,7 +1324,7 @@ test("player: hovering a track that is playing doesn't stop it (hover still load
       ["emptied", "abort", "pause"].forEach((t) => au.addEventListener(t, () => window.__audioEvents.push(t)));
     });
     await page.locator(`tr[data-key="${a}"]`).scrollIntoViewIfNeeded();
-    await page.click(`tr[data-key="${a}"] .col-date`);
+    await playerSpace(page.locator(`tr[data-key="${a}"]`));
     await page.waitForFunction(() => [...document.querySelectorAll("audio")].some((au) => !au.paused && au.currentTime > 0), null, { timeout: 10000 });
     const playing = await page.evaluateHandle(() => [...document.querySelectorAll("audio")].find((au) => !au.paused));
     await playing.hover();
@@ -1344,6 +1350,88 @@ test("player: hovering a track that is playing doesn't stop it (hover still load
   }
 });
 
+test("rows: click / Shift / Cmd highlight; a tick on a highlighted row ticks them all, untick unticks them all; only the player column plays (collection, extension page, import preview)", async () => {
+  const hl = (page) => page.$$eval("#collectionTable tr.row-highlight", (trs) => trs.map((t) => t.dataset.key));
+  const ticked = (page) => page.$$eval("#collectionTable .row-check:checked", (b) => b.map((x) => x.closest("tr").dataset.key));
+  const nothingPlays = (page) => page.evaluate(() => [...document.querySelectorAll("audio")].every((a) => a.paused));
+  const app = await context.newPage();
+  const ext = await context.newPage();
+  const stub = importStub(JSON.parse(fs.readFileSync(IMPORT_SAMPLE, "utf8")));
+  const preview = await context.newPage();
+  try {
+    // Right after an import the items are still getting their "#" (each re-sorts the table): start after.
+    await waitFor(
+      () => api("/api/items").then((d) => (Array.isArray(d) ? d : d.items).every((i) => i.source === "other" || Number.isFinite(i.order))),
+      { what: "every item numbered on the server", timeout: 30000 }
+    );
+    await app.goto(SERVER + "/");
+    await app.evaluate(() => localStorage.removeItem("bc_app_selection"));
+    await app.reload();
+    await app.waitForFunction(() => document.querySelectorAll("#collectionTable tbody tr").length > 6);
+    const keys = await app.$$eval("#collectionTable tbody tr", (r) => r.slice(0, 6).map((x) => x.dataset.key));
+    const row = (k) => app.locator(`tr[data-key="${k}"]`);
+    await row(keys[0]).locator(".col-date").click();
+    assert.deepEqual(await hl(app), [keys[0]], "a click highlights one row");
+    await row(keys[2]).locator(".col-date").click({ modifiers: ["Shift"] });
+    assert.deepEqual(await hl(app), keys.slice(0, 3), "Shift extends a range");
+    await row(keys[4]).locator(".col-date").click({ modifiers: ["Meta"] });
+    assert.deepEqual(await hl(app), [...keys.slice(0, 3), keys[4]], "Cmd adds one");
+    // The controls keep their behaviour: the tag editor doesn't change the highlight.
+    await row(keys[0]).locator("td.tags-cell").click();
+    assert.deepEqual(await hl(app), [...keys.slice(0, 3), keys[4]]);
+    // A tick on a highlighted row ticks them all; unticking unticks them all.
+    await app.check(`tr[data-key="${keys[1]}"] .row-check`);
+    assert.deepEqual((await ticked(app)).sort(), [...keys.slice(0, 3), keys[4]].sort());
+    assert.equal(await app.textContent("#clearSelection"), "Clear selection (4)");
+    await app.uncheck(`tr[data-key="${keys[1]}"] .row-check`);
+    assert.deepEqual(await ticked(app), []);
+    // A row that isn't highlighted: only it. Shift on a checkbox: the range from the last one clicked.
+    await app.check(`tr[data-key="${keys[5]}"] .row-check`);
+    assert.deepEqual(await ticked(app), [keys[5]]);
+    await app.click(`tr[data-key="${keys[3]}"] .row-check`, { modifiers: ["Shift"] });
+    assert.deepEqual((await ticked(app)).sort(), keys.slice(3, 6).sort());
+    await app.click("#clearSelection");
+    // Located's empty space highlights and doesn't play.
+    const located = row(keys[5]).locator("td.col-located");
+    const lb = await located.boundingBox();
+    await located.click({ position: { x: lb.width - 4, y: lb.height - 4 } });
+    assert.deepEqual(await hl(app), [keys[5]]);
+    assert.equal(await nothingPlays(app), true);
+
+    // The extension page: artist and title don't play; the player column's empty space does.
+    const a = "t1002746421"; // Futuro Lontano (an <audio> from the start)
+    await ext.goto(extPage("collection.html"));
+    await ext.waitForSelector(`tr[data-key="${a}"] audio`, { state: "attached" });
+    await ext.locator(`tr[data-key="${a}"]`).scrollIntoViewIfNeeded();
+    await ext.click(`tr[data-key="${a}"] .artist-name`);
+    assert.deepEqual(await hl(ext), [a]);
+    assert.equal(await nothingPlays(ext), true, "the artist doesn't play");
+    await ext.$eval(`tr[data-key="${a}"] audio`, (au) => (au.loop = true));
+    await playerSpace(ext.locator(`tr[data-key="${a}"]`));
+    await ext.waitForFunction(() => [...document.querySelectorAll("audio")].some((au) => !au.paused), null, { timeout: 10000 });
+    assert.deepEqual(await hl(ext), [a], "playing doesn't change the highlight");
+    await ext.evaluate(() => document.querySelectorAll("audio").forEach((au) => au.pause()));
+
+    // The import preview: a tick on a highlighted row ticks them all (saved to the batch).
+    await stub.install(preview);
+    await preview.goto(SERVER + "/import/?batch=e2e-b1");
+    await preview.waitForFunction(() => document.querySelectorAll("#collectionTable tbody tr[data-key]").length === 7);
+    await preview.locator("tr[data-key='r0'] .col-artist").click();
+    await preview.locator("tr[data-key='r2'] .col-artist").click({ modifiers: ["Shift"] });
+    assert.deepEqual(await hl(preview), ["r0", "r1", "r2"]);
+    const before = await ticked(preview);
+    await preview.click("tr[data-key='r1'] .row-check"); // they start ticked: untick all three
+    await preview.waitForFunction(() => ["r0", "r1", "r2"].every((k) => !document.querySelector(`tr[data-key="${k}"] .row-check`).checked));
+    assert.deepEqual((await ticked(preview)).sort(), before.filter((k) => !["r0", "r1", "r2"].includes(k)).sort());
+    await waitFor(() => [0, 1, 2].every((n) => stub.calls.some((c) => c.method === "PUT" && c.path.endsWith(`/rows/${n}`) && c.body && c.body.checked === false)), {
+      what: "the three rows saved unticked",
+    });
+  } finally {
+    await app.evaluate(() => localStorage.removeItem("bc_app_selection")).catch(() => {});
+    await Promise.all([app.close(), ext.close(), preview.close()]);
+  }
+});
+
 test("extension page: re-clicking a row and switching tracks keeps one player per row", async () => {
   const a = "t1002746421"; // Futuro Lontano (durable stream link: an <audio> from the start)
   const page = await context.newPage();
@@ -1353,7 +1441,7 @@ test("extension page: re-clicking a row and switching tracks keeps one player pe
   const rowA = page.locator(`tr[data-key="${a}"]`);
   await rowA.scrollIntoViewIfNeeded();
   for (let i = 0; i < 3; i++) {
-    await rowA.locator(".col-date").click();
+    await playerSpace(rowA);
     await page.waitForTimeout(300);
   }
   // Another playable row, then back to the first one.
@@ -1365,10 +1453,10 @@ test("extension page: re-clicking a row and switching tracks keeps one player pe
   if (b) {
     const rowB = page.locator(`tr[data-key="${b}"]`);
     await rowB.scrollIntoViewIfNeeded();
-    await rowB.locator(".col-date").click();
+    await playerSpace(rowB);
     await page.waitForTimeout(300);
     await rowA.scrollIntoViewIfNeeded();
-    await rowA.locator(".col-date").click();
+    await playerSpace(rowA);
     await page.waitForTimeout(300);
     assert.equal(await audiosIn(page, b), 1, "the other row keeps one player");
   }

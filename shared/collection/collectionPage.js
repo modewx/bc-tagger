@@ -945,6 +945,56 @@ export function createCollectionPage(opts) {
   document.addEventListener("click", closeChooser);
   document.addEventListener("keydown", (e) => e.key === "Escape" && closeChooser());
 
+  // Finder-style highlight, separate from any ticks: a click highlights a row,
+  // Shift extends from the last clicked row (in the order shown), Cmd/Ctrl adds
+  // or removes one. A page's checkboxes can act on all highlighted rows at once.
+  const ROW_CONTROLS = "a, img, .no-thumb, button, audio, iframe, input, select, label, .chosen-container, .tags-cell, .thumb-cell, .sel-cell, .note-open, .popover";
+  const highlighted = new Set();
+  let highlightAnchor = null;
+  const shownKeys = () => [...document.querySelectorAll("#collectionTable tbody tr[data-key]")].map((tr) => tr.dataset.key);
+  function rangeKeys(a, b) {
+    const keys = shownKeys();
+    const i = keys.indexOf(a);
+    const j = keys.indexOf(b);
+    if (i < 0 || j < 0) return [b];
+    return keys.slice(Math.min(i, j), Math.max(i, j) + 1);
+  }
+  function paintHighlight() {
+    document.querySelectorAll("#collectionTable tbody tr[data-key]").forEach((tr) => tr.classList.toggle("row-highlight", highlighted.has(tr.dataset.key)));
+  }
+  function highlightRow(key, e) {
+    const toggle = e.metaKey || e.ctrlKey;
+    if (e.shiftKey && highlightAnchor) {
+      if (!toggle) highlighted.clear();
+      rangeKeys(highlightAnchor, key).forEach((k) => highlighted.add(k));
+    } else if (toggle) {
+      if (highlighted.has(key)) highlighted.delete(key);
+      else highlighted.add(key);
+      highlightAnchor = key;
+    } else {
+      highlighted.clear();
+      highlighted.add(key);
+      highlightAnchor = key;
+    }
+    paintHighlight();
+  }
+
+  // The player column: play or pause this row (the playing one may be docked in the top bar).
+  function togglePlayRow(key, item, cell) {
+    const audio = key === playingKey && playingAudio ? playingAudio : cell.querySelector("audio");
+    if (audio) {
+      if (audio.paused) audio.play().catch(() => {});
+      else audio.pause();
+      return;
+    }
+    const btn = cell.querySelector("button");
+    if (item.tralbum_type === "a") {
+      if (btn) btn.click(); // Play album: the embedded player
+      return;
+    }
+    playTrack(item, key, cell, btn);
+  }
+
   function renderCollectionTable(items) {
     const collectionTable = document.getElementById("collectionTable");
     // Preserve the live playing audio across the rebuild (global mode) by docking
@@ -1020,24 +1070,28 @@ export function createCollectionPage(opts) {
         const cls = opts.rowClass(item, key);
         if (cls) row.className = cls;
       }
+      if (highlighted.has(key)) row.classList.add("row-highlight");
       columns.forEach((col) => {
         const cell = row.insertCell();
         cell.classList.add(`col-${col.id}`);
         col.render(cell, key, item);
       });
 
-      // Global mode: clicking the "white space" of a row plays it. Ignore clicks on
-      // the interactive bits (title link, thumbnail, tag editor, player controls).
-      if (globalMode && item.tralbum_type !== "a") {
-        row.classList.add("clickable-row");
-        row.addEventListener("click", (e) => {
-          if (e.target.closest("a, img, .no-thumb, button, audio, input, select, .chosen-container, .tags-cell, .thumb-cell, .no-row-play")) {
-            return;
-          }
-          // The current cell: in-place row updates replace cells.
-          playTrack(allItems[key] || item, key, row.querySelector("td.player-cell"));
-        });
-      }
+      // Only the player column plays: a click anywhere in it (its empty space too)
+      // plays or pauses the row. Elsewhere a click highlights the row
+      // (Finder-style); the controls (links, buttons, tag editor, checkboxes,
+      // thumbnail, popovers) keep their own behaviour.
+      row.addEventListener("mousedown", (e) => {
+        if (e.shiftKey && !e.target.closest(ROW_CONTROLS)) e.preventDefault(); // no text selection on Shift-click
+      });
+      row.addEventListener("click", (e) => {
+        const playerCell = e.target.closest("td.player-cell");
+        if (playerCell) {
+          if (!e.target.closest("audio, button, a, iframe, input, select")) togglePlayRow(key, allItems[key] || item, playerCell);
+          return;
+        }
+        if (!e.target.closest(ROW_CONTROLS)) highlightRow(key, e);
+      });
     });
 
     setupColumnResizing(collectionTable, colWidthKey, columns.map((c) => c.id), opts.legacyColWidths);
@@ -1450,7 +1504,7 @@ export function createCollectionPage(opts) {
     const row = document.querySelector(`#collectionTable tr[data-key="${key}"]`);
     if (!row || !item) return;
     if (opts.rowClass) {
-      const keep = ["playing-row", "clickable-row"].filter((c) => row.classList.contains(c));
+      const keep = ["playing-row", "row-highlight"].filter((c) => row.classList.contains(c));
       row.className = [opts.rowClass(item, key), ...keep].filter(Boolean).join(" ");
     }
     columns.forEach((col, i) => {
@@ -1531,6 +1585,10 @@ export function createCollectionPage(opts) {
     refreshRow,
     refilter: () => computeView(),
     refreshTagOptions, // e.g. the new tags changed (opts.newTags)
+    // The highlight (rows clicked, Shift / Cmd-clicked): in the order shown.
+    highlightedKeys: () => shownKeys().filter((k) => highlighted.has(k)),
+    isHighlighted: (key) => highlighted.has(key),
+    rangeKeys,
     getView: () => currentView,
     render: () => renderCollectionTable(currentView),
     // Sort by a column's sortKey; dir 1 = ascending, -1 = descending (newest first for dates).

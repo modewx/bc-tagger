@@ -19,6 +19,7 @@ import { rememberImport } from "./openImport";
 import { downloadFileTitle, downloadFlow, fullReleaseOf, fullReleasesToggle, stateLabel, trackDownloads, troubled } from "./downloads";
 import { playableItem } from "./statusFilter";
 import { logNote } from "./importLogs";
+import { tickTargets } from "./rowTicks";
 import { runExport } from "./exportFlow";
 
 const batchId = new URLSearchParams(location.search).get("batch");
@@ -315,12 +316,19 @@ function selectColumn() {
       box.type = "checkbox";
       box.className = "row-check";
       box.checked = rowOf(item).checked;
-      box.addEventListener("change", () => setChecked([rowNow(item)], box.checked));
+      // A tick on a highlighted row ticks every highlighted row; Shift ticks a range.
+      box.addEventListener("click", (e) => {
+        const keys = tickTargets(page, key, e.shiftKey, lastTicked);
+        lastTicked = key;
+        const rows = keys.map((k) => batch.rows.find((r) => `r${r.n}` === k)).filter(Boolean);
+        setChecked(rows, box.checked);
+      });
       cell.appendChild(box);
     },
   };
 }
 
+let lastTicked = null; // for Shift-click ranges of checkboxes
 async function setChecked(rows, checked) {
   rows.forEach((r) => (r.checked = checked));
   rows.forEach((r) => {

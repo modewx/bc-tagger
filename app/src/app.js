@@ -15,6 +15,7 @@ import { runExport } from "./exportFlow";
 import { createIndexStatus } from "./indexStatus";
 import { logNote } from "./importLogs";
 import { selectLastImportButton } from "./lastImport";
+import { tickTargets } from "./rowTicks";
 
 const bridge = new ExtensionBridge();
 const events = new ServerEvents();
@@ -95,6 +96,7 @@ const selected = new Set(
     }
   })()
 );
+let lastTicked = null; // for Shift-click ranges of checkboxes
 function saveSelection() {
   try {
     localStorage.setItem(SELECTION_KEY, JSON.stringify([...selected]));
@@ -218,9 +220,16 @@ function selectColumn() {
       box.type = "checkbox";
       box.className = "row-check";
       box.checked = selected.has(key);
-      box.addEventListener("change", () => {
-        if (box.checked) selected.add(key);
-        else selected.delete(key);
+      // A tick on a highlighted row ticks every highlighted row; Shift ticks a range.
+      box.addEventListener("click", (e) => {
+        const keys = tickTargets(page, key, e.shiftKey, lastTicked);
+        lastTicked = key;
+        keys.forEach((k) => {
+          if (box.checked) selected.add(k);
+          else selected.delete(k);
+          const other = document.querySelector(`#collectionTable tr[data-key="${k}"] .row-check`);
+          if (other) other.checked = box.checked;
+        });
         saveSelection();
         updateShownButtons();
       });

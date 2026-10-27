@@ -152,6 +152,9 @@ npm run test:e2e                         # Playwright e2e: own profile, server :
     - **Select last import** (`lastImport.js`, A's `GET /api/import/last-committed`, easy to remove);
     - the selection is kept in localStorage (`bc_app_selection`): restored on load, items no longer in the collection
       dropped.
+  - Rows: Finder-style highlight in the shared table (`highlightedKeys` / `isHighlighted` / `rangeKeys`), separate from
+    the ticks. `rowTicks.js` makes a tick on a highlighted row apply to all of them, and Shift on a checkbox a range.
+    Click-to-play is the player column only (the user: other cells played in some places and not others).
   - Popup: **Checkout / PayPal automation** (`checkoutAutomation`, on unless false). Off, `checkout.js` returns
     before doing anything: no listeners, no DOM changes, no clicks. e2e on a stand-in PayPal page.
   - **New tags reach open pages again:** an update or a dev reload cuts off the content script in tabs already

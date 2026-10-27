@@ -35,7 +35,9 @@ body { font-family: -apple-system, system-ui, sans-serif; margin: 0; }
 #gpTagHolder:empty { display: none; }
 .tag-editor-wrap { width: 100%; }
 .mode-toggle { font-size: 12px; color: #444; cursor: pointer; display: inline-flex; align-items: center; gap: 4px; white-space: nowrap; }
-#collectionTable tr.clickable-row { cursor: pointer; }
+#collectionTable td.player-cell { cursor: pointer; }
+/* Finder-style highlight (click / Shift / Cmd), over any row tint. */
+#collectionTable tr.row-highlight, #collectionTable tr.row-highlight td { background: #d6e4ff !important; }
 #gpInfo { max-width: 220px; overflow: hidden; }
 #gpTitle { font-size: 15px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 #gpArtist { font-size: 13px; color: #666; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }

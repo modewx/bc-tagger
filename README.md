@@ -33,6 +33,9 @@ reachable, edits are queued on the server and applied by the extension on its ne
     - **Tools ▾**: maintenance (Refresh player files, Refresh thumbnails, Fix artists, Fix album IDs, Refresh
       ownership); **Columns ▾**.
   - The selection is kept in this browser across pages and reloads.
+  - Rows (here and in the import preview): a click highlights a row, **Shift**-click a range, **Cmd**-click one more.
+    Ticking a highlighted row ticks all highlighted rows (unticking unticks them all), and Shift on a checkbox ticks a
+    range. Only the **player column** plays: a click anywhere in it, empty space too, plays or pauses that row.
   - Test-only actions (Locate / Export latest 10) are in **Settings → Test**.
   - The Located popover: candidates, Locate again, **Download File** for owned items that aren't on the drive, and
     **Download Full Release** when a track's album or EP is owned. Downloads start at once, several releases at a
