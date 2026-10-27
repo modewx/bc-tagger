@@ -178,7 +178,7 @@ audio { width: 100%; height: 36px; vertical-align: middle; }
 .toolbar-sep { width: 1px; align-self: stretch; background: #d5d5d5; margin: 2px 4px; }
 .tools-menu {
   position: absolute;
-  z-index: 50;
+  z-index: 1000; /* above the sticky top bar, like the Columns menu */
   display: flex;
   flex-direction: column;
   min-width: 200px;
