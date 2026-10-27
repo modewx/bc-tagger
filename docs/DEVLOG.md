@@ -113,6 +113,20 @@ npm run build:app && npm run build:dev   # the local app (served by the server a
 npm run test:e2e                         # Playwright e2e: own profile, server :8767, app in .e2e/app-dist
 ```
 
+### 2026-10-27
+
+- **Collection loads fast, nothing unasked** (user bug: Settings → Collection showed an empty table for a minute with
+  the music drive spinning). Cause (the coordinator, from the server log): Chrome's 6 connections per host were held
+  by event streams: Settings had 3, every page 1, hidden tabs included, so `/api/items` waited for a free one.
+  - One stream per page (`pageEvents()`); hidden tabs close it and catch up on `resume`; the collection and import
+    preview open it after their rows load, and load without waiting for the extension's answer.
+  - "Loading collection…" until the rows are in; after 5 s it says the browser may be out of connections.
+  - Hover no longer loads a player (it read the drive in the app). The app doesn't fetch art on scroll
+    (`autoFetchArt: false`). The extension's 6-hourly ownership check is gone: only Refresh ownership checks.
+  - e2e: one stream per page and the hidden/shown catch-up; rows load while the extension's answer is held; no
+    `/api/files/stream` on hover; no `fetchPage` on scroll (checked to fail with auto-fetch on); the first sync tick
+    doesn't check ownership.
+
 ### 2026-10-26
 
 - **Main library, read-only or writable** (user request, A's `main_writes_locked`): Settings → Rekordbox has

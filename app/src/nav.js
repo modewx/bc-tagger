@@ -1,7 +1,7 @@
 // The local app's header: page links + server / extension / rekordbox status,
 // and the open import (if any), linked to its step.
 
-import { ServerEvents } from "../../shared/datasource/serverEvents";
+import { pageEvents } from "../../shared/datasource/serverEvents";
 import { getBatch } from "./importApi";
 import { openImports, rememberImport, stepLabel, stepOf, stepUrl } from "./openImport";
 
@@ -108,15 +108,17 @@ export function buildNav(active) {
 
   return {
     el: nav,
-    // Show the open import (call once per page; `events` is the page's ServerEvents, if any).
+    // Show the open import (call once per page). On the page's one stream: pass it when the page starts
+    // it itself (after its first load); without, it's started here.
     trackImports(events) {
-      const ev = events || new ServerEvents().start();
+      const ev = events || pageEvents().start();
       let t = null;
       ev.on("import", (d) => {
         clearTimeout(t);
         const live = d && d.phase && !["done", "error", "linked", "row", "tags"].includes(d.phase) ? d : null;
         t = setTimeout(() => refreshImport(live), live ? 0 : 300);
       });
+      ev.on("resume", () => refreshImport());
       refreshImport();
     },
     // settings: the server's settings (rekordbox_target, rekordbox_main_db_path)

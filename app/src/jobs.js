@@ -17,6 +17,13 @@ export class Jobs {
       }
       this._update(job);
     });
+    // Back from a hidden tab: check the jobs being watched now (their events were missed).
+    events.on("resume", () =>
+      this.watchers.forEach((w) => {
+        clearTimeout(w.timer);
+        w.poll();
+      })
+    );
   }
 
   // POST `path` (which answers {job_id}) and resolve with the finished job.
@@ -32,15 +39,18 @@ export class Jobs {
       const early = this.early.get(id);
       this.early.delete(id);
       if (early) this._update(early);
-      const poll = async () => {
+      const poll = (w.poll = async () => {
         if (!this.watchers.has(id)) return;
         try {
           this._update(await apiJson(`/api/jobs/${encodeURIComponent(id)}`));
         } catch (e) {
           /* keep polling */
         }
-        if (this.watchers.has(id)) w.timer = setTimeout(poll, this.events.connected ? 3000 : 1000);
-      };
+        if (this.watchers.has(id)) {
+          clearTimeout(w.timer);
+          w.timer = setTimeout(poll, this.events.connected ? 3000 : 1000);
+        }
+      });
       w.timer = setTimeout(poll, 300);
     });
   }

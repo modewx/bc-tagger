@@ -20,7 +20,6 @@ import { CHALLENGE_TEXT, isChallengePage } from "../../shared/bandcampChallenge"
 // http://127.0.0.1:8765 unless the build sets BC_DEFAULT_SERVER_URL (e2e builds).
 export const DEFAULT_SERVER_URL = __DEFAULT_SERVER_URL__;
 const FULL_SYNC_EVERY_MS = 15 * 60 * 1000;
-const OWNERSHIP_EVERY_MS = 6 * 60 * 60 * 1000;
 const PUSH_DEBOUNCE_MS = 800;
 
 // --- Config / status ---------------------------------------------------------
@@ -333,18 +332,15 @@ async function fetchOwnedIds() {
   return { owned, fanId: data.fan_id, username: summary.username || null };
 }
 
-// The last check is also kept in chrome.storage.local (bcOwnershipCheck), so an
-// extension reload (e.g. a dev rebuild) doesn't ask Bandcamp again.
+// Only when the user asks: Tools → Refresh ownership in the local app.
 export async function refreshOwnership() {
   let fetched;
   try {
     fetched = await fetchOwnedIds();
   } catch (e) {
     await setStatus({ ownership: { at: Date.now(), error: e.message, challenge: !!e.challenge } });
-    await setStorage({ bcOwnershipCheck: { at: Date.now(), challenge: !!e.challenge } });
     throw e;
   }
-  await setStorage({ bcOwnershipCheck: { at: Date.now(), challenge: false } });
   const res = await api("/api/ownership", {
     method: "POST",
     body: { owned_ids: fetched.owned, source: "extension", full: true, fan_id: fetched.fanId, username: fetched.username },
@@ -374,7 +370,8 @@ async function notifyAppTabs(event) {
 // --- Periodic work ------------------------------------------------------------
 
 // Runs on startup and on every alarm tick: catch up when needed, pull queued
-// tag edits, refresh ownership now and then. Quiet when the server is down.
+// tag edits. Quiet when the server is down. Never goes online by itself:
+// ownership is only refreshed by the user's Refresh ownership.
 export async function syncTick(reason) {
   const health = await probeServer(1500);
   if (!health) {
@@ -389,9 +386,5 @@ export async function syncTick(reason) {
   }
   await pullTagEdits().catch((e) => console.warn("[sync] pull failed", e.message));
   await pullPendingAdds().catch((e) => console.warn("[sync] pending adds failed", e.message));
-  const { bcOwnershipCheck: own = {} } = await getStorage("bcOwnershipCheck");
-  // After a bot check, only the user's own Refresh ownership tries again.
-  if (!own.challenge && (!own.at || Date.now() - own.at > OWNERSHIP_EVERY_MS)) {
-    await refreshOwnership().catch((e) => console.warn("[sync] ownership failed", e.message));
-  }
+  await setStatus({ tickDoneAt: Date.now() });
 }

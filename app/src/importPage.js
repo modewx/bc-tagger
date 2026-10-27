@@ -8,7 +8,7 @@
 import { createCollectionPage } from "../../shared/collection/collectionPage";
 import { HttpDataSource, apiJson } from "../../shared/datasource/HttpDataSource";
 import { ExtensionBridge } from "../../shared/datasource/extensionBridge";
-import { ServerEvents } from "../../shared/datasource/serverEvents";
+import { pageEvents } from "../../shared/datasource/serverEvents";
 import { Jobs, progressText, resultText } from "./jobs";
 import { buildNav } from "./nav";
 import { sourceColumn, localPlayUrl } from "./columns";
@@ -25,7 +25,7 @@ import { runExport } from "./exportFlow";
 const batchId = new URLSearchParams(location.search).get("batch");
 document.body.classList.add("import-page");
 const bridge = new ExtensionBridge();
-const events = new ServerEvents();
+const events = pageEvents();
 const jobs = new Jobs(events);
 const nav = buildNav("import");
 nav.trackImports(events);
@@ -1096,8 +1096,9 @@ async function discard(statusEl) {
     return;
   }
   rememberImport(batchId); // edits are saved as they're made; this page can be left and reopened
-  await bridge.connect(1000);
-  nav.setExtension(bridge.info);
+  // The extension bridge answers in the background (up to 1 s); what uses it checks it when it runs.
+  bridge.connect(1000).then(() => nav.setExtension(bridge.info));
+  bridge.on("connect", (info) => nav.setExtension(info));
   const top = el("div", "import-top");
   top.append(nav.el, info);
   page = createCollectionPage({
@@ -1106,6 +1107,7 @@ async function discard(statusEl) {
     colWidthKey: "bc_import_col_widths_v2",
     baseToolbar: false,
     hideColumns: ["date", "modified", "thumb"], // nothing is added or changed yet; no art is fetched here
+    loadingLabel: "Loading the import's rows…",
     newTags: () => (batch && !batch.committed ? batch.uncreatedTags : []), // highlighted (and offered) in every row
     // Import from Files: the rows folder by folder, under the folder's path.
     groupBy: (item) => (batch && batch.fromFiles ? rowNow(item).folder || null : null),
@@ -1179,8 +1181,10 @@ async function discard(statusEl) {
       if (j.status === "done" || j.status === "error") page.reload().then(renderInfo);
     }
   });
-  events.start();
+  // Back from a hidden tab (its stream was closed): catch up.
+  events.on("resume", () => page.reload().then(renderInfo));
   await page.start();
+  events.start(); // after the rows: the stream holds a connection for good
   renderInfo();
   nav.setHealth(await apiJson("/api/health").catch(() => null));
 })();

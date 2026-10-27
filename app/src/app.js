@@ -4,7 +4,7 @@
 import { createCollectionPage } from "../../shared/collection/collectionPage";
 import { HttpDataSource, apiJson } from "../../shared/datasource/HttpDataSource";
 import { ExtensionBridge } from "../../shared/datasource/extensionBridge";
-import { ServerEvents } from "../../shared/datasource/serverEvents";
+import { pageEvents } from "../../shared/datasource/serverEvents";
 import { Jobs, progressText, resultText } from "./jobs";
 import { buildNav } from "./nav";
 import { appColumns, downloadable, isLocated, localPlayUrl } from "./columns";
@@ -18,7 +18,7 @@ import { selectLastImportButton } from "./lastImport";
 import { tickTargets } from "./rowTicks";
 
 const bridge = new ExtensionBridge();
-const events = new ServerEvents();
+const events = pageEvents();
 const ds = new HttpDataSource({ bridge, events });
 const jobs = new Jobs(events);
 const nav = buildNav("collection");
@@ -248,10 +248,9 @@ async function refreshHealth() {
 }
 
 (async () => {
-  // Ask the extension bridge first: it decides whether page fetches and
-  // direct tag writes are available.
-  await bridge.connect(1000);
-  nav.setExtension(bridge.info);
+  // The extension bridge answers in the background (up to 1 s): page fetches and
+  // tag writes check it when they run, so the collection doesn't wait for it.
+  bridge.connect(1000).then(() => nav.setExtension(bridge.info));
   bridge.on("connect", (info) => nav.setExtension(info));
 
   page = createCollectionPage({
@@ -325,6 +324,7 @@ async function refreshHealth() {
     ],
     localPlayUrl,
     playable: playableItem,
+    autoFetchArt: false, // no Bandcamp fetches on scroll: stored art only (Tools → Refresh thumbnails)
     filterItem: (item) => sourceFilter.filterItem(item) && statusFilter.filterItem(item),
     clearExtraFilters: () => {
       statusFilter.reset();
@@ -366,7 +366,12 @@ async function refreshHealth() {
   statusFilter.mount(document.getElementById("searchBar"), scroller, () => page.refilter());
 
   events.on("tags", () => refreshHealth());
-  events.start();
+  // Back from a hidden tab (its stream was closed): catch up.
+  events.on("resume", () => {
+    page.reload();
+    indexStatus.refresh();
+    refreshHealth();
+  });
   refreshHealth();
   setInterval(refreshHealth, 30000);
   startDevReload();
@@ -376,6 +381,7 @@ async function refreshHealth() {
   } catch (e) {
     page.statusEl.textContent = `Could not load the collection from the server: ${e.message}`;
   }
+  events.start(); // after the items: the stream holds a connection for good
 
   // The kept selection: only items still in the collection.
   const items = page.getItems();

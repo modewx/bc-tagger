@@ -82,6 +82,9 @@ const SHELL_HTML = `
  * @param {() => string[]} [opts.newTags] tags offered beyond the vocabulary, highlighted (an import's new ones)
  * @param {string} [opts.columnsKey]        localStorage key for the shown/hidden columns (default: from colWidthKey)
  * @param {function} [opts.playable]        (item) -> false: nothing to play (no Bandcamp page, no local file)
+ * @param {boolean}  [opts.autoFetchArt]    false: rows without stored art don't fetch their Bandcamp page on scroll
+ *   (Tools → Refresh thumbnails still does)
+ * @param {string}   [opts.loadingLabel]    shown where the rows go until they load (default "Loading collection…")
  *
  * Columns may also have headerRender(th) to fill their header themselves, and
  * first: true to go before every other column.
@@ -277,24 +280,15 @@ export function createCollectionPage(opts) {
     return btn;
   }
 
-  // A real per-row <audio>. Hover loads metadata (so the timeline is seekable
-  // before play); clicking the timeline while paused starts playback there.
+  // A real per-row <audio>. Nothing is read until it's played: hovering it
+  // doesn't load it (in the local app that read the music drive). Clicking the
+  // timeline while paused starts playback there.
   function makeRowAudio(url, item, key) {
     const audio = document.createElement("audio");
     audio.controls = true;
     audio.preload = "none";
     audio.src = url;
 
-    audio.addEventListener(
-      "pointerenter",
-      () => {
-        if (audio.preload === "metadata") return;
-        audio.preload = "metadata";
-        // Not once it has started (Play, a row click): load() would reset and stop it.
-        if (audio.paused && audio.readyState === HTMLMediaElement.HAVE_NOTHING) audio.load();
-      },
-      { once: true }
-    );
     audio.addEventListener("seeked", () => {
       if (audio.paused) audio.play().catch(() => {});
     });
@@ -539,6 +533,7 @@ export function createCollectionPage(opts) {
     ph.className = "no-thumb";
     cell.appendChild(ph);
     if (!pageUrlFor(item)) return; // nothing fetchable
+    if (opts.autoFetchArt === false) return; // stored art only (the local app)
     if (!ds.canFetchPages()) return; // e.g. local app without the extension
     cell._item = item;
     cell._key = key;
@@ -1395,6 +1390,28 @@ export function createCollectionPage(opts) {
     if (ds.onItemsChanged) ds.onItemsChanged(() => reload());
 
     await ds.init();
+    // Tags and items load together; until the items are in, the table says so.
+    const itemsLoad = ds.getItems();
+    itemsLoad.catch(() => {}); // awaited below
+    const loading = document.createElement("p");
+    loading.id = "loadingState";
+    loading.className = "loading-state";
+    loading.textContent = opts.loadingLabel || "Loading collection…";
+    document.getElementById("collectionTable").after(loading);
+    const slow = setTimeout(() => {
+      loading.textContent +=
+        " Still waiting for the server. If this goes on, the browser may be out of connections to it: close other bc-tagger tabs.";
+    }, 5000);
+    try {
+      await startUi();
+      setItems(await itemsLoad);
+    } finally {
+      clearTimeout(slow);
+      loading.remove();
+    }
+  }
+
+  async function startUi() {
     // Settings → Bandcamp requests (defaults until they arrive, or if they can't).
     if (ds.bandcampLimits) {
       ds.bandcampLimits()
@@ -1460,8 +1477,6 @@ export function createCollectionPage(opts) {
       });
     }
 
-    // Load items after the vocab so inline tag editors have their options.
-    setItems(await ds.getItems());
   }
 
   // --- Live updates (local app) ------------------------------------------------

@@ -311,7 +311,7 @@ chrome.storage.onChanged.addListener((changes, area) => {
   if (changes.bcServer) syncTick("server changed");
 });
 
-// Every 30 s: catch up / pull queued tag edits / refresh ownership (see syncTick).
+// Every 30 s: catch up / pull queued tag edits (see syncTick).
 chrome.alarms.create("bc-sync", { periodInMinutes: 0.5 });
 chrome.alarms.onAlarm.addListener((alarm) => {
   if (alarm.name === "bc-sync") syncTick("alarm");

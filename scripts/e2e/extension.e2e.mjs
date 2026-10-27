@@ -233,11 +233,13 @@ test("the e2e extension loads with its own name", async () => {
 });
 
 test("a fresh, empty profile does not wipe the server mirror", async () => {
-  // The first sync tick (onInstalled) has run to its end (the ownership check is its last step).
+  // The first sync tick (onInstalled) has run to its end. It never checks ownership on Bandcamp by itself.
   await waitFor(
-    () => probe.evaluate(() => chrome.storage.session.get("bcSyncStatus").then((s) => s.bcSyncStatus || {})).then((s) => !!(s.lastCheckAt && s.ownership && s.ownership.at)),
+    () => probe.evaluate(() => chrome.storage.session.get("bcSyncStatus").then((s) => s.bcSyncStatus || {})).then((s) => !!s.tickDoneAt),
     { what: "the first sync tick", timeout: 20000 }
   );
+  const tick = await probe.evaluate(() => chrome.storage.session.get("bcSyncStatus").then((s) => s.bcSyncStatus));
+  assert.equal(tick.ownership, undefined, "no ownership check without the user's Refresh ownership");
   const health = await api("/api/health");
   assert.equal(health.items, exportCount);
   assert.equal((health.items_source || {}).kind, "export-json");
@@ -1435,23 +1437,29 @@ test("local app: re-clicking a row after item updates keeps one player in it", a
   await app.close();
 });
 
-test("player: hovering a track that is playing doesn't stop it (hover still loads a paused one); the Artist cell copies \"Artist Title\"", async () => {
+test("player: hovering a paused player loads nothing; hovering one that's playing doesn't stop it; the Artist cell copies \"Artist Title\"", async () => {
   const a = "t1002746421"; // Futuro Lontano by TSVI (durable stream link: an <audio> from the start)
   const page = await context.newPage();
   try {
     await page.goto(extPage("collection.html"));
     await page.waitForSelector(`tr[data-key="${a}"] audio`, { state: "attached" });
     if (!(await page.isChecked("#globalModeToggle"))) await page.click("#globalModeToggle");
-    // A paused player: hovering loads its metadata, so the timeline can be scrubbed first.
+    // A paused player: hovering it loads nothing (nothing is read until Play).
     const other = await page.evaluate((a) => {
       const r = [...document.querySelectorAll("#collectionTable tbody tr")].find((tr) => tr.dataset.key !== a && tr.querySelector("td.player-cell audio"));
       return r && r.dataset.key;
     }, a);
-    if (other) {
-      await page.locator(`tr[data-key="${other}"] audio`).scrollIntoViewIfNeeded();
-      await page.hover(`tr[data-key="${other}"] audio`);
-      await page.waitForFunction((k) => document.querySelector(`tr[data-key="${k}"] audio`).readyState > 0, other, { timeout: 10000 });
-    }
+    assert.ok(other, "another row with an <audio>");
+    const otherSrc = await page.getAttribute(`tr[data-key="${other}"] audio`, "src");
+    const loads = [];
+    const onRequest = (r) => r.url() === otherSrc && loads.push(r.url());
+    page.on("request", onRequest);
+    await page.locator(`tr[data-key="${other}"] audio`).scrollIntoViewIfNeeded();
+    await page.hover(`tr[data-key="${other}"] audio`);
+    await page.waitForTimeout(600);
+    page.off("request", onRequest);
+    assert.equal(await page.$eval(`tr[data-key="${other}"] audio`, (au) => au.readyState), 0, "not loaded");
+    assert.deepEqual(loads, [], "no request for the stream");
     // Play (a row click), then hover the player: it keeps playing (load() would reset it).
     await page.$eval(`tr[data-key="${a}"] audio`, (au) => {
       au.loop = true; // the stand-in stream is 1 s of silence
@@ -1482,6 +1490,198 @@ test("player: hovering a track that is playing doesn't stop it (hover still load
     assert.equal(await page.evaluate(() => [...document.querySelectorAll("audio")].some((au) => !au.paused)), false, "copying doesn't play the row");
   } finally {
     await page.close();
+  }
+});
+
+// --- Connections and background work: the local app holds one event stream per visible page, and reads the
+// drive or Bandcamp only when the user asks.
+
+// Records the page's EventSources (window.__streams) from before its scripts run.
+const countStreams = (page) =>
+  page.addInitScript(() => {
+    const ES = window.EventSource;
+    window.__streams = [];
+    window.EventSource = class extends ES {
+      constructor(...args) {
+        super(...args);
+        window.__streams.push(this);
+      }
+    };
+  });
+const streams = (page) =>
+  page.evaluate(() => ({ made: window.__streams.length, open: window.__streams.filter((s) => s.readyState !== 2).length }));
+// What Chrome does when the tab is switched away from / back to.
+const setHidden = (page, hidden) =>
+  page.evaluate((h) => {
+    Object.defineProperty(document, "hidden", { configurable: true, get: () => h });
+    Object.defineProperty(document, "visibilityState", { configurable: true, get: () => (h ? "hidden" : "visible") });
+    document.dispatchEvent(new Event("visibilitychange"));
+  }, hidden);
+
+test("local app: a page holds one event stream (Settings too); a hidden tab closes it and catches up when shown again", async () => {
+  const id = "t999000003"; // a server-only item, removed at the end
+  const settings = await context.newPage();
+  const app = await context.newPage();
+  await countStreams(settings);
+  await countStreams(app);
+  try {
+    // Settings: its header, Import and Test tabs share one stream (they had one each).
+    await settings.goto(SERVER + "/settings/#import");
+    await settings.waitForSelector("#importFile", { state: "attached" });
+    await settings.waitForFunction(() => window.__streams.length > 0);
+    await settings.waitForTimeout(300);
+    assert.deepEqual(await streams(settings), { made: 1, open: 1 });
+
+    await app.goto(SERVER + "/");
+    await app.waitForFunction(() => document.querySelectorAll("#collectionTable tbody tr[data-key]").length > 0);
+    await app.waitForFunction(() => window.__streams.length > 0);
+    await app.waitForTimeout(300);
+    assert.deepEqual(await streams(app), { made: 1, open: 1 });
+
+    // Hidden: the stream is closed, so a change on the server doesn't reach the page...
+    await setHidden(app, true);
+    assert.deepEqual(await streams(app), { made: 1, open: 0 });
+    await post("/api/sync/items", { items: { [id]: { id, title: "E2E while hidden", tralbum_type: "t", tags: ["must"] } }, deleted: [], full: false });
+    await app.waitForTimeout(800);
+    assert.equal(await app.$(`tr[data-key="${id}"]`), null, "no update while hidden");
+    // ...until it's shown again: a new stream, and the page catches up.
+    await setHidden(app, false);
+    await app.waitForSelector(`tr[data-key="${id}"]`, { state: "attached", timeout: 10000 });
+    assert.deepEqual(await streams(app), { made: 2, open: 1 });
+  } finally {
+    await post("/api/sync/items", { items: {}, deleted: [id], full: false });
+    await settings.close();
+    await app.close();
+  }
+});
+
+test("local app: the rows load while the extension is still answering; \"Loading collection…\" until they're in", async () => {
+  const app = await context.newPage();
+  // Hold the extension's hello (so the bridge stays "connecting") and record when the ping and the items request go out.
+  await app.addInitScript(() => {
+    const held = [];
+    window.__t = {};
+    window.addEventListener(
+      "message",
+      (e) => {
+        if (e.data && e.data.bcTagger === "hello" && !window.__bridgeOpen) {
+          held.push(e.data);
+          e.stopImmediatePropagation();
+        }
+      },
+      true
+    );
+    window.__openBridge = () => {
+      window.__bridgeOpen = true;
+      held.forEach((d) => window.postMessage(d, location.origin));
+    };
+    const post = window.postMessage.bind(window);
+    window.postMessage = (m, ...rest) => {
+      if (m && m.bcTagger === "ping" && window.__t.ping == null) window.__t.ping = performance.now();
+      return post(m, ...rest);
+    };
+    const f = window.fetch.bind(window);
+    window.fetch = (url, ...rest) => {
+      if (String(url) === "/api/items" && window.__t.items == null) window.__t.items = performance.now();
+      return f(url, ...rest);
+    };
+  });
+  let release;
+  const held = new Promise((r) => (release = r));
+  await app.route("**/api/items", async (route) => {
+    await held;
+    await route.continue();
+  });
+  try {
+    await app.goto(SERVER + "/");
+    await app.waitForSelector("#loadingState");
+    assert.equal(await app.textContent("#loadingState"), "Loading collection…");
+    assert.equal(await app.$$eval("#collectionTable tbody tr[data-key]", (r) => r.length), 0);
+    const t = await app.evaluate(() => window.__t);
+    assert.ok(t.items - t.ping < 500, `the items were asked for with the extension's answer still pending (${Math.round(t.items - t.ping)} ms)`);
+    release();
+    await app.waitForFunction(() => document.querySelectorAll("#collectionTable tbody tr[data-key]").length > 0);
+    assert.equal(await app.$("#loadingState"), null);
+    assert.doesNotMatch(await app.textContent("#navExt"), /extension connected/);
+    await app.evaluate(() => window.__openBridge());
+    await app.waitForFunction(() => /extension connected/.test(document.getElementById("navExt").textContent));
+  } finally {
+    release();
+    await app.close();
+  }
+});
+
+test("local app: hovering a player doesn't read the file (no /api/files/stream until Play)", async () => {
+  const app = await context.newPage();
+  const fake = "/e2e/not-a-real-folder/hover.aiff"; // never read: the stream request is answered here
+  let key = null;
+  // One track shows as located (a local player); nothing on the server changes.
+  await app.route("**/api/items", async (route) => {
+    const res = await route.fetch();
+    const data = await res.json();
+    const list = Array.isArray(data) ? data : data.items;
+    const it = list.find((i) => i.tralbum_type === "t" && i.source !== "other");
+    key = it.id;
+    it.local = { status: "located", best: { path: fake }, candidates: [] };
+    await route.fulfill({ response: res, json: data });
+  });
+  const reads = [];
+  await app.route("**/api/files/stream**", (route) => {
+    reads.push(route.request().url());
+    route.fulfill({ status: 404, body: "" });
+  });
+  try {
+    await app.goto(SERVER + "/");
+    await app.waitForFunction(() => document.querySelectorAll("#collectionTable tbody tr[data-key]").length > 0);
+    const audio = app.locator(`tr[data-key="${key}"] audio.local-audio`);
+    await audio.scrollIntoViewIfNeeded();
+    await audio.hover();
+    await app.mouse.move(5, 5);
+    await audio.hover();
+    await app.waitForTimeout(600);
+    assert.deepEqual(reads, [], "hovering read nothing");
+    await audio.evaluate((au) => au.play().catch(() => {}));
+    await waitFor(async () => reads.length > 0, { what: "Play reads the file", timeout: 5000 });
+  } finally {
+    await app.close();
+  }
+});
+
+test("local app: rows without stored art don't fetch their Bandcamp page on scroll (Tools → Refresh thumbnails does)", async () => {
+  const app = await context.newPage();
+  // No row has stored art.
+  await app.route("**/api/items", async (route) => {
+    const res = await route.fetch();
+    const data = await res.json();
+    (Array.isArray(data) ? data : data.items).forEach((i) => {
+      delete i.art_url;
+      delete i.art_id;
+    });
+    await route.fulfill({ response: res, json: data });
+  });
+  // Bandcamp pages are fetched through the extension: record the page's requests to it.
+  await app.addInitScript(() => {
+    window.__ops = [];
+    const post = window.postMessage.bind(window);
+    window.postMessage = (m, ...rest) => {
+      if (m && m.bcTagger === "request") window.__ops.push(m.op);
+      return post(m, ...rest);
+    };
+  });
+  try {
+    await app.goto(SERVER + "/");
+    await app.waitForFunction(() => /extension connected/.test(document.getElementById("navExt").textContent));
+    await app.waitForFunction(() => document.querySelectorAll("#collectionTable tbody tr[data-key]").length > 0);
+    // Rendered again with the extension connected, then scrolled through.
+    await app.click("#collectionTable th.col-title");
+    await app.mouse.wheel(0, 3000);
+    await app.waitForTimeout(400);
+    await app.mouse.wheel(0, 3000);
+    await app.waitForTimeout(800);
+    assert.ok(await app.$("#collectionTable td.col-thumb .no-thumb"), "rows show the placeholder");
+    assert.deepEqual((await app.evaluate(() => window.__ops)).filter((op) => op === "fetchPage"), []);
+  } finally {
+    await app.close();
   }
 });
 
@@ -2670,7 +2870,7 @@ test("bot check: the first challenged page stops all page fetching and is shown"
   await page.close();
 });
 
-test("bot check: ownership reports it and stops refreshing in the background", async () => {
+test("bot check: Refresh ownership reports it; the next one clears it", async () => {
   const SUMMARY = "https://bandcamp.com/api/fan/2/collection_summary";
   const challenge = (route) => route.fulfill({ status: 200, contentType: "text/html", body: CHALLENGE_HTML });
   await context.route(SUMMARY, challenge);

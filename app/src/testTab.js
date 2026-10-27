@@ -2,7 +2,7 @@
 // items, kept off the collection's toolbar (which acts on the selected or
 // shown items). Same jobs and the same export dry run + confirm.
 
-import { ServerEvents } from "../../shared/datasource/serverEvents";
+import { pageEvents } from "../../shared/datasource/serverEvents";
 import { Jobs, progressText, resultText } from "./jobs";
 import { runExport } from "./exportFlow";
 
@@ -14,7 +14,7 @@ function node(tag, attrs = {}, ...children) {
 }
 
 export function createTestTab(container) {
-  const jobs = new Jobs(new ServerEvents().start());
+  const jobs = new Jobs(pageEvents().start());
   // The id the collection page uses too, so the same checks read it.
   const status = node("span", { id: "refreshStatus", class: "help test-status" });
   const button = (id, label, title, start) => {

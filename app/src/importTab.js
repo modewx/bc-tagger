@@ -6,7 +6,7 @@
 // coming back here (or reloading) picks it up at its step (#import/<id>).
 
 import { apiJson } from "../../shared/datasource/HttpDataSource";
-import { ServerEvents } from "../../shared/datasource/serverEvents";
+import { pageEvents } from "../../shared/datasource/serverEvents";
 import { Jobs, progressText, resultText } from "./jobs";
 import { listBatches, getBatch, startImport, applyTagMap, discardBatch, resumeLookups, startFileImport, fileImportDefaults, dateInputValue } from "./importApi";
 import { folderPicker } from "./folderPicker";
@@ -63,7 +63,7 @@ function tagSelect(id, vocab, selected, width) {
 }
 
 export function createImportTab(container, { bridge } = {}) {
-  const events = new ServerEvents().start();
+  const events = pageEvents().start();
   const jobs = new Jobs(events);
   let vocab = [];
   let fileData = null;

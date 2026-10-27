@@ -37,6 +37,12 @@ reachable, edits are queued on the server and applied by the extension on its ne
     Ticking a highlighted row ticks all highlighted rows (unticking unticks them all), and Shift on a checkbox ticks a
     range. Only the **player column** plays: a click anywhere in it, empty space too, plays or pauses that row.
   - Test-only actions (Locate / Export latest 10) are in **Settings → Test**.
+  - **Nothing runs unasked:** the app reads the music drive or Bandcamp only when you click (Play, Locate, Tools,
+    Refresh ownership). Hovering a player loads nothing, rows without stored art show a placeholder (Tools → Refresh
+    thumbnails fetches art), and the extension checks ownership only on Refresh ownership.
+  - **One connection per tab:** Chrome allows 6 connections to the server across all tabs, and each open page's live
+    updates hold one. A page uses a single stream, closes it while its tab is hidden, and catches up when shown.
+    The collection loads without waiting for the extension, and says "Loading collection…" until its rows are in.
   - The Located popover: candidates, Locate again, **Download File** for owned items that aren't on the drive, and
     **Download Full Release** when a track's album or EP is owned. Downloads start at once, several releases at a
     time (Settings → Downloads → Parallel downloads, default 4). Each row shows its progress, and a retry shows its
@@ -120,7 +126,7 @@ Runs the extension, server and local app together in a Playwright Chromium with 
   real server (mapping, linking, browser lookups, downloads, re-locate, browse), settings, and rekordbox dry runs
   and a sandbox write.
 
-A full run (70 tests) takes about 2 minutes (2026-10-26: 110–147 s). For a quick check, run a subset by
+A full run (74 tests) takes about 2 minutes (2026-10-26: 110–147 s). For a quick check, run a subset by
 name. Include `Import \(replace\)`, which loads the test collection the others use:
 
 ```bash
