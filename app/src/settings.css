@@ -124,6 +124,10 @@ section[hidden] { display: none; }
   font-weight: 600;
 }
 .main-banner[hidden] { display: none; }
+.main-banner.read-only { background: #fff4e5; border-color: #f0c27b; border-left-color: #d97706; color: #8a4b00; }
+.target-choice { display: flex; gap: 18px; margin-bottom: 8px; font-weight: 600; }
+.target-radio { display: flex; gap: 6px; align-items: center; cursor: pointer; }
+.target .target-toggle { margin-top: 10px; }
 
 /* Tag → playlists mapping */
 .mapping-auto { display: flex; gap: 8px; align-items: center; cursor: pointer; }

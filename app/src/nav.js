@@ -120,14 +120,20 @@ export function buildNav(active) {
       refreshImport();
     },
     // settings: the server's settings (rekordbox_target, rekordbox_main_db_path)
+    // The target library: no banner for the test library; main read-only (writes
+    // locked) or main with writes enabled (the stronger one).
     setTarget(settings) {
       const main = !!settings && settings.rekordbox_target === "main";
+      const writable = main && !!settings.allow_main_writes;
       mainBanner.hidden = !main;
+      mainBanner.classList.toggle("read-only", main && !writable);
       document.documentElement.classList.toggle("target-main", main);
       if (main) {
         const path = settings.rekordbox_main_db_path || "~/Library/Pioneer/rekordbox/master.db";
-        mainBanner.textContent = "MAIN LIBRARY · exports write to your real rekordbox collection";
-        mainBanner.title = `${path}\nEvery export shows a dry run and asks before writing. Click to change.`;
+        mainBanner.textContent = writable ? "MAIN LIBRARY · writes enabled" : "MAIN LIBRARY · read-only";
+        mainBanner.title = writable
+          ? `${path}\nEvery export shows a dry run and asks before writing. Click to change.`
+          : `${path}\nExports stop at the dry run until you allow writes in Settings → Rekordbox. Click to change.`;
       }
     },
     setHealth(health, error) {

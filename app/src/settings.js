@@ -86,19 +86,19 @@ const FIELDS = {
     label: "Offer candidates at or above",
     help: "Below auto-accept, matches are listed for you to confirm in the Located column.",
   },
-  rekordbox_target: { section: "rb_target", type: "target", label: "Main collection" },
+  rekordbox_target: { section: "rb_target", type: "target", label: "Target library" },
   allow_main_writes: { section: "rb_target", type: "part" }, // edited by the target editor
   rekordbox_db_path: {
     section: "rb_target",
     type: "path",
     label: "Test library database",
-    help: "Used while the main collection isn't enabled. Writes need the test-library marker file in its folder.",
+    help: "Exports go here while the target is Test. Writes need the test-library marker file in its folder.",
   },
   rekordbox_main_db_path: {
     section: "rb_target",
     type: "path",
     label: "Main library database",
-    help: "Your real collection. Only written when enabled above; bc-tagger backs it up before every write.",
+    help: "Your real collection. Exports go here while the target is Main, and write only when allowed above; bc-tagger backs it up before every write.",
   },
   playlist_folder: {
     section: "rb_playlists",
@@ -462,14 +462,36 @@ function genericEditor(key, value) {
 // The main-collection opt-in: one checkbox drives rekordbox_target ("test" |
 // "main") and allow_main_writes. Ticking it asks first, with a clear warning
 // and a backup reminder; unticking returns to the test library.
+// Target (Test / Main): the library exports read from and write to, and that
+// the Playlists section shows. Separate from "Allow … main collection": a main
+// target with writes locked is read-only (exports stop at the dry run).
 function targetEditor() {
+  let target = "test";
+  const radios = {};
+  const radio = (value, text) => {
+    const r = el("input", { type: "radio", name: "rbTarget", id: `f_target_${value}`, value });
+    r.addEventListener("change", () => {
+      if (!r.checked) return;
+      target = value;
+      paint();
+      changed();
+      loadMappingData(target); // the Playlists marks follow the chosen library
+    });
+    radios[value] = r;
+    return el("label", { class: "target-radio", for: `f_target_${value}` }, r, ` ${text}`);
+  };
+  const choice = el("div", { class: "target-choice", role: "radiogroup", "aria-label": "Target library" }, radio("test", "Test library"), radio("main", "Main library"));
   const box = el("input", { type: "checkbox", id: "f_allow_main_writes" });
   const label = el("label", { class: "target-toggle", for: "f_allow_main_writes" }, box, " Allow bc-tagger to write to my main rekordbox collection");
-  const banner = el("div", { class: "main-banner", hidden: true });
+  const banner = el("div", { class: "main-banner", id: "mainTargetBanner", hidden: true });
   const paint = () => {
-    banner.hidden = !box.checked;
+    Object.entries(radios).forEach(([v, r]) => (r.checked = v === target));
     const path = (editors.rekordbox_main_db_path && editors.rekordbox_main_db_path.get()) || "~/Library/Pioneer/rekordbox/master.db";
-    banner.textContent = `MAIN LIBRARY: exports write to ${path}. Each export shows a dry run and asks before writing. rekordbox must be closed.`;
+    banner.hidden = target !== "main";
+    banner.classList.toggle("read-only", !box.checked);
+    banner.textContent = box.checked
+      ? `MAIN LIBRARY · writes enabled: exports write to ${path}. Each export shows a dry run and asks before writing. rekordbox must be closed.`
+      : `MAIN LIBRARY · read-only: exports to ${path} stop at the dry run until you allow writes below.`;
   };
   box.addEventListener("change", async () => {
     if (box.checked) {
@@ -480,26 +502,19 @@ function targetEditor() {
         title: "Write to your main rekordbox collection?",
         body: mainWarning(),
         requireAck: "I've made a backup of my rekordbox library (File → Library → Backup Library)",
-        confirmLabel: "Use my main collection",
+        confirmLabel: "Allow writes to my main collection",
       });
       box.checked = ok;
     }
-    paint();
+    paint(); // unticking locks writes; the target stays as chosen
     changed();
   });
-  // Checked only when both settings say so (the server needs both to write).
-  let target = "test";
-  let allow = false;
-  const sync = () => {
-    box.checked = target === "main" && allow;
-    paint();
-  };
-  const node = el("div", { class: "target" }, label, banner);
+  const node = el("div", { class: "target" }, choice, banner, label);
   return {
     node,
     parts: {
-      rekordbox_target: { get: () => (box.checked ? "main" : "test"), set: (v) => ((target = v), sync()) },
-      allow_main_writes: { get: () => box.checked, set: (v) => ((allow = !!v), sync()) },
+      rekordbox_target: { get: () => target, set: (v) => ((target = v === "main" ? "main" : "test"), paint()) },
+      allow_main_writes: { get: () => box.checked, set: (v) => ((box.checked = !!v), paint()) },
     },
   };
 }
@@ -518,7 +533,7 @@ function mainWarning() {
       el("li", {}, "Every export shows a dry run (playlists to create, tracks to add, entries per playlist) and asks before writing.")
     ),
     el("p", {}, "Make your own backup first: in rekordbox, File → Library → Backup Library."),
-    el("p", { class: "muted" }, "Takes effect when you save settings. Untick the box to go back to the test library.")
+    el("p", { class: "muted" }, "Takes effect when you save settings. Unticking it locks writes again; the target stays as chosen.")
   );
   return wrap;
 }
@@ -537,14 +552,16 @@ function mappingEditor() {
 }
 
 // Vocabulary and the target library's playlists for the mapping editor.
-async function loadMappingData() {
+// `target`: the library to read the playlists from (the Target radios, before
+// they're saved); none: the saved one.
+async function loadMappingData(target) {
   if (!mapping) return;
   mapping.loading();
   apiJson("/api/tags")
     .then(mapping.setVocabulary)
     .catch(() => mapping.setVocabulary([]));
   try {
-    mapping.setPlaylists(await apiJson("/api/rekordbox/playlists"));
+    mapping.setPlaylists(await apiJson(`/api/rekordbox/playlists${target ? `?target=${target}` : ""}`));
   } catch (e) {
     mapping.setPlaylists(null); // not available (older server, library unreadable)
   }

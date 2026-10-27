@@ -46,6 +46,7 @@
   text-decoration: none;
 }
 #mainLibraryBanner[hidden] { display: none; }
+#mainLibraryBanner.read-only { background: #fff4e5; color: #8a4b00 !important; border: 1px solid #f0c27b; font-weight: 600; }
 
 /* The open import, on every page: where it is, linked back to its step. */
 #navImport { text-decoration: none; background: #e6f4ea; color: #1f7a4d; border: 1px solid #b7dfc4; }

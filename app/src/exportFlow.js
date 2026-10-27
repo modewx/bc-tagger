@@ -51,6 +51,14 @@ export function diffView(d, target) {
     const ul = el("ul");
     blockers.forEach((b) => ul.appendChild(el("li", b)));
     box.appendChild(ul);
+    // The main library with writes locked: say where to allow them.
+    if ((Array.isArray(d.blockers) ? d.blockers : []).some((b) => b && b.code === "main_writes_locked")) {
+      const a = el("a", "Allow writes to your main collection in Settings → Rekordbox →");
+      a.href = "/settings/#rekordbox";
+      a.target = "_blank";
+      a.className = "allow-writes-link";
+      box.appendChild(a);
+    }
     wrap.appendChild(box);
   }
   (Array.isArray(d.warnings) ? d.warnings : []).forEach((w) =>
