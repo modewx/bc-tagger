@@ -172,7 +172,8 @@ export async function runExport(jobs, selection, onProgress, { ask = false } = {
     const none = count(d.skipped_items) >= count(d.selected_items); // selected = all; skipped = not located
     return { status: "done", result: { message: none ? "none of these items are located" : "rekordbox is already up to date" } };
   }
-  const n = count(d.selected_items) || (selection.ids || selection.rows || []).length || selection.latest;
+  // What's sent: the selection minus what's skipped (not located).
+  const n = count(d.selected_items) - count(d.skipped_items) || (selection.ids || selection.rows || []).length || selection.latest;
   const blockers = blockersOf(d);
   const ok = await confirmDialog({
     id: "exportConfirm",

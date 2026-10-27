@@ -77,6 +77,7 @@ const SHELL_HTML = `
  * @param {function} [opts.titleUrl]        (item) -> link for the title, instead of its Bandcamp page
  * @param {string[]} [opts.hideColumns]     ids of columns hidden until shown with the Columns chooser (e.g. "date")
  * @param {(item) => string|null} [opts.groupBy] a header row (e.g. a folder) above each group, in "#" order
+ * @param {(keys) => void} [opts.onItemsUpdated] items changed in place (no re-render of the view)
  * @param {string} [opts.columnsKey]        localStorage key for the shown/hidden columns (default: from colWidthKey)
  * @param {function} [opts.playable]        (item) -> false: nothing to play (no Bandcamp page, no local file)
  *
@@ -1459,6 +1460,7 @@ export function createCollectionPage(opts) {
       if (k in currentView) refreshRow(k);
       else syncTagEditors(k);
     });
+    if (changed.length && opts.onItemsUpdated) opts.onItemsUpdated(changed);
   }
 
   // Re-fetch items (e.g. after a local-app job, or an edit made elsewhere);

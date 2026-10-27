@@ -50,7 +50,8 @@ reachable, edits are queued on the server and applied by the extension on its ne
     whether or not their rows are ticked.
 - **Import preview:** **Select all** / **Select new only** (everything not already in the collection), and
   **Transfer to rekordbox** sends the ticked rows' files to rekordbox (playlists from their tags, the usual dry run
-  and confirm) without adding them to the collection. The dialog shows where each tag goes. Tags the rows use that
+  and confirm) without adding them to the collection. Its count, like Export Selected to RB's, is the located rows;
+  the hint next to it says how many aren't located (skipped). The dialog shows where each tag goes. Tags the rows use that
   aren't in the tag list yet get **Create New Tags** at the top, then a link to map them in Settings → Rekordbox.
   - An open import survives leaving the page; the header shows where it is.
 - **Settings → General:** music folders, matching, downloads (folder and format), Bandcamp request pacing, the

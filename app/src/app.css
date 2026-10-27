@@ -225,3 +225,6 @@ button.chip:hover { filter: brightness(0.95); border-color: #bbb; }
 /* The rows' tags not in the tag list yet (Create New Tags), at the top of the preview. */
 .import-new-tags { margin: 6px 0; padding: 6px 10px; background: #fff8e1; border: 1px solid #f0d68a; border-radius: 6px; font-size: 13px; }
 .import-new-tags[hidden] { display: none; }
+/* "N not located are skipped" next to Export Selected / Transfer to rekordbox. */
+.export-hint { font-size: 12px; color: #8a5a00; margin: 0 8px 0 -2px; white-space: nowrap; }
+.export-hint:empty { display: none; }

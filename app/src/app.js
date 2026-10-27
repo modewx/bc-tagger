@@ -7,7 +7,7 @@ import { ExtensionBridge } from "../../shared/datasource/extensionBridge";
 import { ServerEvents } from "../../shared/datasource/serverEvents";
 import { Jobs, progressText, resultText } from "./jobs";
 import { buildNav } from "./nav";
-import { appColumns, downloadable, localPlayUrl } from "./columns";
+import { appColumns, downloadable, isLocated, localPlayUrl } from "./columns";
 import { downloadFlow, fullReleasesToggle } from "./downloads";
 import { startDevReload } from "./devReload";
 import { createStatusFilter, createSourceFilter, sourceOf, playableItem } from "./statusFilter";
@@ -113,7 +113,12 @@ function updateShownButtons() {
   const dl = document.getElementById("downloadOwnedMissing");
   const clear = document.getElementById("clearSelection");
   if (loc) loc.textContent = sel ? `Locate selected (${sel})` : `Locate shown (${shown})`;
-  if (exp) exp.textContent = sel ? `Export Selected to RB (${sel})…` : `Export shown (${shown})…`;
+  // Export sends located items only: count those, and say how many selected ones are skipped.
+  const items = page.getItems();
+  const located = selectedIds().filter((k) => isLocated(items[k])).length;
+  if (exp) exp.textContent = sel ? `Export Selected to RB (${located})…` : `Export shown (${shown})…`;
+  const hint = document.getElementById("exportHint");
+  if (hint) hint.textContent = sel > located ? `${sel - located} not located ${sel - located > 1 ? "are" : "is"} skipped` : "";
   if (dl) dl.textContent = sel ? "Download owned missing (selected)" : "Download owned missing";
   if (clear) {
     clear.hidden = !sel;
@@ -291,6 +296,7 @@ async function refreshHealth() {
       statusFilter.onView(shown, total);
       updateShownButtons();
     },
+    onItemsUpdated: () => updateShownButtons(), // e.g. a selected item got located
   });
 
   // File index status next to "Rescan drive".
@@ -301,6 +307,11 @@ async function refreshHealth() {
   });
   document.getElementById("rescanDrive").after(indexStatus.el, indexStatus.hint);
   document.getElementById("downloadOwnedMissing").after(fullReleases.el);
+  const exportHint = document.createElement("span");
+  exportHint.id = "exportHint";
+  exportHint.className = "export-hint";
+  document.getElementById("exportShown").after(exportHint);
+  updateShownButtons();
 
   // Let the wide table scroll sideways on narrow screens.
   const table = document.getElementById("collectionTable");

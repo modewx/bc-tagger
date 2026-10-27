@@ -699,6 +699,10 @@ test("Settings has General and Rekordbox tabs", async () => {
 // re-renders or repaints it): wait for both before typing, and for each result after.
 const mappingLoaded = (page) => page.waitForSelector(".mapping[data-vocab][data-playlists]", { state: "attached" });
 const settingsNow = () => api("/api/settings").then((d) => d.settings || d);
+// Export / Transfer count what they can send: the located ones.
+const locatedOf = (ids) =>
+  api(`/api/items?ids=${ids.join(",")}`).then((d) => (Array.isArray(d) ? d : d.items).filter((i) => i.local && i.local.status === "located").length);
+const skippedHint = (n) => (n ? `${n} not located ${n > 1 ? "are" : "is"} skipped` : "");
 
 test("Settings: the tag → playlists mapping round-trips through the server", async () => {
   const page = await context.newPage();
@@ -1788,7 +1792,9 @@ test("collection: with rows selected, Locate / Export / Download act on them; wi
     const keys = await app.$$eval("#collectionTable tbody tr", (r) => r.slice(0, 2).map((x) => x.dataset.key));
     for (const k of keys) await app.check(`tr[data-key="${k}"] .row-check`);
     assert.equal(await app.textContent("#locateShown"), "Locate selected (2)");
-    assert.equal(await app.textContent("#exportShown"), "Export Selected to RB (2)…");
+    const locatedSel = await locatedOf(keys);
+    assert.equal(await app.textContent("#exportShown"), `Export Selected to RB (${locatedSel})…`, "the located ones");
+    assert.equal(await app.textContent("#exportHint"), skippedHint(2 - locatedSel));
     assert.equal(await app.textContent("#downloadOwnedMissing"), "Download owned missing (selected)");
     assert.equal(await app.textContent("#clearSelection"), "Clear selection (2)");
     assert.equal(await app.$eval("#selectAll", (b) => b.indeterminate), true);
@@ -2053,6 +2059,9 @@ test("Download owned missing: releases download together, each row with its own 
     }
     await app.fill("#searchInput", "");
     await app.waitForFunction(([a, b]) => document.querySelector(`tr[data-key="${a}"]`) && document.querySelector(`tr[data-key="${b}"]`), [A.id, B.id]);
+    // Neither is located yet: Export Selected counts none, and says so.
+    assert.equal(await app.textContent("#exportShown"), "Export Selected to RB (0)…");
+    assert.equal(await app.textContent("#exportHint"), "2 not located are skipped");
     // Everything each row and the status line show while it runs.
     await app.evaluate(([a, b]) => {
       const seen = (window.__seen = { [a]: [], [b]: [], status: [], warn: [] });
@@ -2078,6 +2087,9 @@ test("Download owned missing: releases download together, each row with its own 
     for (const r of [A, B]) {
       await waitFor(() => api(`/api/items/${r.id}`).then((it) => it.local && it.local.status === "located"), { what: `${r.title} located` });
     }
+    // Located now: the count follows, live.
+    await app.waitForFunction(() => document.getElementById("exportShown").textContent === "Export Selected to RB (2)…");
+    assert.equal(await app.textContent("#exportHint"), "");
   } finally {
     await restore();
     await app.close();
@@ -2608,6 +2620,12 @@ test("import end to end (real server): resolve, map tags, paste a URL, link from
   page.on("response", async (r) => {
     if (/\/api\/import\/[^/]+\/commit$/.test(new URL(r.url()).pathname)) commits.push(await r.json().catch(() => null));
   });
+  // Transfer to rekordbox counts the ticked rows that are located; the rest are said to be skipped.
+  const nowRows = (await api(`/api/import/${batchId}`)).rows.filter((r) => r.checked);
+  const locatedTicked = nowRows.filter((r) => r.located && r.located.status === "located").length;
+  assert.ok(locatedTicked > 0 && locatedTicked < nowRows.length, `a mix: ${locatedTicked} of ${nowRows.length}`);
+  await page.waitForFunction((n) => document.getElementById("transferToRekordbox").textContent === `Transfer to rekordbox (${n})…`, locatedTicked);
+  assert.equal(await page.textContent("#transferHint"), skippedHint(nowRows.length - locatedTicked));
   const maxOrderBefore = (await api("/api/health")).max_order;
   assert.ok(Number.isFinite(maxOrderBefore), "health.max_order");
   await page.click("#importSelected");
@@ -2642,7 +2660,9 @@ test("import end to end (real server): resolve, map tags, paste a URL, link from
   const top = await page.$$eval("#collectionTable tbody tr", (trs, n) => trs.slice(0, n).map((tr) => tr.dataset.key), chosen.length);
   assert.deepEqual(top.slice().sort(), chosen.slice().sort(), "the imported items come first");
   assert.match(await page.textContent("#refreshStatus"), new RegExp(`The ${chosen.length} imported and merged items are selected`));
-  assert.equal(await page.textContent("#exportShown"), `Export Selected to RB (${chosen.length})…`);
+  const locatedChosen = await locatedOf(chosen);
+  assert.equal(await page.textContent("#exportShown"), `Export Selected to RB (${locatedChosen})…`);
+  assert.equal(await page.textContent("#exportHint"), skippedHint(chosen.length - locatedChosen));
 
   // Export Selected to RB: the dry run is exactly the selection (cancelled here; the sandbox run writes).
   const exportPosts = [];
@@ -2842,6 +2862,7 @@ test("Import from Files: folders prefilled with their dates, rows by folder unde
     const exportPosts = [];
     page.on("request", (r) => r.method() === "POST" && new URL(r.url()).pathname === "/api/rekordbox/export" && exportPosts.push(r.postDataJSON()));
     assert.equal(await page.textContent("#transferToRekordbox"), "Transfer to rekordbox (3)…");
+    assert.equal(await page.textContent("#transferHint"), "", "all located");
     await page.click("#transferToRekordbox");
     await waitFor(async () => exportPosts.length > 0, { what: "the transfer's dry run", timeout: 60000 });
     assert.equal(exportPosts[0].dry_run, true);

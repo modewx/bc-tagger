@@ -263,11 +263,15 @@ function renderInfo() {
     btn.textContent = `Import selected (${checked})`;
     btn.disabled = !checked || batch.committed;
   }
+  // Transfer sends located rows only: count those, and say how many ticked ones are skipped.
+  const located = batch.rows.filter((r) => r.checked && r.local && r.local.status === "located").length;
   const transfer = document.getElementById("transferToRekordbox");
   if (transfer) {
-    transfer.textContent = `Transfer to rekordbox (${checked})…`;
-    transfer.disabled = !checked;
+    transfer.textContent = `Transfer to rekordbox (${located})…`;
+    transfer.disabled = !located;
   }
+  const hint = document.getElementById("transferHint");
+  if (hint) hint.textContent = checked > located ? `${checked - located} not located ${checked - located > 1 ? "are" : "is"} skipped` : "";
   proc.textContent = batch.committed
     ? `Imported${batch.committed_at ? " " + new Date(batch.committed_at).toLocaleString() : ""}.`
     : batch.status === "error"
@@ -1140,6 +1144,9 @@ async function discard(statusEl) {
   });
   showSel.addEventListener("change", () => page.refilter());
   document.getElementById("downloadOwnedMissing").after(fullReleases.el);
+  const transferHint = el("span", "export-hint");
+  transferHint.id = "transferHint";
+  document.getElementById("transferToRekordbox").after(transferHint);
   // "Locate again": missing rows by default, every row on request.
   const allRows = document.createElement("label");
   allRows.className = "locate-all";

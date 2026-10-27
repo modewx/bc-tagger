@@ -103,6 +103,9 @@ export function sourceColumn() {
   };
 }
 
+// Located on the drive: what an export to rekordbox can send.
+export const isLocated = (item) => !!item && localOf(item).status === "located";
+
 // Owned on Bandcamp, but not on the drive: something to download.
 export const downloadable = (item) =>
   !!item && (item.owned || {}).status === "owned" && localOf(item).status !== "located" && sourceOf(item) !== "other";
