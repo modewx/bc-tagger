@@ -1,13 +1,15 @@
 // Settings → Import: pick a bc-tagger-import/1 file, choose default tags,
 // start the import (the server resolves rows on Bandcamp and locates them),
-// then map unknown tags and continue to the preview page.
+// then map unknown tags and continue to the preview page. Or Import from
+// Files: folders, each with an "added since" date; then straight to the preview.
 // An import stays open on the server until it's imported or discarded:
 // coming back here (or reloading) picks it up at its step (#import/<id>).
 
 import { apiJson } from "../../shared/datasource/HttpDataSource";
 import { ServerEvents } from "../../shared/datasource/serverEvents";
 import { Jobs, progressText, resultText } from "./jobs";
-import { listBatches, getBatch, startImport, applyTagMap, discardBatch, resumeLookups } from "./importApi";
+import { listBatches, getBatch, startImport, applyTagMap, discardBatch, resumeLookups, startFileImport, fileImportDefaults, dateInputValue } from "./importApi";
+import { folderPicker } from "./folderPicker";
 import { rememberImport, rememberedImport, stepLabel, stepOf, stepUrl } from "./openImport";
 import { runBrowserLookups, lookupsText } from "./browserLookups";
 import { renderPastImports } from "./importLogs";
@@ -81,6 +83,62 @@ export function createImportTab(container, { bridge } = {}) {
   const mapping = el("div", { class: "import-mapping", id: "importMapping", hidden: true });
   const batches = el("div", { id: "importBatches" });
   const pastImports = el("div", { id: "importLogs" });
+  // The progress (and mapping step) sit under whichever import started: the file's or the folders'.
+  const jsonRun = el("div", { class: "field" }, start, progress);
+
+  // Import from Files: folder rows (path, Browse…, added since, ×), Default tags (pool), the lookup choice.
+  let folders = [];
+  let filesTags = null;
+  const weekAgo = () => dateInputValue(new Date(Date.now() - 7 * 864e5).toISOString());
+  const folderList = el("div", { id: "importFolders", class: "import-folders" });
+  const addFolder = el("button", { type: "button", class: "secondary", id: "importFolderAdd" }, "+ Add folder");
+  const filesInfo = el("div", { class: "help", id: "importFilesInfo" });
+  const filesTagsHolder = el("div", { id: "importFilesDefaultTagsHolder" });
+  const filesAllBox = el("input", { type: "checkbox", id: "importFilesDefaultAll" });
+  const filesViaServer = el("input", { type: "radio", name: "importFilesLookup", value: "server", id: "importFilesLookupServer", checked: true });
+  const filesViaBrowser = el("input", { type: "radio", name: "importFilesLookup", value: "browser", id: "importFilesLookupBrowser" });
+  const filesStart = el("button", { type: "button", id: "importFilesStart" }, "Start import");
+  const filesRun = el("div", { class: "field" }, filesStart);
+
+  function renderFolders() {
+    folderList.innerHTML = "";
+    folders.forEach((f, i) => {
+      const path = el("input", { type: "text", class: "path folder-path", placeholder: "/path/to/folder", spellcheck: "false" });
+      path.value = f.path;
+      path.addEventListener("input", () => (f.path = path.value));
+      const since = el("input", { type: "date", class: "folder-since", title: "Files added on or after this day" });
+      since.value = f.since || "";
+      since.addEventListener("change", () => (f.since = since.value));
+      const browse = el("button", { type: "button", class: "secondary folder-browse" }, "Browse…");
+      const del = el("button", { type: "button", class: "icon folder-del", title: "Remove this folder" }, "×");
+      del.addEventListener("click", () => {
+        folders.splice(i, 1);
+        renderFolders();
+      });
+      const picker = el("div", { class: "folder-picker-holder" });
+      browse.addEventListener("click", () => {
+        if (picker.firstChild) return (picker.innerHTML = "");
+        picker.appendChild(
+          folderPicker({
+            start: path.value.trim() || null,
+            onPick: (p) => {
+              f.path = path.value = p;
+              picker.innerHTML = "";
+            },
+            onClose: () => (picker.innerHTML = ""),
+          })
+        );
+      });
+      folderList.append(
+        el("div", { class: "folder-row", "data-i": i }, path, browse, el("label", { class: "since-label" }, "added since ", since), del),
+        picker
+      );
+    });
+  }
+  addFolder.addEventListener("click", () => {
+    folders.push({ path: "", since: weekAgo() });
+    renderFolders();
+  });
 
   container.append(
     el(
@@ -116,8 +174,37 @@ export function createImportTab(container, { bridge } = {}) {
           "In your browser, the searches run in your Chrome session, paced by General → Bandcamp requests; they stop on Bandcamp's bot check or rate limit."
         )
       ),
-      el("div", { class: "field" }, start, progress),
+      jsonRun,
       mapping
+    ),
+    el(
+      "section",
+      { id: "sec_import_files", "data-tab": "import" },
+      el("h2", {}, "Import from Files"),
+      el(
+        "p",
+        { class: "help" },
+        "Audio files added to these folders since a date: one row per track (a track in several formats counts once), " +
+          "folder by folder, oldest release first. Rows are already located to their files. Files already in your " +
+          "collection show as duplicates, unticked. A Bandcamp link in a file's tags matches it directly; the rest are " +
+          "looked up. Nothing is added until you click Import selected in the preview."
+      ),
+      el("div", { class: "field" }, el("label", { class: "field-label" }, "Folders"), folderList, addFolder, filesInfo),
+      el(
+        "div",
+        { class: "field" },
+        el("label", { class: "field-label" }, "Default tags"),
+        filesTagsHolder,
+        el("label", { class: "check-label" }, filesAllBox, " Add default tags to all tracks")
+      ),
+      el(
+        "div",
+        { class: "field" },
+        el("label", { class: "field-label" }, "Look up on Bandcamp"),
+        el("label", { class: "check-label" }, filesViaServer, " by the server"),
+        el("label", { class: "check-label" }, filesViaBrowser, " in my browser (the Bc Tagger extension, while this page stays open)")
+      ),
+      filesRun
     ),
     el(
       "section",
@@ -177,6 +264,7 @@ export function createImportTab(container, { bridge } = {}) {
   start.addEventListener("click", async () => {
     if (!fileData) return;
     start.disabled = true;
+    jsonRun.appendChild(progress);
     progress.hidden = false;
     progress.className = "import-progress";
     progress.textContent = "Starting…";
@@ -194,6 +282,41 @@ export function createImportTab(container, { bridge } = {}) {
     const est = res.estimate && res.estimate.text ? ` (${res.estimate.text})` : "";
     if (await follow(res.batch_id, res.job_id, est)) await afterLookups(res.batch_id);
     start.disabled = false;
+    loadBatches();
+  });
+
+  // Import from Files: the server picks the files, looks them up, then the preview (no mapping step).
+  filesStart.addEventListener("click", async () => {
+    const chosen = folders.map((f) => ({ path: f.path.trim(), since: f.since })).filter((f) => f.path);
+    filesInfo.className = "help err";
+    if (!chosen.length) return (filesInfo.textContent = "Add a folder first.");
+    if (chosen.some((f) => !f.since)) return (filesInfo.textContent = "Pick an “added since” date for every folder.");
+    filesInfo.className = "help";
+    filesInfo.textContent = "";
+    filesStart.disabled = true;
+    filesRun.appendChild(progress);
+    progress.hidden = false;
+    progress.className = "import-progress";
+    progress.textContent = "Starting…";
+    let res;
+    try {
+      res = await startFileImport({
+        folders: chosen,
+        lookup: filesViaBrowser.checked ? "browser" : "server",
+        defaultTags: filesTags ? filesTags.get() : ["pool"],
+        defaultTagsAll: filesAllBox.checked,
+      });
+    } catch (e) {
+      progress.className = "import-progress err";
+      progress.textContent = `Import failed: ${e.message}`;
+      filesStart.disabled = false;
+      return;
+    }
+    rememberImport(res.batch_id);
+    setHash(res.batch_id);
+    const est = res.estimate && res.estimate.text ? ` (${res.estimate.text})` : "";
+    if (await follow(res.batch_id, res.job_id, est)) await afterLookups(res.batch_id);
+    filesStart.disabled = false;
     loadBatches();
   });
 
@@ -295,6 +418,7 @@ export function createImportTab(container, { bridge } = {}) {
       return;
     }
     rememberImport(id);
+    (batch.fromFiles ? filesRun : jsonRun).appendChild(progress);
     showOpen(batch);
     const step = stepOf(batch);
     const jobId = (batch.job && batch.job.id) || batch.job_id;
@@ -475,6 +599,20 @@ export function createImportTab(container, { bridge } = {}) {
         defaultTags = tagSelect("importDefaultTags", vocab, vocab.includes("must") ? ["must"] : [], "420px");
         tagsHolder.appendChild(defaultTags.node);
         defaultTags.init();
+      }
+      if (!filesTags) {
+        filesTags = tagSelect("importFilesDefaultTags", vocab, ["pool"], "420px");
+        filesTagsHolder.appendChild(filesTags.node);
+        filesTags.init();
+        try {
+          folders = await fileImportDefaults();
+        } catch (e) {
+          filesInfo.className = "help err";
+          filesInfo.textContent = e.status === 404 ? "This server can't import from files yet." : `Can't read the default folders: ${e.message}`;
+          filesStart.disabled = e.status === 404;
+        }
+        if (!folders.length) folders = [{ path: "", since: weekAgo() }];
+        renderFolders();
       }
       const list = await loadBatches();
       renderPastImports(pastImports);

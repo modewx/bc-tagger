@@ -187,3 +187,18 @@ section[hidden] { display: none; }
 .map-entry.missing input { background: #fff8dc; border-color: #e8d48a; }
 .map-entry.missing .map-status.new { color: #8a5a00; }
 .map-entry.invalid input { border-color: #e5a5a0; }
+
+/* Import from Files: folder rows (path, Browse…, added since, ×) and the folder picker. */
+.import-folders { display: flex; flex-direction: column; gap: 6px; margin-bottom: 6px; }
+.folder-row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.folder-row .folder-path { flex: 1 1 320px; min-width: 0; }
+.folder-row .since-label { font-size: 12px; color: #555; white-space: nowrap; }
+.folder-picker { border: 1px solid #ddd; border-radius: 6px; padding: 6px 8px; margin: 0 0 4px; background: #fafafa; max-width: 640px; }
+.folder-picker .fp-crumbs { font-size: 12px; margin: 2px 0 4px; overflow-wrap: anywhere; }
+.folder-picker .fp-crumb { border: 0; background: none; padding: 0; color: #3875d7; cursor: pointer; font-size: 12px; }
+.folder-picker .fp-list { max-height: 220px; overflow-y: auto; border: 1px solid #eee; border-radius: 4px; background: #fff; }
+.folder-picker .fp-entry { display: block; width: 100%; padding: 4px 8px; border: 0; border-bottom: 1px solid #f3f3f3; background: none; text-align: left; font-size: 12px; cursor: pointer; }
+.folder-picker .fp-entry:hover, .folder-picker .fp-entry:focus { background: #eef3ff; outline: none; }
+.folder-picker .fp-up { color: #666; }
+.folder-picker .fp-msg:empty { display: none; }
+.folder-picker .fp-actions { display: flex; gap: 8px; margin-top: 6px; }

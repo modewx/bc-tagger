@@ -388,7 +388,7 @@ function matchPopover(anchor, row) {
         el("div", "pop-meta", `In your collection as ${[d.title, d.artist].filter(Boolean).join(" — ") || d.of}${d.tags.length ? ` (tags: ${d.tags.join(", ")})` : ""}.`)
       );
     }
-    pop.appendChild(el("div", "pop-meta", `From the file (line ${row.line ?? "?"}): ${row.raw || ""}`));
+    pop.appendChild(el("div", "pop-meta", row.path ? `From ${row.path}` : `From the file (line ${row.line ?? "?"}): ${row.raw || ""}`));
     const chosenId = row.match.chosen && (row.match.chosen.id ?? row.match.chosen.url);
     const cands = row.match.candidates.length ? row.match.candidates : row.match.chosen ? [row.match.chosen] : [];
     cands.forEach((c) => {
@@ -819,7 +819,7 @@ function notesPopover(anchor, row) {
       pop.appendChild(list);
     }
     if (row.note) pop.appendChild(el("div", "pop-meta note-text", `Note: ${row.note}`));
-    if (row.raw) pop.appendChild(el("div", "pop-meta note-line", `Line ${row.line ?? "?"}: ${row.raw}`));
+    if (row.raw || row.path) pop.appendChild(el("div", "pop-meta note-line", fromText(row)));
   });
 }
 
@@ -853,7 +853,7 @@ function notesColumn() {
       }
       if (row.flags.length || row.note) {
         const f = clickable(el("span", "note-icon flag-icon", "⚑"));
-        f.title = [row.flags.length ? `Flags: ${row.flags.join(", ")}` : "", row.note ? `Note: ${row.note}` : "", row.raw ? `Line ${row.line}: ${row.raw}` : ""]
+        f.title = [row.flags.length ? `Flags: ${row.flags.join(", ")}` : "", row.note ? `Note: ${row.note}` : "", row.raw || row.path ? fromText(row) : ""]
           .filter(Boolean)
           .join("\n");
         cell.appendChild(f);
@@ -861,6 +861,11 @@ function notesColumn() {
       }
     },
   };
+}
+
+// Where a row came from: its line in the file, or (Import from Files) its file.
+function fromText(row) {
+  return row.path ? `File: ${row.path}` : `Line ${row.line ?? "?"}: ${row.raw || ""}`;
 }
 
 // --- actions ----------------------------------------------------------------------
@@ -971,6 +976,8 @@ async function discard(statusEl) {
     colWidthKey: "bc_import_col_widths_v2",
     baseToolbar: false,
     hideColumns: ["date", "modified", "thumb"], // nothing is added or changed yet; no art is fetched here
+    // Import from Files: the rows folder by folder, under the folder's path.
+    groupBy: (item) => (batch && batch.fromFiles ? rowNow(item).folder || null : null),
     extraColumns: [selectColumn(), { ...sourceColumn(), after: "index" }, releaseColumn(), matchColumn(), locatedColumn(), notesColumn()],
     filterItem: showFilter,
     clearExtraFilters: () => (showSel.value = "all"),

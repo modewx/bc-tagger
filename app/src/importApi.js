@@ -56,6 +56,9 @@ function normRow(r, i) {
     tags: Array.isArray(r.tags) ? r.tags : [],
     flags: Array.isArray(r.flags) ? r.flags : [],
     note: r.note || null,
+    // Import from Files: the folder it was picked from, and its file.
+    folder: r.folder ?? r.source_folder ?? null,
+    path: r.path ?? r.file_path ?? null,
     checked: r.checked !== false,
     source: r.source || (bc || chosen || r.item || match.item ? "bandcamp" : "other"),
     via: (bc && bc.via) || null,
@@ -117,6 +120,7 @@ export function normBatch(b) {
     defaultTagsAll: !!b.default_tags_all, // default tags on every row, not only untagged ones
     pendingReleases: Array.isArray(b.pending_releases) ? b.pending_releases : [],
     lookups: b.bandcamp_lookups || null, // {state: "on" | "off" | "stopped" | "paused", reason, error, at}
+    fromFiles: [b.kind, b.type, b.import_type, b.origin].includes("files"), // Import from Files (Phase 7)
     lookupVia: b.lookup === "browser" ? "browser" : "server", // who makes the Bandcamp requests
     estimate: b.estimate || null, // {lookups, cached, requests, seconds, interval_s, text}
     logs: Array.isArray(b.logs) ? b.logs : [], // its import logs (JSON file names), oldest first
@@ -130,6 +134,32 @@ export const getBatch = (id) => apiJson(`/api/import/${enc(id)}`).then(normBatch
 // extension does, in the user's Chrome, while the Import tab is open).
 export const startImport = (file, name, defaultTags, defaultTagsAll = false, lookup = "server") =>
   apiJson("/api/import", { method: "POST", body: { file, name, default_tags: defaultTags, default_tags_all: defaultTagsAll, lookup } });
+// Import from Files (Phase 7): audio files added to these folders since a date
+// each; folders: [{path, since: "YYYY-MM-DD"}] (→ {batch_id, job_id, estimate}).
+export const startFileImport = ({ folders, lookup = "server", defaultTags = [], defaultTagsAll = false }) =>
+  apiJson("/api/import/files", {
+    method: "POST",
+    body: { folders, lookup, default_tags: defaultTags, default_tags_all: defaultTagsAll },
+  });
+
+// "YYYY-MM-DD" in local time, from a date or ISO string ("" when there's none).
+export function dateInputValue(v) {
+  if (!v) return "";
+  if (/^\d{4}-\d{2}-\d{2}$/.test(v)) return v;
+  const d = new Date(v);
+  if (isNaN(d)) return "";
+  const pad = (n) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+}
+
+// The folder rows to start from: the Collection, then the downloads, each with
+// the date of its last Import from Files (first time: 7 days ago).
+export async function fileImportDefaults() {
+  const d = await apiJson("/api/import/files/defaults");
+  const list = Array.isArray(d) ? d : (d && (d.folders || d.rows)) || [];
+  return list.map((f) => ({ path: f.path || "", since: dateInputValue(f.since || f.last_run || f.date), label: f.label || f.name || "" }));
+}
+
 // Change an open batch's default tags: `all` puts them on every row, else only on untagged rows.
 export const setDefaultTags = (id, tags, all) =>
   apiJson(`/api/import/${enc(id)}/default-tags`, { method: "PUT", body: { tags, all } });
@@ -222,6 +252,7 @@ export function rowToItem(row) {
   return {
     ...base,
     id: key,
+    order: Number.isFinite(row.n) ? row.n + 1 : null, // "#" here is the row's place, not the matched item's
     bandcamp_id: base.id || null,
     title: row.title || base.title || "",
     artist: row.artist || base.artist || "",

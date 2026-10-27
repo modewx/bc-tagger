@@ -76,6 +76,7 @@ const SHELL_HTML = `
  * @param {function} [opts.rowClass]        (item, key) -> extra class names for the row
  * @param {function} [opts.titleUrl]        (item) -> link for the title, instead of its Bandcamp page
  * @param {string[]} [opts.hideColumns]     ids of columns hidden until shown with the Columns chooser (e.g. "date")
+ * @param {(item) => string|null} [opts.groupBy] a header row (e.g. a folder) above each group, in "#" order
  * @param {string} [opts.columnsKey]        localStorage key for the shown/hidden columns (default: from colWidthKey)
  * @param {function} [opts.playable]        (item) -> false: nothing to play (no Bandcamp page, no local file)
  *
@@ -941,7 +942,21 @@ export function createCollectionPage(opts) {
     }
 
     const tbody = collectionTable.createTBody();
+    let group;
     entries.forEach(([key, item]) => {
+      // opts.groupBy: a header row where the group changes (in "#" order only: other sorts mix them).
+      if (opts.groupBy && sortColumn === "index") {
+        const g = opts.groupBy(item);
+        if (g && g !== group) {
+          const head = tbody.insertRow();
+          head.className = "group-row";
+          const td = head.insertCell();
+          td.colSpan = columns.length;
+          td.textContent = g;
+          td.title = g;
+        }
+        group = g;
+      }
       const row = tbody.insertRow();
       row.dataset.key = key;
       if (opts.rowClass) {
