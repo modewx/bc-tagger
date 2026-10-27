@@ -80,6 +80,7 @@ const SHELL_HTML = `
  * @param {function} [opts.localDuration]   (item, key) -> that file's length in seconds, if known (shown before loading)
  * @param {function} [opts.filterItem]      (item) -> false hides the row (extra filters, e.g. statuses)
  * @param {function} [opts.onView]          (shown, total) after each filter/search
+ * @param {function} [opts.onSort]          (key, dir) after a click on a column's header sorts by it
  * @param {function} [opts.clearExtraFilters] reset the extra filters (Go To Playing)
  * @param {boolean}  [opts.baseToolbar]     false hides the Bandcamp tools (refresh players, ...)
  * @param {function} [opts.rowClass]        (item, key) -> extra class names for the row
@@ -1088,6 +1089,7 @@ export function createCollectionPage(opts) {
             sortDir = 1; // first click = ascending
           }
           renderCollectionTable(currentView);
+          if (opts.onSort) opts.onSort(sortColumn, sortDir);
         });
       }
       headerRow.appendChild(th);
@@ -1694,6 +1696,7 @@ export function createCollectionPage(opts) {
       sortDir = dir;
       renderCollectionTable(currentView);
     },
+    getSort: () => ({ key: sortColumn, dir: sortDir }),
     getItems: () => allItems,
     statusEl,
   };

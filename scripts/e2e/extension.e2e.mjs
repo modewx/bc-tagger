@@ -2388,9 +2388,7 @@ test("rows: click / Shift / Cmd highlight; a tick on a highlighted row ticks the
     await preview.click("tr[data-key='r1'] .row-check"); // they start ticked: untick all three
     await preview.waitForFunction(() => ["r0", "r1", "r2"].every((k) => !document.querySelector(`tr[data-key="${k}"] .row-check`).checked));
     assert.deepEqual((await ticked(preview)).sort(), before.filter((k) => !["r0", "r1", "r2"].includes(k)).sort());
-    await waitFor(() => [0, 1, 2].every((n) => stub.calls.some((c) => c.method === "PUT" && c.path.endsWith(`/rows/${n}`) && c.body && c.body.checked === false)), {
-      what: "the three rows saved unticked",
-    });
+    await waitFor(() => [0, 1, 2].every((n) => stub.rows[n].checked === false), { what: "the three rows saved unticked" });
   } finally {
     await app.evaluate(() => localStorage.removeItem("bc_app_selection")).catch(() => {});
     await Promise.all([app.close(), ext.close(), preview.close()]);
@@ -3411,6 +3409,124 @@ test("import preview: with the music drive unplugged, an unmatched row's file sa
     }, key, { timeout: 10000 });
   } finally {
     await page.evaluate(() => document.querySelectorAll("audio").forEach((au) => au.pause())).catch(() => {});
+    await page.close();
+  }
+});
+
+// An import file of `n` plain rows (no match, no tags of their own), for the stub.
+const bigImport = (n) => ({
+  source: "big-import.txt",
+  unknown_tags: {},
+  items: Array.from({ length: n }, (_, i) => {
+    const title = `Track ${String(i).padStart(3, "0")}`;
+    return { line: i + 1, raw: `Artist ${i} - ${title}`, artist: `Artist ${i}`, title, tags: [] };
+  }),
+});
+const tickedRows = (page) => page.$$eval("#collectionTable tbody .row-check", (bs) => bs.filter((b) => b.checked).length);
+const saveStateIs = (page, text, timeout = 15000) =>
+  page.waitForFunction((t) => document.getElementById("saveState").textContent === t, text, { timeout });
+
+test("import preview: Select all on 300 rows, then a reload at once, keeps all 300 ticked (a slow server without the bulk form): it asks before leaving, and saves the rest after (stubbed API)", async () => {
+  const stub = importStub(bigImport(300), { bulk: false, saveDelayMs: 100 });
+  stub.rows.forEach((r) => (r.checked = false));
+  const page = await context.newPage();
+  await stub.install(page);
+  const all300 = () => page.waitForFunction(() => document.querySelectorAll("#collectionTable tbody tr[data-key]").length === 300);
+  try {
+    await page.goto(SERVER + "/import/?batch=e2e-b1");
+    await all300();
+    assert.equal(await tickedRows(page), 0);
+    await page.click("#selectAll");
+    assert.match(await page.textContent("#saveState"), /^Saving… \(\d+ rows\)$/);
+    await sleep(300);
+    assert.ok(stub.saves.maxSaving > 1 && stub.saves.maxSaving <= 6, `one row at a time, 6 at once: ${stub.saves.maxSaving}`);
+    let dialog = null;
+    page.once("dialog", (d) => {
+      dialog = d.type();
+      d.accept().catch(() => {});
+    });
+    await page.reload();
+    assert.equal(dialog, "beforeunload", "leaving with ticks not saved asks first");
+    assert.ok(stub.rows.filter((r) => r.checked).length < 100, "most weren't on the server when the page went");
+    await all300();
+    assert.equal(await tickedRows(page), 300, "all ticked again at once");
+    await saveStateIs(page, "Saved", 30000);
+    assert.equal(stub.rows.filter((r) => r.checked).length, 300, "all saved on the server");
+    assert.equal(await page.evaluate(() => localStorage.getItem("bc_import_pending:e2e-b1")), null, "nothing left to send");
+    // From the server alone, and nothing to ask about.
+    page.once("dialog", (d) => {
+      dialog = "again: " + d.type();
+      d.accept().catch(() => {});
+    });
+    await page.reload();
+    await all300();
+    assert.equal(await tickedRows(page), 300);
+    assert.equal(dialog, "beforeunload");
+  } finally {
+    await page.evaluate(() => localStorage.removeItem("bc_import_pending:e2e-b1")).catch(() => {});
+    await page.close();
+  }
+});
+
+test("import preview: a tick on many rows is one request (the bulk form); a save that fails is tried again, and says so (stubbed API)", async () => {
+  const stub = importStub(bigImport(40));
+  stub.rows.forEach((r) => (r.checked = false));
+  const page = await context.newPage();
+  await stub.install(page);
+  const saves = () => stub.calls.filter((c) => c.method === "PUT" && /\/rows(\/\d+)?$/.test(c.path));
+  try {
+    await page.goto(SERVER + "/import/?batch=e2e-b1");
+    await page.waitForFunction(() => document.querySelectorAll("#collectionTable tbody tr[data-key]").length === 40);
+    await page.click("#selectAll");
+    await saveStateIs(page, "Saved");
+    assert.equal(saves().length, 1, "one request");
+    assert.deepEqual(saves()[0].body, { ns: stub.rows.map((r) => r.n), changes: { checked: true } });
+    assert.equal(stub.rows.filter((r) => r.checked).length, 40);
+    // The server fails twice: it says so, tries again, and saves.
+    stub.saves.failing = 2;
+    await page.click(`tr[data-key="r3"] .row-check`);
+    await page.waitForFunction(
+      () => /^Not saved yet \(the server is busy \(e2e\)\): 1 row, trying again in \d+ s\. Try now$/.test(document.getElementById("saveState").textContent),
+      null,
+      { timeout: 10000 }
+    );
+    if (process.env.E2E_SHOTS) await page.locator("#saveState").screenshot({ path: path.join(process.env.E2E_SHOTS, "save-retrying.png") });
+    assert.equal(stub.rows[3].checked, true, "not saved yet");
+    await saveStateIs(page, "Saved");
+    assert.equal(stub.rows[3].checked, false);
+    assert.equal(stub.saves.failing, 0, "tried again after each failure");
+  } finally {
+    await page.evaluate(() => localStorage.removeItem("bc_import_pending:e2e-b1")).catch(() => {});
+    await page.close();
+  }
+});
+
+test("import preview: back on a batch, the view is as it was left: Show, the sort, how far down (stubbed API)", async () => {
+  const stub = importStub(bigImport(300), { located: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10] });
+  const page = await context.newPage();
+  await stub.install(page);
+  const shown = () => page.$$eval("#collectionTable tbody tr[data-key]", (rs) => rs.length);
+  try {
+    await page.goto(SERVER + "/import/?batch=e2e-b1");
+    await page.waitForFunction(() => document.querySelectorAll("#collectionTable tbody tr[data-key]").length === 300);
+    await page.selectOption("#importShow", "missing");
+    await page.waitForFunction(() => document.querySelectorAll("#collectionTable tbody tr[data-key]").length === 290);
+    await page.click("#collectionTable thead th.col-title");
+    await page.click("#collectionTable thead th.col-title"); // descending
+    await page.evaluate(() => window.scrollTo(0, 3000));
+    await sleep(400);
+    await page.goto(SERVER + "/");
+    await page.waitForSelector("#collectionTable tbody tr[data-key]");
+    await page.goto(SERVER + "/import/?batch=e2e-b1");
+    await page.waitForFunction(() => document.querySelectorAll("#collectionTable tbody tr[data-key]").length === 290);
+    assert.equal(await page.inputValue("#importShow"), "missing");
+    assert.equal(await page.textContent("#collectionTable thead th.col-title .sort-arrow"), " ▼");
+    assert.equal(await shown(), 290);
+    assert.equal(await page.textContent("#collectionTable tbody tr[data-key] .col-title"), "Track 299");
+    const y = await page.evaluate(() => window.scrollY);
+    assert.ok(Math.abs(y - 3000) < 60, `scrolled back to ${y}`);
+  } finally {
+    await page.evaluate(() => localStorage.removeItem("bc_import_view:e2e-b1")).catch(() => {});
     await page.close();
   }
 });

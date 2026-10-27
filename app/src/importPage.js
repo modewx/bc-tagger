@@ -22,6 +22,7 @@ import { playableItem, sourceOf } from "./statusFilter";
 import { logNote } from "./importLogs";
 import { tickTargets } from "./rowTicks";
 import { runExport } from "./exportFlow";
+import { createRowSaves } from "./rowSaves";
 
 const batchId = new URLSearchParams(location.search).get("batch");
 document.body.classList.add("import-page");
@@ -33,6 +34,38 @@ nav.trackImports(events);
 
 let batch = null;
 let page = null;
+
+// Ticks and tags are saved to the batch as they're made (rowSaves.js): "Saving… / Saved" by Import selected, and
+// what's not saved yet survives a reload.
+const saveState = document.createElement("span");
+saveState.id = "saveState";
+saveState.className = "save-state";
+let saveTicker = null;
+function showSaveState(s) {
+  clearInterval(saveTicker);
+  saveState.className = `save-state ${s.state}`;
+  saveState.innerHTML = "";
+  const rows = (n) => `${n} row${n === 1 ? "" : "s"}`;
+  if (s.state === "saving") saveState.textContent = `Saving… (${rows(s.pending)})`;
+  else if (s.state === "saved") saveState.textContent = "Saved";
+  else if (s.state === "failed") saveState.textContent = `Not saved: ${s.error}`;
+  else {
+    const text = document.createElement("span");
+    const now = document.createElement("button");
+    now.type = "button";
+    now.className = "save-retry";
+    now.textContent = "Try now";
+    now.addEventListener("click", () => saves.retry());
+    const paint = () => {
+      const left = Math.max(0, Math.ceil((s.retryAt - Date.now()) / 1000));
+      text.textContent = `Not saved yet (${s.error}): ${rows(s.pending)}, trying again in ${left} s. `;
+    };
+    paint();
+    saveTicker = setInterval(paint, 1000);
+    saveState.append(text, now);
+  }
+}
+const saves = batchId ? createRowSaves(batchId, showSaveState) : null;
 
 function el(tag, cls, text) {
   const e = document.createElement(tag);
@@ -50,6 +83,7 @@ const pct = (c) => (typeof c === "number" ? `${Math.round(c <= 1 ? c * 100 : c)}
 class ImportDataSource extends HttpDataSource {
   async getItems() {
     batch = await getBatch(batchId);
+    saves.overlay(batch.rows); // edits not saved yet stay as made
     renderInfo();
     const items = {};
     batch.rows.forEach((r) => {
@@ -58,13 +92,10 @@ class ImportDataSource extends HttpDataSource {
     });
     return items;
   }
-  async setItemTags(key, tags) {
-    try {
-      await updateRow(batchId, key.slice(1), { tags });
-      return { ok: true };
-    } catch (e) {
-      return { ok: false, error: e.message };
-    }
+  setItemTags(key, tags) {
+    const row = batch && batch.rows.find((r) => `r${r.n}` === key);
+    if (row) row.tags = tags.slice();
+    return saves.save([Number(key.slice(1))], { tags });
   }
   // No Bandcamp page fetches from the preview (no lazy thumbnails or stream
   // lookups for rows matched by URL): Bandcamp lookup is paused, and a long
@@ -338,15 +369,7 @@ async function setChecked(rows, checked) {
   });
   syncSelectAll();
   renderInfo();
-  // Save to the batch, a few at a time.
-  const queue = rows.slice();
-  const worker = async () => {
-    while (queue.length) {
-      const r = queue.shift();
-      await updateRow(batchId, r.n, { checked }).catch((e) => console.warn("[import] row", r.n, e.message));
-    }
-  };
-  await Promise.all([worker(), worker(), worker(), worker()]);
+  await saves.save(rows.map((r) => r.n), { checked }); // one request for them all
 }
 
 function syncSelectAll() {
@@ -1009,6 +1032,15 @@ async function importSelected(statusEl, button) {
   const n = batch.rows.filter((r) => r.checked).length;
   if (!confirm(`Import ${n} selected rows? Rows found on Bandcamp go to the tagger (the extension adds them), the rest to Other. Duplicates merge tags.`)) return;
   button.disabled = true;
+  // The server imports the rows it has ticked: the last ticks and tags first.
+  statusEl.textContent = "Saving the last edits…";
+  try {
+    await saves.flush();
+  } catch (e) {
+    statusEl.textContent = `Not imported: ${e.message}. Import selected again once they're saved.`;
+    button.disabled = false;
+    return;
+  }
   statusEl.textContent = "Importing…";
   try {
     const res = await commitBatch(batchId);
@@ -1082,9 +1114,44 @@ async function locateAgain(statusEl, button) {
   renderInfo();
 }
 
+// The view as it was left (Show, the sort, how far down), kept per batch: back on the batch, it's the same. (The
+// ticks and tags are the batch's own.)
+const VIEW_KEY = `bc_import_view:${batchId}`;
+let viewRestored = false; // not before: the first rows would overwrite it
+function keepView() {
+  if (!page || !viewRestored) return;
+  try {
+    localStorage.setItem(VIEW_KEY, JSON.stringify({ show: showSel.value, sort: page.getSort(), scroll: Math.round(window.scrollY) }));
+  } catch (e) {
+    /* not kept */
+  }
+}
+function restoreView() {
+  let v = null;
+  try {
+    v = JSON.parse(localStorage.getItem(VIEW_KEY) || "null");
+  } catch (e) {
+    /* none */
+  }
+  if (v) {
+    if (SHOW.some(([k]) => k === v.show)) showSel.value = v.show;
+    if (v.sort && v.sort.key) page.sortBy(v.sort.key, v.sort.dir === -1 ? -1 : 1);
+    page.refilter();
+    if (v.scroll > 0) window.scrollTo(0, v.scroll);
+  }
+  viewRestored = true;
+  let t = null;
+  window.addEventListener("scroll", () => {
+    clearTimeout(t);
+    t = setTimeout(keepView, 200);
+  }, { passive: true });
+  window.addEventListener("pagehide", keepView);
+}
+
 async function discard(statusEl) {
   if (!confirm("Discard this import? Nothing is added to your collection.")) return;
   await discardBatch(batchId).catch((e) => (statusEl.textContent = e.message));
+  saves.clear();
   rememberImport(null);
   location.href = "/settings/#import";
 }
@@ -1150,6 +1217,7 @@ async function discard(statusEl) {
       },
       { id: "discardImport", label: "Discard", run: discard },
     ],
+    onSort: () => keepView(),
     localPlayUrl,
     localFallbackUrl: originalOf,
     localUnavailable,
@@ -1164,11 +1232,15 @@ async function discard(statusEl) {
     },
     titleUrl: (item) => (item.source === "other" ? null : item.url || item.item_url || null),
   });
-  showSel.addEventListener("change", () => page.refilter());
+  showSel.addEventListener("change", () => {
+    page.refilter();
+    keepView();
+  });
   document.getElementById("downloadOwnedMissing").after(fullReleases.el);
   const transferHint = el("span", "export-hint");
   transferHint.id = "transferHint";
   document.getElementById("transferToRekordbox").after(transferHint);
+  document.getElementById("importSelected").after(saveState);
   // "Locate again": missing rows by default, every row on request.
   const allRows = document.createElement("label");
   allRows.className = "locate-all";
@@ -1192,6 +1264,7 @@ async function discard(statusEl) {
   // Back from a hidden tab (its stream was closed): catch up.
   events.on("resume", () => page.reload().then(renderInfo));
   await page.start();
+  restoreView();
   events.start(); // after the rows: the stream holds a connection for good
   renderInfo();
   nav.setHealth(await apiJson("/api/health").catch(() => null));

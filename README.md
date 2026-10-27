@@ -87,6 +87,11 @@ reachable, edits are queued on the server and applied by the extension on its ne
   the hint next to it says how many aren't located (skipped). The dialog shows where each tag goes.
   - Export and Transfer don't add a track to a playlist that already has the same song as another file (same
     artist and title, lengths within 2 s): the dry run lists them with both files, and **Add them anyway** adds them.
+  - **Ticks and tags are never lost:** each action is saved in one request (one per row on a server without the
+    bulk form, six at a time), with **Saving… / Saved** next to Import selected. A save that fails is tried again
+    (and says so, with **Try now**); until the server has them they're also kept in this browser, so a reload or
+    a crash shows them as made and sends them again, and leaving first asks. Import selected saves them first.
+  - Back on a batch, the view is as it was left: **Show**, the sort and how far down (per batch, in this browser).
   - **New tags** (in the rows, not in the tag list yet) are highlighted in the rows' tag editors, chips and
     dropdown ("new: not in your tag list yet"). Tags that aren't in the list yet get **Create New Tags** at the top,
     then a link to map them in Settings → Rekordbox. Import selected creates them too.
@@ -145,7 +150,7 @@ Runs the extension, server and local app together in a Playwright Chromium with 
   real server (mapping, linking, browser lookups, downloads, re-locate, browse), settings, and rekordbox dry runs
   and a sandbox write.
 
-A full run (90 tests) takes about 2.5 minutes (2026-10-26: 110–147 s). For a quick check, run a subset by
+A full run (93 tests) takes about 2.5 minutes (2026-10-26: 110–147 s). For a quick check, run a subset by
 name. Include `Import \(replace\)`, which loads the test collection the others use:
 
 ```bash

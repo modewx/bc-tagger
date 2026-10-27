@@ -191,6 +191,16 @@ npm run test:e2e                         # Playwright e2e: own profile, server :
   that has started swaps its source at the same moment and keeps playing (`swapSource`), the others when they
   next load. "▶ preview / original / Bandcamp stream" says what the track playing is heard from (the toggle and
   `local.best.preview`). Play/pause are SVG icons (the text glyphs rendered as a square in the docked player).
+- **Import ticks never lost** (user: the selection in `imp-45e20d7a`): ticks went one PUT per row (4 at a time),
+  so Select all over hundreds of rows took seconds, and a reload meanwhile dropped the rest; a failed save only
+  logged. `rowSaves.js`: one request per action (A's bulk `PUT /api/import/<id>/rows {ns, changes}`; 404/405/422:
+  per-row PUTs, 6 at once), tags the same way; a journal in localStorage (`bc_import_pending:<batch>`) holds what the
+  server hasn't acked, overlaid on every batch read and sent again on open; transient failures (no answer, 5xx)
+  retry with backoff (1, 2, 5, 10, 30 s) and show "Not saved yet (…): N rows, trying again in N s. Try now"; a
+  refused save (4xx) is dropped and said; `beforeunload` asks while anything is pending; Import selected flushes
+  first. The view (Show, sort, scroll) is kept per batch (`bc_import_view:<batch>`). e2e (stub with the bulk form,
+  a slow server without it, 503s): Select all on 300 + an immediate reload keeps 300 (without the journal it
+  doesn't); one request per action; a failure retries and says so; the view comes back.
 - **Drive unplugged** (user ejects the music drive): a local file with no preview now fails at once (the server's
   404 "music drive not mounted"). A Bandcamp item falls back to Bandcamp's stream as before, with the reason in the
   cell's tooltip; an item from another source used to fall through to an empty Bandcamp embed (spinning forever)

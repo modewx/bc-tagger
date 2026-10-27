@@ -8,8 +8,11 @@
 // `unavailable`, which get the bot-check error A's resolver reports; "Maybe
 // Track" gets candidates; the rest are unmatched.
 
-export function importStub(file, { located = [], unavailable = [], paused = [], slowJob = 0, holdJob = false, interrupted = false } = {}) {
+export function importStub(file, { located = [], unavailable = [], paused = [], slowJob = 0, holdJob = false, interrupted = false, bulk = true, saveDelayMs = 0 } = {}) {
   const calls = [];
+  // Row saves (A's per-row PUT, and the bulk form unless `bulk` is false): after `saveDelayMs`; the next
+  // `failing` of them answer 503; `saving` = how many at once now, `maxSaving` the most.
+  const saves = { failing: 0, saving: 0, maxSaving: 0 };
   let unknown = { ...file.unknown_tags };
   // slowJob: the lookups job reports "running" for that many polls first (any poller counts:
   // the Import tab and the header's pill). holdJob: it runs until the test calls finishJob().
@@ -116,6 +119,14 @@ export function importStub(file, { located = [], unavailable = [], paused = [], 
   const json = (route, body, status = 200) => route.fulfill({ status, contentType: "application/json", body: JSON.stringify(body) });
 
   async function install(page) {
+    // Every test's batch is "e2e-b1": a page starts with none of an earlier test's edits still to send (rowSaves.js)
+    // or its view. (Once per page: its own reloads keep them.)
+    await page.addInitScript(() => {
+      if (sessionStorage.getItem("e2e-stub-page")) return;
+      sessionStorage.setItem("e2e-stub-page", "1");
+      localStorage.removeItem("bc_import_pending:e2e-b1");
+      localStorage.removeItem("bc_import_view:e2e-b1");
+    });
     await page.route(/\/api\/import(\/.*)?$/, async (route) => {
       const req = route.request();
       const p = new URL(req.url()).pathname;
@@ -155,6 +166,21 @@ export function importStub(file, { located = [], unavailable = [], paused = [], 
         return json(route, { unknown_tags: {}, new_tags, rows_changed: rows.length });
       }
       const m = p.match(/^\/api\/import\/e2e-b1\/rows\/(\d+)$/);
+      const isSave = req.method() === "PUT" && (m || (bulk && p === "/api/import/e2e-b1/rows"));
+      if (isSave) {
+        saves.saving++;
+        saves.maxSaving = Math.max(saves.maxSaving, saves.saving);
+        await new Promise((r) => setTimeout(r, saveDelayMs));
+        saves.saving--;
+        if (saves.failing > 0) {
+          saves.failing--;
+          return json(route, { detail: "the server is busy (e2e)" }, 503).catch(() => {});
+        }
+      }
+      if (bulk && p === "/api/import/e2e-b1/rows" && req.method() === "PUT") {
+        body.ns.forEach((n) => ["tags", "checked"].forEach((k) => k in body.changes && (rows[n][k] = body.changes[k])));
+        return json(route, { updated: body.ns.length }).catch(() => {});
+      }
       if (m) {
         const r = rows[Number(m[1])];
         ["tags", "checked", "artist", "title", "album"].forEach((k) => k in body && (r[k] = body[k]));
@@ -172,7 +198,7 @@ export function importStub(file, { located = [], unavailable = [], paused = [], 
           r.bandcamp = c ? { item: itemFor(c), via: "chosen" } : null;
           r.source = c ? "bandcamp" : "other";
         }
-        return json(route, r);
+        return json(route, r).catch(() => {}); // (the page may have gone: the change is made)
       }
       if (p === "/api/import/e2e-b1/commit") {
         status = "committed";
@@ -202,6 +228,7 @@ export function importStub(file, { located = [], unavailable = [], paused = [], 
     install,
     calls,
     rows,
+    saves,
     finishJob: () => (holding = false), // holdJob: the next poll finds it done
   };
 }

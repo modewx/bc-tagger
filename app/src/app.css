@@ -228,3 +228,10 @@ button.chip:hover { filter: brightness(0.95); border-color: #bbb; }
 /* "N not located are skipped" next to Export Selected / Transfer to rekordbox. */
 .export-hint { font-size: 12px; color: #8a5a00; margin: 0 8px 0 -2px; white-space: nowrap; }
 .export-hint:empty { display: none; }
+/* Import preview: are the ticks and tags saved (rowSaves.js)? */
+.save-state { font-size: 12px; color: #666; margin: 0 8px 0 -2px; white-space: nowrap; }
+.save-state:empty { display: none; }
+.save-state.saved { color: #2e7d32; }
+.save-state.retrying,
+.save-state.failed { color: #b42318; white-space: normal; }
+.save-state .save-retry { font: inherit; font-size: 12px; padding: 1px 8px; margin-left: 2px; cursor: pointer; }
