@@ -8,12 +8,14 @@
 // `unavailable`, which get the bot-check error A's resolver reports; "Maybe
 // Track" gets candidates; the rest are unmatched.
 
-export function importStub(file, { located = [], unavailable = [], paused = [], slowJob = 0, interrupted = false } = {}) {
+export function importStub(file, { located = [], unavailable = [], paused = [], slowJob = 0, holdJob = false, interrupted = false } = {}) {
   const calls = [];
   let unknown = { ...file.unknown_tags };
-  // slowJob: the lookups job reports "running" for that many polls first.
+  // slowJob: the lookups job reports "running" for that many polls first (any poller counts:
+  // the Import tab and the header's pill). holdJob: it runs until the test calls finishJob().
   // interrupted: the server restarted during the lookups (resumable).
-  let status = interrupted ? "interrupted" : slowJob ? "resolving" : "ready";
+  let status = interrupted ? "interrupted" : slowJob || holdJob ? "resolving" : "ready";
+  let holding = holdJob;
   let jobPolls = 0;
   // A's reopen fields.
   const step = () => (status === "ready" ? (Object.keys(unknown).length ? "mapping" : "ready") : status);
@@ -188,7 +190,7 @@ export function importStub(file, { located = [], unavailable = [], paused = [], 
     });
     await page.route(/\/api\/jobs\/e2e-import-1$/, (route) => {
       jobPolls++;
-      if (status === "resolving" && jobPolls < slowJob) {
+      if (status === "resolving" && (holding || jobPolls < slowJob)) {
         return json(route, { id: "e2e-import-1", kind: "import", status: "running", progress: { current: jobPolls, total: rows.length, message: `resolving ${jobPolls}/${rows.length}` } });
       }
       if (status === "resolving") status = "ready";
@@ -196,5 +198,10 @@ export function importStub(file, { located = [], unavailable = [], paused = [], 
     });
   }
 
-  return { install, calls, rows };
+  return {
+    install,
+    calls,
+    rows,
+    finishJob: () => (holding = false), // holdJob: the next poll finds it done
+  };
 }

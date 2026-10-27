@@ -2246,16 +2246,19 @@ test("import preview: the Notes icons open a popover with the flags in plain wor
 // --- An open import survives navigation and reloads ---------------------------------
 
 test("import: a reload during lookups follows the same job on to the mapping step (stubbed API)", async () => {
-  const stub = importStub(JSON.parse(fs.readFileSync(IMPORT_SAMPLE, "utf8")), { slowJob: 6 });
+  // The job runs until the test lets it finish: the tab and the header's pill both poll it.
+  const stub = importStub(JSON.parse(fs.readFileSync(IMPORT_SAMPLE, "utf8")), { holdJob: true });
   const page = await context.newPage();
   await stub.install(page);
   await page.goto(SERVER + "/settings/#import");
   // The open batch is still looking up: the tab follows it (nothing is started).
   await page.waitForFunction(() => /Looking up rows on Bandcamp/.test(document.getElementById("importProgress").textContent));
   assert.match(page.url(), /#import\/e2e-b1$/);
-  assert.match(await page.textContent("#navImport"), /^Import: /);
+  await page.waitForFunction(() => /^Import: /.test(document.getElementById("navImport").textContent));
   await page.reload();
   await page.waitForFunction(() => /Looking up rows on Bandcamp/.test(document.getElementById("importProgress").textContent));
+  // Followed again after the reload: now let the job finish.
+  stub.finishJob();
   await page.waitForSelector("#importMapping:not([hidden])", { timeout: 30000 });
   assert.equal(await page.$eval("#importMapping", (m) => m.dataset.batch), "e2e-b1");
   assert.equal(stub.calls.filter((c) => c.method === "POST" && c.path === "/api/import").length, 0, "nothing restarted");
@@ -2329,7 +2332,11 @@ test("import: leaving for Collection and Settings returns to the same batch and 
     await page.waitForFunction(() => document.querySelectorAll("#collectionTable tbody tr").length === 6);
     assert.equal(await page.isChecked("tr[data-key='r1'] .row-check"), false);
     assert.match(await page.textContent("#importSelected"), /\(5\)/);
-    assert.deepEqual(await page.$eval("tr[data-key='r2']", (tr) => [...tr.querySelectorAll("select.tag-editor option:checked")].map((o) => o.value)), ["must", "pool"]);
+    // r2's tag editor is built as its row comes into view (a frame later): wait for it.
+    await page.waitForFunction(() => {
+      const sel = document.querySelector("tr[data-key='r2'] select.tag-editor");
+      return sel && JSON.stringify([...sel.selectedOptions].map((o) => o.value)) === JSON.stringify(["must", "pool"]);
+    });
 
     // The Import tab offers it too.
     await page.goto(SERVER + "/settings/#import");
