@@ -210,6 +210,11 @@ def create_app(service: Service | None = None) -> FastAPI:
     def tags() -> list[str]:
         return svc.store.get_tags()
 
+    @app.post("/api/tags/create")
+    def tags_create(body: SyncTagsBody) -> dict:
+        """Add new tags to the vocabulary now (e.g. an import's, before sending its rows to rekordbox)."""
+        return svc.create_tags(body.tags)
+
     # -- extension sync ----------------------------------------------------------------
 
     @app.post("/api/sync/items")

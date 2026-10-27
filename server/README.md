@@ -391,6 +391,12 @@ rekordbox without adding them to the collection. It's the same job, result, guar
   tags updates its entries.
 - Rows sent for real get `exported: {at, target}`. The result has `rows: true`.
 - Sending `rows` together with `ids`/`latest`, or an empty `rows`, is a 400.
+- Rows go out with their tags as they are, even before an import's tag-mapping step. Every export result has
+  `tag_playlists: [{tag, new, playlists}]` (where each tag goes under the collection's mapping; `new`: not in the
+  tag list yet; `playlists: []`: not exported) and `new_tags`.
+- An import batch lists `uncreated_tags`, the tags its rows use that don't exist yet. `POST /api/tags/create {tags}`
+  creates them now, as a commit would: the server's list, plus queued for the extension. It returns `{created,
+  existing, tags}`. Then they can be mapped in Settings (custom mode).
 
 ### Import logs
 
