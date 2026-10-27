@@ -280,15 +280,35 @@ export function createCollectionPage(opts) {
     return btn;
   }
 
-  // A real per-row <audio>. Nothing is read until it's played: hovering it
-  // doesn't load it (in the local app that read the music drive). Clicking the
-  // timeline while paused starts playback there.
+  // A real per-row <audio>. Its metadata (the duration, which a click on the
+  // timeline needs to seek) loads once the pointer rests on this player, it gets
+  // focus, or it's pressed; never while the pointer passes over rows (in the
+  // local app every load reads the music drive). Clicking the timeline while
+  // paused starts playback there.
+  const DWELL_MS = 150;
   function makeRowAudio(url, item, key) {
     const audio = document.createElement("audio");
     audio.controls = true;
     audio.preload = "none";
     audio.src = url;
 
+    let dwell = null;
+    const loadMetadata = () => {
+      clearTimeout(dwell);
+      if (audio.preload !== "none") return; // once
+      audio.preload = "metadata";
+      // Not once it has started (Play, a row click): load() would reset and stop it.
+      if (audio.paused && audio.readyState === HTMLMediaElement.HAVE_NOTHING) audio.load();
+    };
+    audio.addEventListener("pointerenter", () => {
+      clearTimeout(dwell);
+      dwell = setTimeout(loadMetadata, DWELL_MS);
+    });
+    audio.addEventListener("pointerleave", () => clearTimeout(dwell));
+    audio.addEventListener("focus", loadMetadata);
+    // Pressed before the metadata is in (a quick click on the timeline): load it
+    // now, so the next click seeks.
+    audio.addEventListener("pointerdown", loadMetadata);
     audio.addEventListener("seeked", () => {
       if (audio.paused) audio.play().catch(() => {});
     });

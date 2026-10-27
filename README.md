@@ -38,8 +38,9 @@ reachable, edits are queued on the server and applied by the extension on its ne
     range. Only the **player column** plays: a click anywhere in it, empty space too, plays or pauses that row.
   - Test-only actions (Locate / Export latest 10) are in **Settings → Test**.
   - **Nothing runs unasked:** the app reads the music drive or Bandcamp only when you click (Play, Locate, Tools,
-    Refresh ownership). Hovering a player loads nothing, rows without stored art show a placeholder (Tools → Refresh
-    thumbnails fetches art), and the extension checks ownership only on Refresh ownership.
+    Refresh ownership) or rest on a player: passing over players loads nothing, resting on one for a moment loads
+    its length (so a click on its timeline plays from there). Rows without stored art show a placeholder (Tools →
+    Refresh thumbnails fetches art), and the extension checks ownership only on Refresh ownership.
   - **One connection per tab:** Chrome allows 6 connections to the server across all tabs, and each open page's live
     updates hold one. A page uses a single stream, closes it while its tab is hidden, and catches up when shown.
     The collection loads without waiting for the extension, and says "Loading collection…" until its rows are in.

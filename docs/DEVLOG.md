@@ -177,6 +177,10 @@ npm run test:e2e                         # Playwright e2e: own profile, server :
 
 ### 2026-10-27
 
+- **A click on a player's timeline plays from there again** (regression from the hover change): without metadata
+  the element has no duration, so the click couldn't seek. Now the metadata loads once the pointer rests on that
+  player for 150 ms (cancelled when it leaves), on focus, or when it's pressed (a click that lands too early makes
+  the next one seek); passing over rows still loads nothing. Same in the extension's page.
 - **Link to import: one request per Bandcamp page** (A's batch form, `3b72a62`): the content script sends the page's
   items in one `POST /api/import/link-candidates {items}` (it used to send one per item, 20–40 at once on album
   pages). Targets added within 300 ms go in the same request.

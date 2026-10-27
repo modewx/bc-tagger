@@ -98,11 +98,12 @@ const escapedRequests = []; // Bandcamp requests with no fixture
 const standInPages = []; // release pages answered with the no-data stand-in
 const reveals = []; // Show in Finder calls (answered here: a test never opens Finder)
 
-// One second of 8 kHz 8-bit silence.
-function silentWav(rate = 8000) {
-  const b = Buffer.alloc(44 + rate, 128);
+// `seconds` of 8 kHz 8-bit silence.
+function silentWav(seconds = 1, rate = 8000) {
+  const size = rate * seconds;
+  const b = Buffer.alloc(44 + size, 128);
   b.write("RIFF", 0);
-  b.writeUInt32LE(36 + rate, 4);
+  b.writeUInt32LE(36 + size, 4);
   b.write("WAVEfmt ", 8);
   b.writeUInt32LE(16, 16);
   b.writeUInt16LE(1, 20); // PCM
@@ -112,7 +113,7 @@ function silentWav(rate = 8000) {
   b.writeUInt16LE(1, 32);
   b.writeUInt16LE(8, 34);
   b.write("data", 36);
-  b.writeUInt32LE(rate, 40);
+  b.writeUInt32LE(size, 40);
   return b;
 }
 const SILENCE = silentWav();
@@ -1467,14 +1468,14 @@ test("local app: re-clicking a row after item updates keeps one player in it", a
   await app.close();
 });
 
-test("player: hovering a paused player loads nothing; hovering one that's playing doesn't stop it; the Artist cell copies \"Artist Title\"", async () => {
+test("player: passing over a paused player loads nothing, resting on it loads it once; hovering one that's playing doesn't stop it; the Artist cell copies \"Artist Title\"", async () => {
   const a = "t1002746421"; // Futuro Lontano by TSVI (durable stream link: an <audio> from the start)
   const page = await context.newPage();
   try {
     await page.goto(extPage("collection.html"));
     await page.waitForSelector(`tr[data-key="${a}"] audio`, { state: "attached" });
     if (!(await page.isChecked("#globalModeToggle"))) await page.click("#globalModeToggle");
-    // A paused player: hovering it loads nothing (nothing is read until Play).
+    // A paused player: passing over it loads nothing; resting on it loads its metadata (so the timeline seeks).
     const other = await page.evaluate((a) => {
       const r = [...document.querySelectorAll("#collectionTable tbody tr")].find((tr) => tr.dataset.key !== a && tr.querySelector("td.player-cell audio"));
       return r && r.dataset.key;
@@ -1485,11 +1486,22 @@ test("player: hovering a paused player loads nothing; hovering one that's playin
     const onRequest = (r) => r.url() === otherSrc && loads.push(r.url());
     page.on("request", onRequest);
     await page.locator(`tr[data-key="${other}"] audio`).scrollIntoViewIfNeeded();
-    await page.hover(`tr[data-key="${other}"] audio`);
-    await page.waitForTimeout(600);
-    page.off("request", onRequest);
-    assert.equal(await page.$eval(`tr[data-key="${other}"] audio`, (au) => au.readyState), 0, "not loaded");
+    await page.$eval(`tr[data-key="${other}"] audio`, (au) => {
+      au.__loads = 0;
+      au.addEventListener("loadstart", () => au.__loads++);
+    });
+    const at = await page.locator(`tr[data-key="${other}"] audio`).boundingBox();
+    await page.mouse.move(at.x + at.width / 2, at.y + at.height / 2);
+    await page.mouse.move(at.x + at.width / 2, at.y - 40); // passed over
+    await page.waitForTimeout(400);
+    assert.equal(await page.$eval(`tr[data-key="${other}"] audio`, (au) => au.readyState), 0, "passing over loads nothing");
     assert.deepEqual(loads, [], "no request for the stream");
+    await page.mouse.move(at.x + at.width / 2, at.y + at.height / 2); // resting on it
+    await page.waitForFunction((k) => document.querySelector(`tr[data-key="${k}"] audio`).readyState > 0, other, { timeout: 10000 });
+    page.off("request", onRequest);
+    // One load (the stand-in stream has no ranges, so Chrome may fetch it twice; the app's test counts requests).
+    assert.equal(await page.$eval(`tr[data-key="${other}"] audio`, (au) => au.__loads), 1, "resting on it loads it once");
+    assert.ok(loads.length >= 1);
     // Play (a row click), then hover the player: it keeps playing (load() would reset it).
     await page.$eval(`tr[data-key="${a}"] audio`, (au) => {
       au.loop = true; // the stand-in stream is 1 s of silence
@@ -1641,38 +1653,73 @@ test("local app: the rows load while the extension is still answering; \"Loading
   }
 });
 
-test("local app: hovering a player doesn't read the file (no /api/files/stream until Play)", async () => {
+test("local app: passing over players reads nothing; resting on one reads its metadata once, and a click on its timeline then plays from there", async () => {
   const app = await context.newPage();
-  const fake = "/e2e/not-a-real-folder/hover.aiff"; // never read: the stream request is answered here
-  let key = null;
-  // One track shows as located (a local player); nothing on the server changes.
+  const keys = [];
+  // A few tracks show as located (local players); nothing on the server changes, and no file is read: the
+  // stream requests are answered here, with a silent WAV (ranges, so it can seek).
   await app.route("**/api/items", async (route) => {
     const res = await route.fetch();
     const data = await res.json();
-    const list = Array.isArray(data) ? data : data.items;
-    const it = list.find((i) => i.tralbum_type === "t" && i.source !== "other");
-    key = it.id;
-    it.local = { status: "located", best: { path: fake }, candidates: [] };
+    (Array.isArray(data) ? data : data.items)
+      .filter((i) => i.tralbum_type === "t" && i.source !== "other")
+      .slice(0, 12)
+      .forEach((it) => {
+        keys.push(it.id);
+        it.local = { status: "located", best: { path: `/e2e/not-a-real-folder/${it.id}.wav` }, candidates: [] };
+      });
     await route.fulfill({ response: res, json: data });
   });
+  const wav = silentWav(3);
   const reads = [];
   await app.route("**/api/files/stream**", (route) => {
     reads.push(route.request().url());
-    route.fulfill({ status: 404, body: "" });
+    const m = /bytes=(\d+)-(\d*)/.exec(route.request().headers().range || "");
+    if (!m) return route.fulfill({ status: 200, contentType: "audio/wav", headers: { "Accept-Ranges": "bytes" }, body: wav });
+    const from = Number(m[1]);
+    const to = m[2] ? Math.min(Number(m[2]), wav.length - 1) : wav.length - 1;
+    return route.fulfill({
+      status: 206,
+      contentType: "audio/wav",
+      headers: { "Accept-Ranges": "bytes", "Content-Range": `bytes ${from}-${to}/${wav.length}` },
+      body: wav.subarray(from, to + 1),
+    });
   });
   try {
     await app.goto(SERVER + "/");
-    await app.waitForFunction(() => document.querySelectorAll("#collectionTable tbody tr[data-key]").length > 0);
-    const audio = app.locator(`tr[data-key="${key}"] audio.local-audio`);
-    await audio.scrollIntoViewIfNeeded();
-    await audio.hover();
+    await app.waitForFunction(() => document.querySelectorAll("#collectionTable tbody tr[data-key] audio.local-audio").length > 3);
+    const players = await app.$$eval("#collectionTable tbody tr[data-key] audio.local-audio", (as) => as.map((a) => a.closest("tr").dataset.key));
+    await app.locator(`tr[data-key="${players[0]}"]`).scrollIntoViewIfNeeded();
+    const centers = [];
+    for (const k of players) {
+      const b = await app.locator(`tr[data-key="${k}"] audio`).boundingBox();
+      if (b && b.y > 0 && b.y + b.height < 720) centers.push([b.x + b.width / 2, b.y + b.height / 2]);
+    }
+    assert.ok(centers.length >= 3, `players in view: ${centers.length}`);
+    // Across the rows, over each player in passing.
+    for (const [x, y] of centers) await app.mouse.move(x, y, { steps: 2 });
     await app.mouse.move(5, 5);
-    await audio.hover();
-    await app.waitForTimeout(600);
-    assert.deepEqual(reads, [], "hovering read nothing");
-    await audio.evaluate((au) => au.play().catch(() => {}));
-    await waitFor(async () => reads.length > 0, { what: "Play reads the file", timeout: 5000 });
+    await app.waitForTimeout(400);
+    assert.deepEqual(reads, [], "passing over read nothing");
+    // Resting on one: its metadata, once.
+    const key = players[0];
+    const audio = app.locator(`tr[data-key="${key}"] audio`);
+    const box = await audio.boundingBox();
+    await app.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
+    await app.waitForFunction((k) => document.querySelector(`tr[data-key="${k}"] audio`).readyState >= 1, key, { timeout: 10000 });
+    await app.waitForTimeout(300);
+    assert.equal(reads.length, 1, `one request: ${reads.join(", ")}`);
+    assert.ok(reads[0].includes(encodeURIComponent(`/e2e/not-a-real-folder/${key}.wav`)));
+    assert.equal(await audio.evaluate((au) => au.paused), true, "not playing yet");
+    // A click on the timeline: it seeks there and plays.
+    await app.mouse.click(box.x + box.width * 0.6, box.y + box.height / 2);
+    await app.waitForFunction((k) => {
+      const au = document.querySelector(`tr[data-key="${k}"] audio`);
+      return !au.paused && au.currentTime > 0;
+    }, key, { timeout: 10000 });
+    assert.ok((await audio.evaluate((au) => au.currentTime)) > 0.5, "from where it was clicked, not the start");
   } finally {
+    await app.evaluate(() => document.querySelectorAll("audio").forEach((au) => au.pause())).catch(() => {});
     await app.close();
   }
 });
