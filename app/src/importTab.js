@@ -88,6 +88,7 @@ export function createImportTab(container, { bridge } = {}) {
 
   // Import from Files: folder rows (path, Browse…, added since, ×), Default tags (pool), the lookup choice.
   let folders = [];
+  let remembered = {}; // path -> its last Import from Files
   let filesTags = null;
   const weekAgo = () => dateInputValue(new Date(Date.now() - 7 * 864e5).toISOString());
   const folderList = el("div", { id: "importFolders", class: "import-folders" });
@@ -105,10 +106,17 @@ export function createImportTab(container, { bridge } = {}) {
     folders.forEach((f, i) => {
       const path = el("input", { type: "text", class: "path folder-path", placeholder: "/path/to/folder", spellcheck: "false" });
       path.value = f.path;
-      path.addEventListener("input", () => (f.path = path.value));
       const since = el("input", { type: "date", class: "folder-since", title: "Files added on or after this day" });
       since.value = f.since || "";
       since.addEventListener("change", () => (f.since = since.value));
+      // A folder imported before starts from its last run.
+      const setPath = (p) => {
+        f.path = path.value = p;
+        const last = remembered[p.trim().replace(/\/$/, "")];
+        if (last) f.since = since.value = dateInputValue(last);
+      };
+      path.addEventListener("change", () => setPath(path.value));
+      path.addEventListener("input", () => (f.path = path.value));
       const browse = el("button", { type: "button", class: "secondary folder-browse" }, "Browse…");
       const del = el("button", { type: "button", class: "icon folder-del", title: "Remove this folder" }, "×");
       del.addEventListener("click", () => {
@@ -122,15 +130,24 @@ export function createImportTab(container, { bridge } = {}) {
           folderPicker({
             start: path.value.trim() || null,
             onPick: (p) => {
-              f.path = path.value = p;
+              setPath(p);
               picker.innerHTML = "";
             },
             onClose: () => (picker.innerHTML = ""),
           })
         );
       });
+      const warn = f.mounted === false ? "music drive not mounted" : f.exists === false ? "folder not found" : "";
       folderList.append(
-        el("div", { class: "folder-row", "data-i": i }, path, browse, el("label", { class: "since-label" }, "added since ", since), del),
+        el(
+          "div",
+          { class: "folder-row", "data-i": i },
+          path,
+          browse,
+          el("label", { class: "since-label" }, "added since ", since),
+          del,
+          warn ? el("span", { class: "help err folder-warn" }, warn) : ""
+        ),
         picker
       );
     });
@@ -601,17 +618,20 @@ export function createImportTab(container, { bridge } = {}) {
         defaultTags.init();
       }
       if (!filesTags) {
-        filesTags = tagSelect("importFilesDefaultTags", vocab, ["pool"], "420px");
-        filesTagsHolder.appendChild(filesTags.node);
-        filesTags.init();
+        let d = { folders: [], remembered: {}, defaultTags: ["pool"], lookup: "server" };
         try {
-          folders = await fileImportDefaults();
+          d = await fileImportDefaults();
         } catch (e) {
           filesInfo.className = "help err";
           filesInfo.textContent = e.status === 404 ? "This server can't import from files yet." : `Can't read the default folders: ${e.message}`;
           filesStart.disabled = e.status === 404;
         }
-        if (!folders.length) folders = [{ path: "", since: weekAgo() }];
+        filesTags = tagSelect("importFilesDefaultTags", vocab, d.defaultTags, "420px");
+        filesTagsHolder.appendChild(filesTags.node);
+        filesTags.init();
+        (d.lookup === "browser" ? filesViaBrowser : filesViaServer).checked = true;
+        remembered = d.remembered;
+        folders = d.folders.length ? d.folders : [{ path: "", since: weekAgo() }];
         renderFolders();
       }
       const list = await loadBatches();

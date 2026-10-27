@@ -56,9 +56,10 @@ function normRow(r, i) {
     tags: Array.isArray(r.tags) ? r.tags : [],
     flags: Array.isArray(r.flags) ? r.flags : [],
     note: r.note || null,
-    // Import from Files: the folder it was picked from, and its file.
-    folder: r.folder ?? r.source_folder ?? null,
-    path: r.path ?? r.file_path ?? null,
+    // Import from Files: the folder it was picked from, its file, and the same track in other formats.
+    folder: r.folder ?? null,
+    path: (r.file && r.file.path) || null,
+    formats: (r.file && Array.isArray(r.file.formats) ? r.file.formats : []).filter((f) => f.path !== (r.file && r.file.path)),
     checked: r.checked !== false,
     source: r.source || (bc || chosen || r.item || match.item ? "bandcamp" : "other"),
     via: (bc && bc.via) || null,
@@ -123,12 +124,16 @@ export function normBatch(b) {
     fromFiles: [b.kind, b.type, b.import_type, b.origin].includes("files"), // Import from Files (Phase 7)
     // Import from Files: collection items not located yet, and the file each gets on commit (ticked or not).
     locationUpdates: (Array.isArray(b.location_updates) ? b.location_updates : []).map((u) => ({
-      id: u.item_id || u.id || null,
+      id: u.item_id || null,
       artist: u.artist || "",
       title: u.title || "",
-      path: u.path || u.file || (u.located && u.located.path) || "",
-      n: u.n ?? u.row ?? null,
-      applied: !!(u.applied || u.done),
+      // An album item is located to its release folder.
+      path: u.located_path || (u.kind === "album" ? u.release_dir : u.path) || u.path || "",
+      kind: u.kind || "track",
+      n: u.n ?? null,
+      line: u.line ?? null,
+      applied: !!u.applied,
+      status: u.status || null,
     })),
     lookupVia: b.lookup === "browser" ? "browser" : "server", // who makes the Bandcamp requests
     estimate: b.estimate || null, // {lookups, cached, requests, seconds, interval_s, text}
@@ -161,12 +166,22 @@ export function dateInputValue(v) {
   return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
 }
 
-// The folder rows to start from: the Collection, then the downloads, each with
-// the date of its last Import from Files (first time: 7 days ago).
+// What Import from Files starts from: the Collection and the downloads folder,
+// each with the date of its last run (first time: 7 days ago), the remembered
+// dates of other folders, and the default tags and lookup.
 export async function fileImportDefaults() {
-  const d = await apiJson("/api/import/files/defaults");
-  const list = Array.isArray(d) ? d : (d && (d.folders || d.rows)) || [];
-  return list.map((f) => ({ path: f.path || "", since: dateInputValue(f.since || f.last_run || f.date), label: f.label || f.name || "" }));
+  const d = (await apiJson("/api/import/files/defaults")) || {};
+  return {
+    folders: (d.folders || []).map((f) => ({
+      path: f.path || "",
+      since: dateInputValue(f.since || f.last_run),
+      mounted: f.mounted !== false,
+      exists: f.exists !== false,
+    })),
+    remembered: d.remembered || {}, // path -> its last run
+    defaultTags: Array.isArray(d.default_tags) ? d.default_tags : ["pool"],
+    lookup: d.lookup === "browser" ? "browser" : "server",
+  };
 }
 
 // Change an open batch's default tags: `all` puts them on every row, else only on untagged rows.

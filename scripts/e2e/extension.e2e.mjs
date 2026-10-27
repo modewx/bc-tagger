@@ -2510,3 +2510,149 @@ test("import end to end (real server): resolve, map tags, paste a URL, link from
   await page.click("#source_bandcamp");
   await page.close();
 });
+
+// --- Phase 7: Import from Files ---------------------------------------------------------
+// A fixture tree with real file dates (an older mtime moves the creation date back too):
+// the test server's owned and not-owned folders point at it for the test.
+
+function writeFixtureFiles(files) {
+  execFileSync(PYTHON, [
+    "-c",
+    `
+import json, os, struct, sys, time
+sys.path[:0] = sys.argv[1:3]
+from pathlib import Path
+import mutagen.flac
+from conftest import write_aiff
+
+def write_flac(path, title, artist, album, track):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    packed = (8000 << 44) | (0 << 41) | (15 << 36)
+    info = struct.pack(">HH", 4096, 4096) + b"\\0" * 6 + packed.to_bytes(8, "big") + b"\\0" * 16
+    path.write_bytes(b"fLaC" + bytes([0x80]) + len(info).to_bytes(3, "big") + info)
+    f = mutagen.flac.FLAC(path)
+    f.add_tags()
+    for key, value in (("title", title), ("artist", artist), ("album", album), ("tracknumber", track)):
+        if value is not None:
+            f[key] = str(value)
+    f.save()
+
+for f in json.loads(sys.argv[3]):
+    p = Path(f["path"])
+    (write_flac if p.suffix == ".flac" else write_aiff)(p, f.get("title"), f.get("artist"), f.get("album"), f.get("track"))
+    t = time.time() - f["days"] * 86400
+    os.utime(p, (t, t))
+`,
+    path.join(ROOT, "server/tests"),
+    path.join(ROOT, "server"),
+    JSON.stringify(files),
+  ]);
+}
+
+test("Import from Files: folders prefilled with their dates, rows by folder under headers, a FLAC + AIFF pair is one row, duplicates unticked, the file shown; commit numbers the rows after everything", async () => {
+  const base = path.join(E2E, "files-import");
+  const coll = path.join(base, "Collection");
+  const complete = path.join(base, "complete");
+  fs.rmSync(base, { recursive: true, force: true });
+  const release = path.join(coll, "E2E Artist B - New EP (2026)");
+  // ITEM ("The System Works") was located by the Locate tests: a copy of it here must leave it as it is.
+  const located = exportData.taggedItems[ITEM];
+  writeFixtureFiles([
+    { path: path.join(complete, `${located.artist} - Copy`, `01 ${located.title}.aiff`), title: located.title, artist: located.artist, album: "Copy", track: 1, days: 1.5 },
+    { path: path.join(release, "01 First.flac"), title: "First", artist: "E2E Artist B", album: "New EP", track: 1, days: 3 },
+    { path: path.join(release, "01 First.aiff"), title: "First", artist: "E2E Artist B", album: "New EP", track: 1, days: 3 },
+    { path: path.join(release, "02 Second.aiff"), title: "Second", artist: "E2E Artist B", album: "New EP", track: 2, days: 3 },
+    { path: path.join(coll, "E2E Artist A - Old EP", "01 Old One.aiff"), title: "Old One", artist: "E2E Artist A", album: "Old EP", track: 1, days: 30 },
+    { path: path.join(coll, "TSVI - Stella Remota", "01 Futuro Lontano.aiff"), title: "Futuro Lontano", artist: "TSVI", album: "Stella Remota", track: 1, days: 2 },
+    { path: path.join(complete, "Unknown - Thing", "01 Thing.flac"), days: 1 },
+  ]);
+  const before = await api("/api/settings").then((d) => d.settings || d);
+  await put({ owned_root: coll, not_owned_roots: [{ path: complete, globs: [] }], downloads_dir: "" });
+  const page = await context.newPage();
+  page.on("dialog", (d) => d.accept());
+  let batchId = null;
+  try {
+    const weekAgo = new Date(Date.now() - 7 * 86400e3);
+    const ymd = (d) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+    await page.goto(SERVER + "/settings/#import");
+    await page.waitForFunction(() => document.querySelectorAll("#importFolders .folder-row").length === 2);
+    const rows = () => page.$$eval("#importFolders .folder-row", (rs) => rs.map((r) => [r.querySelector(".folder-path").value, r.querySelector(".folder-since").value]));
+    assert.deepEqual(await rows(), [[coll, ymd(weekAgo)], [complete, ymd(weekAgo)]], "the Collection, then the downloads, from 7 days ago");
+    assert.deepEqual(await page.$$eval("#importFilesDefaultTags option:checked", (o) => o.map((x) => x.value)), ["pool"]);
+    assert.equal(await page.isChecked("#importFilesLookupServer"), true);
+    // + and ×, and Browse… (a folder of the music folders).
+    await page.click("#importFolderAdd");
+    assert.equal((await rows()).length, 3);
+    await page.click('#importFolders .folder-row[data-i="2"] .folder-browse');
+    await page.waitForSelector(".folder-picker .fp-dir");
+    await page.click(`.folder-picker .fp-dir[data-path="${complete}"]`);
+    await page.waitForFunction((p) => document.querySelector(".folder-picker .fp-use").title === p, complete);
+    await page.click(".folder-picker .fp-use");
+    assert.equal((await rows())[2][0], complete);
+    await page.click('#importFolders .folder-row[data-i="2"] .folder-del');
+    assert.equal((await rows()).length, 2);
+    // A drive that isn't there: refused before anything is written.
+    await page.click("#importFolderAdd");
+    await page.fill('#importFolders .folder-row[data-i="2"] .folder-path', "/Volumes/E2E No Such Drive/Music");
+    await page.click("#importFilesStart");
+    await page.waitForFunction(() => /Import failed: .*not mounted/.test(document.getElementById("importProgress").textContent));
+    await page.click('#importFolders .folder-row[data-i="2"] .folder-del');
+    const shot = (name, el) => process.env.E2E_SHOTS && (el ? page.locator(el) : page).screenshot({ path: path.join(process.env.E2E_SHOTS, name) });
+    await shot("files-section.png", "#sec_import_files");
+
+    const maxOrderBefore = (await api("/api/health")).max_order;
+    assert.notEqual((await api("/api/items/t1002746421")).local?.status, "located", "Futuro Lontano isn't located yet");
+    const itemBefore = await api(`/api/items/${ITEM}`);
+    assert.equal(itemBefore.local.status, "located", "ITEM was located by the Locate tests");
+    await page.click("#importFilesStart");
+    await page.waitForURL(/\/import\/\?batch=imp-/, { timeout: 90000 });
+    batchId = new URL(page.url()).searchParams.get("batch");
+    await page.waitForFunction(() => document.querySelectorAll("#collectionTable tbody tr[data-key]").length > 0);
+    // By folder, under the folder's path; oldest release first; one row for First (FLAC + AIFF); Old One is too old.
+    const layout = await page.$$eval("#collectionTable tbody tr", (trs) =>
+      trs.map((tr) => (tr.classList.contains("group-row") ? `# ${tr.textContent}` : tr.querySelector(".col-title").textContent.trim()))
+    );
+    assert.deepEqual(layout, [`# ${coll}`, "First", "Second", "Futuro Lontano", `# ${complete}`, located.title, "Thing"]);
+    const keyOf = async (title) =>
+      page.evaluate((t) => [...document.querySelectorAll("#collectionTable tbody tr[data-key]")].find((tr) => tr.querySelector(".col-title").textContent.trim() === t).dataset.key, title);
+    const dup = await keyOf("Futuro Lontano");
+    assert.ok(await page.$eval(`tr[data-key="${dup}"]`, (tr) => tr.classList.contains("row-duplicate")), "duplicate tint");
+    assert.ok(await page.$(`tr[data-key="${dup}"] .dup-icon`), "duplicate icon");
+    assert.equal(await page.isChecked(`tr[data-key="${dup}"] .row-check`), false, "duplicates start unticked");
+    const first = await keyOf("First");
+    assert.equal(await page.isChecked(`tr[data-key="${first}"] .row-check`), true);
+    assert.match(await page.getAttribute(`tr[data-key="${first}"] .located-cell .chip`, "title"), /E2E Artist B - New EP \(2026\)\/01 First\.(flac|aiff)/, "the file, on hover");
+    assert.match(await page.getAttribute(`tr[data-key="${first}"] .formats-icon`, "title"), /Also here as:\n.*01 First\.(aiff|flac)/);
+    // Locations to update: the duplicate's collection item isn't located, so it gets this file on commit,
+    // ticked or not; an item already located isn't listed.
+    await page.waitForSelector("#locationUpdates:not([hidden])");
+    assert.match(await page.textContent("#locationUpdates summary"), /^Locations to update \(\d+\): .*whether or not their rows are ticked/);
+    assert.ok(await page.$('#locationUpdates li[data-item="t1002746421"]'), "Futuro Lontano is listed");
+    assert.equal(await page.$(`#locationUpdates li[data-item="${ITEM}"]`), null, "an item already located isn't");
+    await shot("files-preview.png");
+
+    // Import selected: the ticked rows, numbered after everything, in row order; the duplicate isn't merged.
+    const tsviTags = (await api("/api/items/t1002746421")).tags;
+    await page.click("#importSelected");
+    await page.waitForURL(SERVER + "/", { timeout: 60000 });
+    const committed = await api(`/api/import/${batchId}`);
+    assert.ok(committed.committed_at || committed.status === "committed", JSON.stringify(committed).slice(0, 300));
+    const created = await api("/api/items?source=other").then((d) => (Array.isArray(d) ? d : d.items)).then((items) => items.filter((i) => ["First", "Second", "Thing"].includes(i.title)));
+    const orders = ["First", "Second", "Thing"].map((t) => (created.find((i) => i.title === t) || {}).order);
+    assert.ok(orders.every((o, i) => o > maxOrderBefore && (i === 0 || o > orders[i - 1])), `"#" in row order after everything: ${orders} (> ${maxOrderBefore})`);
+    assert.deepEqual((await api("/api/items/t1002746421")).tags, tsviTags, "the unticked duplicate's tags are left alone");
+    const tsvi = await api("/api/items/t1002746421");
+    assert.equal(tsvi.local.status, "located", "but it's located to its file");
+    assert.ok(tsvi.local.best.path.endsWith("TSVI - Stella Remota/01 Futuro Lontano.aiff"), tsvi.local.best.path);
+    assert.equal((await api(`/api/items/${ITEM}`)).local.best.path, itemBefore.local.best.path, "an item already located is untouched");
+    await page.waitForFunction(() => /collection items? located to the imported files/.test(document.getElementById("refreshStatus").textContent));
+    // Next time the Collection starts from today.
+    const defaults = await api("/api/import/files/defaults");
+    assert.equal(defaults.folders.find((f) => f.path === coll).since, ymd(new Date()));
+  } finally {
+    if (batchId) await api(`/api/import/${batchId}`, { method: "DELETE" }).catch(() => {});
+    await put({ owned_root: before.owned_root, not_owned_roots: before.not_owned_roots, downloads_dir: before.downloads_dir || "" });
+    fs.rmSync(base, { recursive: true, force: true });
+    await page.close();
+  }
+});

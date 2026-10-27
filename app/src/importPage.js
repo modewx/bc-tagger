@@ -162,7 +162,10 @@ function renderLocations() {
   list.forEach((u) => {
     const li = el("li", "");
     li.dataset.item = u.id || "";
-    li.append(el("span", "loc-name", [u.artist, u.title].filter(Boolean).join(" – ") || u.id || "?"), " → ", el("code", "loc-path", u.path));
+    const name = [u.artist, u.title].filter(Boolean).join(" – ") || u.id || "?";
+    li.append(el("span", "loc-name", `${name}${u.kind === "album" ? " (album)" : ""}`), " → ", el("code", "loc-path", u.path));
+    if (u.line != null) li.appendChild(el("span", "muted", ` · row ${u.line}`));
+    if (batch.committed && u.status && !u.applied) li.appendChild(el("span", "log-err", ` · ${u.status}`));
     ul.appendChild(li);
   });
   locations.append(summary, ul);
@@ -850,6 +853,7 @@ function notesPopover(anchor, row) {
     }
     if (row.note) pop.appendChild(el("div", "pop-meta note-text", `Note: ${row.note}`));
     if (row.raw || row.path) pop.appendChild(el("div", "pop-meta note-line", fromText(row)));
+    if (row.formats.length) pop.appendChild(el("div", "pop-meta", `Also here as: ${row.formats.map((f) => f.path).join(", ")}`));
   });
 }
 
@@ -880,6 +884,12 @@ function notesColumn() {
         const c = clickable(el("span", "chip confirm-chip", "confirm"));
         c.title = `Needs your confirmation: the reading and the files disagree.${row.note ? `\n${row.note}` : ""}`;
         cell.appendChild(c);
+      }
+      // Import from Files: the same track in other formats (one row, the preferred format).
+      if (row.formats.length) {
+        const m = clickable(el("span", "note-icon formats-icon", `+${row.formats.length}`));
+        m.title = `Also here as:\n${row.formats.map((f) => f.path).join("\n")}`;
+        cell.appendChild(m);
       }
       if (row.flags.length || row.note) {
         const f = clickable(el("span", "note-icon flag-icon", "⚑"));
@@ -929,13 +939,17 @@ async function importSelected(statusEl, button) {
     const log = ["log", "log_md", "log_dir", "log_warning", "log_error"].reduce((o, k) => (r[k] ? { ...o, [k]: r[k] } : o), {});
     // Let the extension pick up the new Bandcamp items right away.
     if (bridge.connected) await bridge.call("syncNow", {}).catch(() => {});
+    // Import from Files: collection items located to the imported files (ticked or not).
+    const located = Array.isArray(r.location_updates) ? r.location_updates.filter((u) => u.applied).length : 0;
     statusEl.textContent =
       "Imported: " +
       Object.entries(r)
+        .filter(([k]) => !["location_updates", "located_items"].includes(k))
         .map(([k, v]) => [k, Array.isArray(v) ? v.length : v])
         .filter(([, v]) => typeof v === "number")
         .map(([k, v]) => `${k.replace(/_/g, " ")} ${v}`)
-        .join(", ");
+        .join(", ") +
+      (located ? `; ${located} collection item${located > 1 ? "s" : ""} located to the imported files` : "");
     // The collection opens with exactly what was imported and merged
     // selected, newest Modified first, ready for "Export Selected to RB".
     if (Array.isArray(r.selected)) {
