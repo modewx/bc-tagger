@@ -311,3 +311,54 @@ def test_import_rows_go_to_rekordbox_without_joining_the_collection(svc, library
         job = c.post("/api/rekordbox/export", json={"rows": [f"{bid}:0"], "dry_run": True}).json()
         result = svc.jobs.wait(job["job_id"], timeout=60)
         assert result.status == "done" and not result.result["changed"]
+
+
+def test_import_rows_use_the_collections_tag_to_playlist_mapping(svc, library, test_db):
+    from bc_tagger_server import importer
+
+    svc.settings.update({"tag_playlist_mode": "custom", "tag_playlist_map": {"temp": ["Sets/Warmup"], "must": ["Must"]}})
+    batch = importer.create_batch(svc, {"format": "bc-tagger-import/1", "source": "temp", "items": [
+        {"line": 1, "artist": "Alpha", "title": "Alpha 1", "album": "Alpha Album", "tags": ["temp", "must", "ritual"]}]},
+        [])
+    svc.scan()
+    rows = importer.load_rows(svc.store, batch["batch_id"])
+    importer._locate(svc, rows)
+    importer._save_rows(svc.store, batch["batch_id"], rows)
+    diff = export(svc, rows=[f"{batch['batch_id']}:0"])
+    assert sorted(e["tag"] for e in diff["entries_added"]) == [f"/{FOLDER}/Must", f"/{FOLDER}/Sets/Warmup"]
+    # no playlist for it in the mapping: not exported, the same warning as for items
+    assert [w["message"] for w in diff["warnings"] if w["code"] == "unmapped_tags"] == [
+        "not exported (no playlist mapped): ritual"]
+
+
+def test_new_tags_of_import_rows_can_be_created_then_mapped(svc, library, test_db):
+    from fastapi.testclient import TestClient
+
+    from bc_tagger_server import importer
+    from bc_tagger_server.api import create_app
+    from bc_tagger_server.collection import pending_adds
+
+    svc.scan()
+    batch = importer.create_batch(svc, {"format": "bc-tagger-import/1", "source": "temp", "items": [
+        {"line": 1, "artist": "Alpha", "title": "Alpha 1", "album": "Alpha Album", "tags": ["warmup", "must"]}]}, [])
+    bid = batch["batch_id"]
+    rows = importer.load_rows(svc.store, bid)
+    importer._locate(svc, rows)
+    importer._save_rows(svc.store, bid, rows)
+    svc.settings.update({"tag_playlist_mode": "custom", "tag_playlist_map": {"must": ["Must"]}})
+    with TestClient(create_app(svc)) as c:
+        assert c.get(f"/api/import/{bid}").json()["uncreated_tags"] == ["warmup"]
+        dry = export(svc, rows=[f"{bid}:0"], dry_run=True)
+        assert dry["new_tags"] == ["warmup"]
+        assert dry["tag_playlists"] == [{"tag": "must", "new": False, "playlists": [f"/{FOLDER}/Must"]},
+                                        {"tag": "warmup", "new": True, "playlists": []}]  # not mapped yet
+        r = c.post("/api/tags/create", json={"tags": ["warmup", "must"]}).json()
+        assert r["created"] == ["warmup"] and r["existing"] == ["must"] and "warmup" in svc.store.get_tags()
+        assert [a["tags"] for a in pending_adds(svc.store) if "tags" in a] == [["warmup"]]  # for the extension
+        assert c.post("/api/tags/create", json={"tags": ["warmup"]}).json()["created"] == []
+        assert c.get(f"/api/import/{bid}").json()["uncreated_tags"] == []
+    # mapped in Settings: the next export sends it there
+    svc.settings.update({"tag_playlist_map": {"must": ["Must"], "warmup": ["Sets/Warmup"]}})
+    diff = export(svc, rows=[f"{bid}:0"])
+    assert sorted(e["tag"] for e in diff["entries_added"]) == [f"/{FOLDER}/Must", f"/{FOLDER}/Sets/Warmup"]
+    assert diff["new_tags"] == []

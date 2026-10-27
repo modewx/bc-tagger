@@ -923,6 +923,8 @@ def get_batch(svc, batch_id: str) -> dict:
     for row in rows:  # what Download can fetch for Bandcamp rows (not stored: ownership changes)
         item = (row.get("bandcamp") or {}).get("item")
         row["owned"] = ownership_status(svc.store, item) if item else None
+    vocab = set(svc.store.get_tags())  # live: tags the rows use that aren't created yet ("Create New Tags")
+    batch["uncreated_tags"] = [t for t in dict.fromkeys(t for r in rows for t in r.get("tags") or []) if t not in vocab]
     if batch.get("kind") == "files" and batch["status"] != "committed":  # live: items may have been located since
         batch["location_updates"] = location_updates(svc.store, batch, rows)
         batch["stats"] = {**(batch.get("stats") or {}), "location_updates": len(batch["location_updates"])}

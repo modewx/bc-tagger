@@ -182,6 +182,26 @@ class Service:
         if item is not None:
             self.store.upsert_items({item_id: {**item, "modified_at": stamp}})
 
+    def create_tags(self, tags: list[str]) -> dict[str, Any]:
+        """Add tags to the vocabulary now (as an import commit would): the server's list, and queued for the
+        extension. ``{created, existing, tags}``."""
+        from .collection import queue_add
+        from .importer import _clean_tags
+
+        vocab = self.store.get_tags()
+        wanted = _clean_tags(tags)
+        created = [t for t in wanted if t not in vocab]
+        if created:
+            self.sync_tags(vocab + created)
+            queue_add(self.store, tags=created)
+        return {"created": created, "existing": [t for t in wanted if t in vocab], "tags": vocab + created}
+
+    def tag_playlists(self, tags: list[str]) -> list[dict[str, Any]]:
+        """Where each tag goes in rekordbox under the collection's mapping: ``[{tag, new, playlists}]``
+        (``new``: not in the tag list yet; ``playlists: []``: not exported)."""
+        vocab, rule = set(self.store.get_tags()), self.playlist_rule()
+        return [{"tag": t, "new": t not in vocab, "playlists": rule(t)} for t in tags]
+
     def sync_tags(self, tags: list[str]) -> dict[str, Any]:
         self.store.set_tags(tags)
         self.jobs.bus.publish("tags", {"count": len(tags)})
@@ -626,6 +646,8 @@ class Service:
         elif confirm_token:
             with self.store.tx() as c:
                 c.execute("UPDATE confirm_tokens SET used_at = ? WHERE token = ?", (now_iso(), confirm_token))
+        diff["tag_playlists"] = self.tag_playlists(selection.tag_order)
+        diff["new_tags"] = [t["tag"] for t in diff["tag_playlists"] if t["new"]]
         if rows is not None:
             diff["rows"] = True
             if not dry_run:
