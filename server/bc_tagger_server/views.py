@@ -10,6 +10,11 @@ from .items import is_album, item_tags
 from .store import Store
 
 
+# what the views add to each located file, from the index (never from the file itself)
+FILE_INFO = ("duration", "sample_rate", "bits", "channels")
+_NO_FILE_INFO = dict.fromkeys(FILE_INFO)
+
+
 def located_tracks(best: dict | None) -> list[dict]:
     """The concrete files an item resolves to (one for a track, several for an album)."""
     if not best:
@@ -37,6 +42,39 @@ class ViewData:
         for r in store.query_all("SELECT DISTINCT item_id, tag, content_id FROM rb_claims WHERE db_path = ?",
                                  ["item_id", "tag", "content_id"], (db_path,)):
             self.claims[r["item_id"]].append({"tag": r["tag"], "content_id": r["content_id"]})
+        # every located file (a track's, or each of a release's tracks)
+        self.files = {r["path"]: r for r in store.query_all(
+            f"SELECT path, {', '.join(FILE_INFO)} FROM files WHERE path IN ("
+            " SELECT json_extract(best, '$.path') FROM locate_results WHERE best IS NOT NULL"
+            " UNION ALL SELECT json_extract(t.value, '$.path')"
+            " FROM locate_results, json_each(locate_results.best, '$.tracks') AS t WHERE best IS NOT NULL)",
+            ["path", *FILE_INFO])}
+
+
+def file_info(store: Store, paths: list[str]) -> dict[str, dict]:
+    """Length and audio format of indexed files, by path."""
+    if not paths:
+        return {}
+    return {r["path"]: r for r in store.query_all(
+        f"SELECT path, {', '.join(FILE_INFO)} FROM files WHERE path IN (SELECT value FROM json_each(?))",
+        ["path", *FILE_INFO], (json.dumps(paths),))}
+
+
+def with_file_info(best: dict | None, files: dict[str, dict]) -> dict | None:
+    """``best`` with ``duration`` (seconds), ``sample_rate``, ``bits`` and ``channels`` on the file, or on
+    each of a release's tracks; null where the index doesn't know."""
+    if not best:
+        return best
+    if best.get("tracks"):
+        return {**best, "tracks": [{**t, **_info(files, t.get("path"))} for t in best["tracks"]]}
+    if best.get("path"):
+        return {**best, **_info(files, best["path"])}
+    return best
+
+
+def _info(files: dict[str, dict], path: str | None) -> dict:
+    row = files.get(path) if path else None
+    return {k: row[k] for k in FILE_INFO} if row else dict(_NO_FILE_INFO)
 
 
 def local_status(store: Store, item_id: str, data: ViewData | None = None) -> dict[str, Any]:
@@ -46,9 +84,13 @@ def local_status(store: Store, item_id: str, data: ViewData | None = None) -> di
         row = store.query_one("SELECT * FROM locate_results WHERE item_id = ?", (item_id,))
     if not row:
         return {"status": "unknown", "best": None, "candidates": []}
+    best = json.loads(row["best"]) if row["best"] else None
+    if best is not None:
+        files = data.files if data is not None else file_info(store, [t["path"] for t in located_tracks(best)])
+        best = with_file_info(best, files)
     return {
         "status": row["status"],
-        "best": json.loads(row["best"]) if row["best"] else None,
+        "best": best,
         "candidates": json.loads(row["candidates"]) if row["candidates"] else [],
         "located_at": row["located_at"],
     }

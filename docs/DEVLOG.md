@@ -165,6 +165,27 @@ Tests never touch Bandcamp, the music drive or a real rekordbox library: Bandcam
   - New: another file of the same song (same normalized artist and title, length within 2 s) isn't added.
     It's listed in the diff as `entries_same_song`, "already in playlist (other file)".
   - A file skipped for all its playlists isn't added to the library. `add_same_song: true` adds them anyway.
+- **Playback starts fast and reads only what's played (user's request: "save a cache of file length and other
+  metadata, to minimize disk reads"):**
+  - Before: the first play of an AIFF (755 of the 813 located items) had ffmpeg read the whole 50+ MB file from
+    the music drive and encode it to FLAC before the first byte went out.
+  - Now an uncompressed AIFF is served as a WAV made on the fly:
+    - The 44-byte header comes from the AIFF layout the index keeps (`files.aiff_layout`), so it needs no read.
+    - A range reads only that slice of the samples and reorders their bytes (big-endian to little-endian;
+      AIFF-C `sowt` as is; `fl32`/`fl64` as float WAV; 8-bit signed to unsigned).
+    - The layout is read at index time (scan, quick scan, Import from Files, the watcher, downloads) with a few
+      small reads. Rows indexed before this get one on first play.
+    - FLACs already in the transcode cache are still served first (no drive read at all). ALAC and other
+      AIFF-C are still transcoded.
+  - Item views give each located file `duration`, `sample_rate`, `bits` and `channels`, from one bulk query:
+    no file access.
+  - On the live server, for AIFFs not in the FLAC cache, with the drive awake:
+    - **Mid-file range (256 KB): first byte 0.76–2.3 s → 0.011–0.067 s**, with 0.019–0.093 s for the whole
+      range (including the one-time layout read).
+    - **Drive read per first play: 49–115 MB → about 0.3 MB.** The header alone takes 4 ms and reads nothing.
+    - A real 58 MB Bandcamp AIFF served whole decodes to exactly ffmpeg's samples.
+  - A sleeping drive still adds its spin-up (disk sleep is 10 min) to the first range that reads samples;
+    these numbers had the drive awake.
 
 ## App and extension (`app/`, `extension/`, `shared/`, branch `claude/local-collection-ui-e8f6f6`)
 

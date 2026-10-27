@@ -21,6 +21,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
 
+from .aiff import AIFF_EXTS, aiff_layout
 from .normalize import is_disc_dir, parse_filename, parse_release_dir
 from .store import Store, now_iso
 from .tagread import AUDIO_EXTS, read_tags
@@ -33,7 +34,7 @@ FILE_COLUMNS = (
     "path", "root", "root_kind", "size", "mtime", "ext", "format", "title", "artist",
     "albumartist", "album", "tracknumber", "discnumber", "comment", "bc_urls", "duration",
     "bitrate", "sample_rate", "bits", "codec", "year", "genre", "label", "release_dir",
-    "created", "parsed", "scanned_at", "error",
+    "created", "parsed", "scanned_at", "error", "channels", "aiff_layout",
 )
 
 
@@ -84,7 +85,13 @@ def file_record(path: Path, root: str, root_kind: str, st: os.stat_result) -> di
         year=tags.get("year"),
         genre=tags.get("genre"),
         label=tags.get("label"),
+        channels=tags.get("channels"),
+        aiff_layout=None,
     )
+    if rec["ext"] in AIFF_EXTS:  # a few small reads of the chunk headers, so playback needs none
+        layout = aiff_layout(path, st.st_size)
+        if layout:
+            rec.update(aiff_layout=json.dumps(layout), channels=layout["channels"])
     return rec
 
 

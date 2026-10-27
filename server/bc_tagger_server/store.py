@@ -48,7 +48,9 @@ CREATE TABLE IF NOT EXISTS files (
     created REAL,
     parsed TEXT,
     scanned_at TEXT NOT NULL,
-    error TEXT
+    error TEXT,
+    channels INTEGER,
+    aiff_layout TEXT  -- AIFF only: where the samples are and how they're stored (aiff.read_layout)
 );
 CREATE INDEX IF NOT EXISTS files_root ON files(root);
 CREATE INDEX IF NOT EXISTS files_release_dir ON files(release_dir);
@@ -237,6 +239,9 @@ class Store:
         cols = {r[1] for r in self._conn.execute("PRAGMA table_info(files)")}
         if "created" not in cols:  # file creation time (st_birthtime), added for date matching
             self._conn.execute("ALTER TABLE files ADD COLUMN created REAL")
+        if "channels" not in cols:  # rows indexed before these are filled when re-read (AIFF: when played)
+            self._conn.execute("ALTER TABLE files ADD COLUMN channels INTEGER")
+            self._conn.execute("ALTER TABLE files ADD COLUMN aiff_layout TEXT")
         if self._conn.execute("SELECT 1 FROM meta WHERE key = 'file_counts_v1'").fetchone() is None:
             # the triggers keep file_counts from now on; count what's there once
             with self.tx() as c:

@@ -17,7 +17,8 @@ uv pip install --python /Users/alvaroh/Projects/auto-rekordbox/.venv/bin/python 
 ```
 
 pyrekordbox 0.5 ships the rekordbox 6.7 database key, so no key download is needed.
-Streaming AIFF to the browser needs `ffmpeg` (`/opt/homebrew/bin/ffmpeg`).
+Streaming ALAC and compressed AIFF-C to the browser needs `ffmpeg` (`/opt/homebrew/bin/ffmpeg`); plain AIFF
+plays without it (see Playback).
 
 `./bct` runs the CLI with that venv (`BCT_PYTHON` overrides the interpreter):
 
@@ -47,6 +48,26 @@ cd server
   (`slow requests: …`), so a stall names its cause. Open streams never count.
 - Reads use their own pooled SQLite connections (WAL), so a page load never waits for another request's
   queries or for a write.
+
+## Playback
+
+`GET /api/files/stream?path=` serves an indexed file with Range support (`Accept-Ranges: bytes`, 206, 416 with
+`Content-Range: bytes */N`). Chrome can't play AIFF or ALAC, so:
+
+1. A FLAC already in `transcode-cache/` is served from there: no read of the music drive.
+2. Uncompressed AIFF (big-endian PCM; AIFF-C `sowt`, `fl32`, `fl64`; 1–32 bits, mono or stereo) is served as a
+   WAV made on the fly (`audio/wav`). Its 44-byte header comes from the layout the index keeps
+   (`files.aiff_layout`: channels, bits, rate, frames, where the samples start and how many bytes), so it needs
+   no read. A range reads only that slice of the samples (whole samples at the ends) and reorders their bytes.
+   A request for several ranges at once gets the whole file (200).
+   Rows indexed before layouts were kept get one on first play (a few small reads, saved). A file changed
+   since it was indexed is transcoded instead, until a re-scan.
+3. Anything else (ALAC, other AIFF-C) is transcoded once to FLAC with ffmpeg into the cache (2 GB, least
+   recently played dropped first).
+
+Item views give each located file `duration` (seconds), `sample_rate`, `bits` and `channels` from the index
+(`local.best` for a track, `local.best.tracks[i]` for a release); null where the index doesn't know.
+`channels` is filled when a file is (re)indexed, or for AIFF when first played.
 
 ## CLI
 

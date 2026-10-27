@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import shutil
-
 import pytest
 from fastapi.testclient import TestClient
 
@@ -90,10 +88,9 @@ def test_locate_job_confirm_reject_and_stream(client, lib):
     r = client.post("/api/matches/t1969272616/confirm", json={"path": lib["b"]}).json()
     assert r["item"]["local"]["best"]["path"] == lib["b"] and r["item"]["local"]["best"]["method"] == "confirmed"
 
-    if not shutil.which("ffmpeg") and not __import__("os").path.exists("/opt/homebrew/bin/ffmpeg"):
-        pytest.skip("ffmpeg not installed")
     s = client.get("/api/files/stream", params={"path": lib["a"]}, headers={"Range": "bytes=0-99"})
-    assert s.status_code == 206 and s.headers["content-type"] == "audio/flac" and len(s.content) == 100
+    assert s.status_code == 206 and s.headers["content-type"] == "audio/wav" and len(s.content) == 100
+    assert s.content[:4] == b"RIFF" and s.content[8:16] == b"WAVEfmt "  # an AIFF plays as WAV (test_stream)
     assert client.get("/api/files/stream", params={"path": "/etc/passwd"}).status_code == 404
 
 

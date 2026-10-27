@@ -798,7 +798,7 @@ class Service:
     def stream_file(self, request, path: str):
         from .stream import stream_response
 
-        return stream_response(self.store, path)
+        return stream_response(self.store, path, request.headers.get("range"))
 
     # -- imports (Phase 3) --------------------------------------------------------------
 
