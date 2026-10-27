@@ -217,3 +217,20 @@ def test_a_subfolder_keeps_its_root_and_a_restart_while_scanning_resumes(tree):
         rows = c.get(f"/api/import/{batch['batch_id']}").json()["rows"]
     assert [x["title"] for x in rows] == ["First", "Second", "Third"]
     assert svc.store.query_one("SELECT root FROM files WHERE path = ?", (str(new),))["root"] == str(coll)
+
+
+def test_the_same_track_in_two_folders_keeps_the_preferred_format(tree):
+    svc, coll, complete, files = tree
+    flac = aged(write_flac(coll / "Artist Q - EP [FLAC]" / "01 Song.flac", "Song", "Artist Q", "EP", 1), 2)
+    aiff = aged(write_aiff(complete / "Artist Q - EP" / "01 Song.aiff", "Song", "Artist Q", "EP", 1), 1)
+    batch = filesimport.create(svc, [{"path": str(coll), "since": since(2.5)}, {"path": str(complete),
+                                                                                 "since": since(2.5)}], ["pool"])
+    filesimport.run(svc, batch["batch_id"])
+    rows = importer.load_rows(svc.store, batch["batch_id"])
+    assert [(r["title"], r["file"]["format"]) for r in rows if r["artist"] == "Artist Q"] == [("Song", "flac"),
+                                                                                             ("Song", "aiff")]
+    result = importer.commit(svc, batch["batch_id"])
+    song = next(r for r in importer.load_rows(svc.store, batch["batch_id"]) if r["raw"] == str(flac))["commit_info"]
+    assert result["other_merged"] == 1  # the AIFF row merged into the item the FLAC row added
+    confirmed = dict(svc.store.query("SELECT item_id, path FROM match_overrides WHERE decision = 'confirm'"))
+    assert confirmed[song["item_id"]] == str(aiff)  # aiff before flac in format_preference

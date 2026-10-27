@@ -147,7 +147,7 @@ def markdown(log: dict) -> str:
     when = _local(b.get("committed_at") or log["logged_at"]).strftime("%Y-%m-%d %H:%M")
     lines = [f"# Import: {b['name']} ({when})", ""]
     lines.append(f"Batch `{b['id']}`" + (f" · file `{b['source_file']}`" if b.get("source_file") else "")
-                 + "".join(f" · folder `{f['path']}` since {f['since']}" for f in b.get("folders") or [])
+                 + "".join(f" · folder `{f['path']}` since {f['since'][:10]}" for f in b.get("folders") or [])
                  + f" · lookups: {b['lookup']}" + (f", {b['lookup_source']}" if b.get("lookup_source") else ""))
     if b["default_tags"]:
         lines.append(f"Default tags: {', '.join(b['default_tags'])} "

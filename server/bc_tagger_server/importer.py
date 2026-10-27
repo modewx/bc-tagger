@@ -27,6 +27,7 @@ from .collection import (
     queue_add, search_links,
 )
 from .fetcher import Challenged, Fetcher, NotCached, RateLimited, Unavailable, is_challenge
+from .matcher import format_rank
 from .rowmatch import score_row
 from .store import now_iso
 
@@ -1220,6 +1221,8 @@ def _commit(svc, batch: dict, earlier: set[int] = frozenset()) -> dict:
     ids: dict[str, list[str]] = {"added": [], "merged": [], "other_added": [], "other_merged": []}
     stamp = now_ms_iso()  # date_added of new items, modified_at of everything this commit touches
     order = max_order(store)  # "#": new items are numbered after everything, in row order; merges keep theirs
+    pref = svc.settings.get("format_preference")
+    from_files: dict[str, int] = {}  # items this commit added from a file (files imports): that file's format rank
     used_tags: list[str] = []
     for row in rows:
         if row.get("checked"):
@@ -1271,9 +1274,15 @@ def _commit(svc, batch: dict, earlier: set[int] = frozenset()) -> dict:
             result["other_added"] += 1
             ids["other_added"].append(item["id"])
         located = row.get("located") or {}
-        from_file = located.get("source") == "file" and row["committed"] in ("pending_add", "other")
-        if (located.get("manual") or from_file) and located.get("best"):  # confirmed for the item
-            item_id = (row["duplicate"] or {}).get("of") or row_item(row)["id"]
+        item_id = (row["duplicate"] or {}).get("of") or row_item(row)["id"]
+        confirm = bool(located.get("manual") and located.get("best"))  # the hand-picked file
+        if located.get("source") == "file" and located.get("best"):
+            # the file a files row came from: for its new item, or instead of a worse format of the same track
+            # that this import added a moment ago from another folder
+            rank = format_rank(located["best"]["format"], pref)
+            if row["committed"] in ("pending_add", "other") or rank < from_files.get(item_id, -1):
+                confirm, from_files[item_id] = True, rank
+        if confirm:  # confirmed for the item
             with store.tx() as c:
                 c.execute("DELETE FROM match_overrides WHERE item_id = ? AND decision = 'confirm'", (item_id,))
                 c.execute("INSERT INTO match_overrides(item_id, path, decision, created_at) VALUES(?, ?, 'confirm', ?)",
