@@ -85,6 +85,11 @@ Tests never touch Bandcamp, the music drive or a real rekordbox library: Bandcam
   - Location updates (user's addition): collection items the files match that aren't located yet get located
     to those files at commit, checked or not. Located items and hand-picked locations are left alone. On the
     clones with nothing located beforehand, 18 items were located this way.
+- **Import rows straight to rekordbox (user's request: "transfer to rekordbox … without adding to collection"):**
+  - Selected import rows can be exported to rekordbox (same dry run, confirm and guard; playlists from the
+    rows' tags) without joining the collection.
+  - Their playlist claims are their own, so a collection export never removes them, and they never change a
+    collection item's playlists.
 
 ## App and extension (`app/`, `extension/`, `shared/`, branch `claude/local-collection-ui-e8f6f6`)
 

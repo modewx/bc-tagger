@@ -262,3 +262,52 @@ def test_unavailable_files_leave_existing_entries_alone(svc, library, test_db, t
     diff = rb_export(svc.store, svc.target(GUARD), selection)
     assert not diff["changed"] and diff["entries_removed"] == []
     assert read_back(test_db, FOLDER)["playlists"]["pool"] == [library["beta"]]
+
+
+def test_import_rows_go_to_rekordbox_without_joining_the_collection(svc, library, test_db):
+    from fastapi.testclient import TestClient
+
+    from bc_tagger_server import importer
+    from bc_tagger_server.api import create_app
+    from bc_tagger_server.collection import other_all, pending_adds
+
+    export(svc, ids=["t200"])  # Beta Song is in the collection: pool, electro
+    batch = importer.create_batch(svc, {"format": "bc-tagger-import/1", "source": "temp", "items": [
+        {"line": 1, "artist": "Alpha", "title": "Alpha 1", "album": "Alpha Album", "tags": ["temp"]},
+        {"line": 2, "artist": "Beta", "title": "Beta Song", "album": "Single", "tags": ["ritual"]},
+        {"line": 3, "artist": "Nobody", "title": "Nowhere", "tags": ["temp"]}]}, [])
+    bid = batch["batch_id"]
+    rows = importer.load_rows(svc.store, bid)
+    importer._locate(svc, rows)
+    importer._save_rows(svc.store, bid, rows)
+    refs = [f"{bid}:0", f"{bid}:1", f"{bid}:2", "imp-nope:0"]
+    items_before, before = svc.store.count_items(), read_back(test_db, FOLDER)
+
+    dry = export(svc, rows=refs, dry_run=True)
+    assert dry["rows"] and dry["confirm_token"] and read_back(test_db, FOLDER) == before
+    assert {s["id"]: s["status"] for s in dry["skipped_items"]} == {f"{bid}:2": "missing",
+                                                                    "imp-nope:0": "no such import row"}
+    diff = export(svc, rows=refs)
+    state = read_back(test_db, FOLDER)
+    alpha, beta = library["alpha"], library["beta"]
+    assert state["playlists"]["temp"] == [alpha[0]] and state["playlists"]["ritual"] == [beta]
+    assert state["playlists"]["pool"] == [beta] and state["playlists"]["electro"] == [beta]  # t200's, unchanged
+    assert sorted(diff["content_added"]) == [alpha[0]]
+    # nothing joined the collection
+    assert svc.store.count_items() == items_before and pending_adds(svc.store) == [] and other_all(svc.store) == []
+    claims = {r["item_id"] for r in svc.store.query("SELECT item_id FROM rb_claims")}
+    assert claims == {"t200", f"{bid}:0", f"{bid}:1"}
+    exported = {r["n"]: r.get("exported") for r in importer.load_rows(svc.store, bid)}
+    assert exported[0]["target"] == "test" and exported[1] and exported[2] is None
+    # the collection item's next export keeps the row's entry; the row's own re-export manages it
+    assert not export(svc, ids=["t200"])["changed"]
+    importer.update_row(svc, bid, 1, {"tags": []})
+    again = export(svc, rows=[f"{bid}:1"])
+    assert [(e["tag"], e["path"]) for e in again["entries_removed"]] == [(f"/{FOLDER}/ritual", beta)]
+    assert read_back(test_db, FOLDER)["playlists"]["pool"] == [beta]
+    with TestClient(create_app(svc)) as c:
+        assert c.post("/api/rekordbox/export", json={"rows": refs, "ids": ["t200"], "dry_run": True}).status_code == 400
+        assert c.post("/api/rekordbox/export", json={"rows": [], "dry_run": True}).status_code == 400
+        job = c.post("/api/rekordbox/export", json={"rows": [f"{bid}:0"], "dry_run": True}).json()
+        result = svc.jobs.wait(job["job_id"], timeout=60)
+        assert result.status == "done" and not result.result["changed"]
