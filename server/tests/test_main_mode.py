@@ -94,17 +94,13 @@ class _raw:
     """Open a DB in place for fixture setup only (bypasses the guard on purpose)."""
 
     def __init__(self, path):
-        from pyrekordbox.masterdb import MasterDatabase
-
-        rbguard._quiet_pyrekordbox()
-        self.db = MasterDatabase(path=path, db_dir=Path(path).parent)
+        self.db = rbguard.open_master_database(path)
 
     def __enter__(self):
         return self.db
 
     def __exit__(self, *exc):
-        self.db.close()
-        self.db.engine.dispose()
+        rbguard.close_database(self.db)
 
 
 @pytest.fixture

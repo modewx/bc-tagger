@@ -122,9 +122,7 @@ def _add_playlist(db_path, name):
 
 
 def _close(db):
-    db.rollback()
-    db.close()
-    db.engine.dispose()
+    rbguard.close_database(db)
 
 
 def _playlist_names(db_path):

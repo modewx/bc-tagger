@@ -683,16 +683,17 @@ class Service:
 
     def rekordbox_playlists(self, target: str | None = None) -> list[dict[str, Any]]:
         from .playlists import Tree
+        from .rbguard import close_database
 
         db = self.read_target(target).open_read()
         try:
             return Tree(db).listing()
         finally:
-            db.close()
-            db.engine.dispose()
+            close_database(db)
 
     def resolve_playlist_names(self, names: list[str], target: str | None = None) -> list[dict[str, Any]]:
         from .playlists import PlaylistError, Tree, key_of, name_to_parts
+        from .rbguard import close_database
 
         folder = self.settings.get("playlist_folder")
         db = self.read_target(target).open_read()
@@ -708,8 +709,7 @@ class Service:
                 out.append({"name": name, **tree.resolve(key)})
             return out
         finally:
-            db.close()
-            db.engine.dispose()
+            close_database(db)
 
     def write_xml(self, ids=None, latest=None, scan: str | None = None) -> dict[str, Any]:
         from .rbexport import build_selection

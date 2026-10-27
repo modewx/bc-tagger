@@ -27,6 +27,7 @@ Main mode (Phase 2: the user's own collection, switched on in settings only):
 
 from __future__ import annotations
 
+import gc
 import json
 import logging
 import shutil
@@ -383,42 +384,97 @@ def _quiet_pyrekordbox() -> None:
         pl.setLevel(logging.ERROR)
 
 
+# The cyclic garbage collector must not run while a SQLCipher database is in use: pyrekordbox/SQLAlchemy leave
+# reference cycles behind, and when an automatic collection (triggered by any allocation, in any thread) freed
+# them in the middle of a SQLCipher query, the process crashed (segfault / bus error, seen in the test suite).
+# So automatic collection is paused while any rekordbox database is open, and the last close collects at a
+# point where none is in use. Every MasterDatabase is opened by ``open_master_database`` and closed by
+# ``close_database``.
+_open_lock = threading.RLock()
+_open_count = 0
+_gc_was_enabled = True
+
+
+def _db_opened() -> None:
+    global _open_count, _gc_was_enabled
+    with _open_lock:
+        if _open_count == 0:
+            _gc_was_enabled = gc.isenabled()
+            gc.disable()
+        _open_count += 1
+
+
+def _db_closed() -> None:
+    global _open_count
+    with _open_lock:
+        _open_count -= 1
+        if _open_count == 0:
+            gc.collect()  # nothing SQLCipher is in use now (the lock keeps new opens waiting)
+            if _gc_was_enabled:
+                gc.enable()
+
+
+def open_databases() -> int:
+    """How many rekordbox databases are open right now (tests check it drops back to 0)."""
+    return _open_count
+
+
+def open_master_database(path: str | Path, db_dir: str | Path | None = None):
+    """``MasterDatabase(path)`` with the collector paused until ``close_database``; no guard (callers check)."""
+    from pyrekordbox.masterdb import MasterDatabase
+
+    _quiet_pyrekordbox()
+    _db_opened()
+    try:
+        return MasterDatabase(path=path, db_dir=db_dir or Path(path).parent)
+    except BaseException:
+        _db_closed()
+        raise
+
+
+def close_database(db: Any) -> None:
+    """Roll back whatever wasn't committed, close the session, dispose the engine's pool, then let the
+    collector run again (see ``_db_opened``)."""
+    try:
+        if db.session is not None:
+            db.rollback()
+            db.close()
+    finally:
+        try:
+            db.engine.dispose()
+        finally:
+            _db_closed()
+
+
 def open_database(db_path: str | Path, *, for_write: bool, mode: str = "test", **guard_kwargs: Any):
-    """Open a ``MasterDatabase`` by explicit path (never auto-detected).
+    """Open a ``MasterDatabase`` by explicit path (never auto-detected); close it with ``close_database``.
 
     ``mode="main"`` is only for writing the user's collection (guarded); read it via ``snapshot``.
     """
-    from pyrekordbox.masterdb import MasterDatabase
-
     _quiet_pyrekordbox()
     target = resolve(db_path)
     if mode == "main":
         if not for_write:
             raise WriteRefused("read the main collection through snapshot(), not in place")
         require_write_main(target, **guard_kwargs)
-        return MasterDatabase(path=target, db_dir=target.parent)
+        return open_master_database(target)
     if is_within(target, MAIN_LIBRARY_DIR):
         raise WriteRefused(f"refusing to open the main rekordbox library ({target})")
     if for_write:
         require_write(target, **guard_kwargs)
     elif not target.is_file():
         raise FileNotFoundError(target)
-    return MasterDatabase(path=target, db_dir=target.parent)
+    return open_master_database(target)
 
 
 @contextmanager
 def database(db_path: str | Path, *, for_write: bool, mode: str = "test", **guard_kwargs: Any) -> Iterator[Any]:
-    """``open_database`` that also closes the session and disposes the engine's pool."""
+    """``open_database`` that also closes it (``close_database``)."""
     db = open_database(db_path, for_write=for_write, mode=mode, **guard_kwargs)
     try:
         yield db
     finally:
-        try:
-            if db.session is not None:
-                db.rollback()
-                db.close()
-        finally:
-            db.engine.dispose()
+        close_database(db)
 
 
 def guarded_commit(db: Any, db_path: str | Path, mode: str = "test", **guard_kwargs: Any) -> GuardDecision:
