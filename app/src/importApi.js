@@ -200,7 +200,9 @@ export const updateRow = (id, n, patch) =>
   apiJson(`/api/import/${enc(id)}/rows/${enc(n)}`, { method: "PUT", body: patch }).then((r) => (r ? normRow(r, n) : r));
 export const applyTagMap = (id, map, unmapped) =>
   apiJson(`/api/import/${enc(id)}/tags`, { method: "POST", body: { map, unmapped } });
-export const commitBatch = (id) => apiJson(`/api/import/${enc(id)}/commit`, { method: "POST", body: {} });
+// collectionId: the collection the rows go into (null: the server's default, "Collection").
+export const commitBatch = (id, collectionId = null) =>
+  apiJson(`/api/import/${enc(id)}/commit`, { method: "POST", body: collectionId != null ? { collection_id: collectionId } : {} });
 // Locate rows again after files were added: "missing" | "all" | [n] (→ {job_id};
 // the job's result has newly_located, still_missing). Hand-set files stay.
 export const relocateRows = (id, rows = "missing") =>

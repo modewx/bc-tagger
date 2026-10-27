@@ -241,3 +241,15 @@ button.chip:hover { filter: brightness(0.95); border-color: #bbb; }
 .preview-errors summary { cursor: pointer; color: #b42318; }
 .preview-errors ul { margin: 4px 0; padding-left: 18px; font-size: 12px; }
 .preview-plan p { margin: 0 0 8px; }
+/* Collections (Phase 8, collections.js): the bar at the top, Import to Collection, the chips in All, the import's
+   "into" picker. */
+.collections-bar { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin: 0 0 8px; }
+.collections-bar[hidden] { display: none; }
+.collections-label { font-weight: 600; display: flex; align-items: center; gap: 6px; }
+.collection-select { font: inherit; font-size: 14px; padding: 4px 6px; max-width: 320px; }
+.toolbar-select { font: inherit; font-size: 13px; padding: 4px 6px; max-width: 240px; }
+.collections-cell .collection-chip { background: #eef3fb; border: 1px solid #c9d7ef; color: #2c4f86; margin: 1px 3px 1px 0; }
+.import-collection-label { font-size: 13px; margin: 0 6px 0 -2px; white-space: nowrap; }
+.import-collection-label[hidden] { display: none; }
+.import-collection { font: inherit; font-size: 13px; padding: 3px 4px; }
+.collection-name { width: 100%; box-sizing: border-box; font: inherit; padding: 6px 8px; }

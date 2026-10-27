@@ -85,7 +85,8 @@ const SHELL_HTML = `
  * @param {boolean}  [opts.baseToolbar]     false hides the Bandcamp tools (refresh players, ...)
  * @param {function} [opts.rowClass]        (item, key) -> extra class names for the row
  * @param {function} [opts.titleUrl]        (item) -> link for the title, instead of its Bandcamp page
- * @param {string[]} [opts.hideColumns]     ids of columns hidden until shown with the Columns chooser (e.g. "date")
+ * @param {string[]|function} [opts.hideColumns] ids of columns hidden until shown with the Columns chooser (e.g. "date"),
+ *                                          or a function giving them now (then page.refreshColumns())
  * @param {(item) => string|null} [opts.groupBy] a header row (e.g. a folder) above each group, in "#" order
  * @param {(keys) => void} [opts.onItemsUpdated] items changed in place (no re-render of the view)
  * @param {() => string[]} [opts.newTags] tags offered beyond the vocabulary, highlighted (an import's new ones)
@@ -936,7 +937,9 @@ export function createCollectionPage(opts) {
     allColumns.splice(at === -1 ? allColumns.length : at + 1, 0, col);
   });
   const columnsKey = opts.columnsKey || `${colWidthKey}_shown`;
-  const hiddenByDefault = (c) => !!c.hidden || (opts.hideColumns || []).includes(c.id);
+  // opts.hideColumns: ids, or a function giving them now (page.refreshColumns() after it changes).
+  const hiddenByDefault = (c) =>
+    !!c.hidden || (typeof opts.hideColumns === "function" ? opts.hideColumns() : opts.hideColumns || []).includes(c.id);
   let shownChoice = {}; // column id -> true / false, where the user chose
   try {
     shownChoice = JSON.parse(localStorage.getItem(columnsKey) || "{}") || {};
@@ -1697,6 +1700,11 @@ export function createCollectionPage(opts) {
       renderCollectionTable(currentView);
     },
     getSort: () => ({ key: sortColumn, dir: sortDir }),
+    // opts.hideColumns changed: the columns shown again (a choice made in Columns ▾ stays).
+    refreshColumns() {
+      columns = allColumns.filter(isShown);
+      renderCollectionTable(currentView);
+    },
     getItems: () => allItems,
     statusEl,
   };

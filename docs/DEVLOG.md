@@ -257,6 +257,21 @@ npm run test:e2e                         # Playwright e2e: own profile, server :
   that has started swaps its source at the same moment and keeps playing (`swapSource`), the others when they
   next load. "▶ preview / original / Bandcamp stream" says what the track playing is heard from (the toggle and
   `local.best.preview`). Play/pause are SVG icons (the text glyphs rendered as a square in the docked player).
+- **Phase 8: collections, the UI** (user; contract in LOCAL_COLLECTION_PLAN.md, A building the server): `collections.js`:
+  the bar at the top (All first, then the collections by `pos`, with counts; kept in localStorage
+  `bc_app_collection`, `?collection=` wins and follows a switch), Create Collection / Rename (a name dialog: empty or
+  taken can't confirm) / Delete (danger confirm; disabled for 0 and All). The data source reads
+  `/api/items?collection=<id>` (plain `/api/items` for All, so routes and older servers see what they did). On the
+  selection: Import to Collection (a select: the others; POST …/items → "N added, M already there") and Remove from
+  collection (confirm; DELETE …/items; not in All). A Collections chip column, hidden by default outside All
+  (`hideColumns` can be a function; `page.refreshColumns()`). The import page: "Import selected … into
+  [collection]" (last used, else 0), the commit sends `collection_id`, the hand-over carries it, and the collection
+  page opens there; Select last import follows `last.collection_id` when the server gives it. SSE `collections`
+  refreshes the bar, `item` the counts. A server without `/api/collections`: nothing of it shows, and the commit
+  sends no `collection_id`. All's count is the items shown in All (health's `items` counts the mirror only). The
+  start-up selection prune runs only in All. e2e against a stand-in for the contract (routes; the items from a
+  snapshot): the bar, create/rename/delete, Import to Collection twice, Remove, kept and `?collection=`, the chips;
+  the import picker, its commit body and the page opening in the collection. Alone and in the full suite.
 - **Test 95 (Build previews on the e2e server) failed on other machines** (coordinator: "Of all 950 items"): the test
   wrote the kept selection to localStorage right after the page's load event, then reloaded; the app's start-up
   (still running) saved the selection it had read, empty, over it. Not a button bug (it reads the selection when

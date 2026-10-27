@@ -10,6 +10,8 @@ import { buildNav } from "./nav";
 import { appColumns, downloadable, isLocated, localPlayUrl, localDuration, localUnavailable } from "./columns";
 import { originalOf, previewToggle } from "./previews";
 import { buildPreviews, followPreviews, followRunning } from "./previewBuild";
+import { ALL, chosenCollection, keepCollection, createCollectionsBar, listCollections } from "./collections";
+import { confirmDialog } from "./dialog";
 import { downloadFlow, fullReleasesToggle } from "./downloads";
 import { startDevReload } from "./devReload";
 import { createStatusFilter, createSourceFilter, sourceOf, playableItem } from "./statusFilter";
@@ -30,6 +32,11 @@ const sourceFilter = createSourceFilter();
 const fullReleases = fullReleasesToggle();
 
 let page = null;
+
+// Collections (Phase 8): the one shown (All, or a collection's id), its bar, and whether this server has them.
+let shownCollection = chosenCollection();
+let collectionsBar = null;
+let hasCollections = false;
 
 // Toolbar buttons that use the file index wait while the drive is scanned.
 const SCAN_BLOCKED = ["locateShown", "exportShown"];
@@ -158,6 +165,116 @@ function updateShownButtons() {
     clear.textContent = `Clear selection (${sel})`;
   }
   syncSelectAll();
+  updateCollectionActions();
+}
+
+// Another collection shown: its items (the filters, sort and the track playing stay).
+async function pickCollection(v) {
+  if (v === shownCollection) return;
+  shownCollection = v;
+  keepCollection(v);
+  ds.collection = v;
+  if (collectionsBar) collectionsBar.setCurrent(v);
+  page.refreshColumns(); // the Collections column: shown in All
+  updateCollectionActions();
+  await page.reload();
+  noteAllCount();
+  updateShownButtons();
+}
+
+function noteAllCount() {
+  if (collectionsBar && shownCollection === ALL) collectionsBar.setAllCount(Object.keys(page.getItems()).length);
+}
+
+// On the selection: Import to Collection (copies the tracks into another collection; in All, any) and Remove from
+// collection (not in All).
+const importTo = document.createElement("select");
+importTo.id = "importToCollection";
+importTo.className = "toolbar-select";
+importTo.title = "Copy the selected tracks into another collection (they stay here too)";
+importTo.hidden = true;
+importTo.addEventListener("change", async () => {
+  const to = Number(importTo.value);
+  importTo.value = "";
+  const ids = selectedIds();
+  if (!ids.length || !Number.isInteger(to)) return;
+  const name = collectionsBar.nameOf(to);
+  page.statusEl.textContent = `Import to Collection “${name}”: copying ${ids.length}…`;
+  try {
+    const r = await apiJson(`/api/collections/${to}/items`, { method: "POST", body: { ids } });
+    page.statusEl.textContent =
+      `Import to Collection “${name}”: ${r.added ?? 0} added` + (r.already ? `, ${r.already} already there` : "") + ".";
+  } catch (e) {
+    page.statusEl.textContent = `Import to Collection “${name}”: ${e.message}`;
+  }
+  collectionsBar.refresh();
+  if (shownCollection === ALL) await page.reload(); // their Collections chips
+});
+
+async function removeFromCollection(statusEl, button) {
+  const ids = selectedIds();
+  const id = shownCollection;
+  if (!ids.length || id === ALL) return;
+  const name = collectionsBar.nameOf(id);
+  const ok = await confirmDialog({
+    id: "removeFromCollectionConfirm",
+    title: `Remove ${ids.length} track${ids.length > 1 ? "s" : ""} from “${name}”?`,
+    body:
+      "Only from this collection: they stay in All and in any other collection they're in, with their tags and files.",
+    confirmLabel: "Remove from collection",
+  });
+  if (!ok) return;
+  button.disabled = true;
+  try {
+    const r = await apiJson(`/api/collections/${id}/items`, { method: "DELETE", body: { ids } });
+    statusEl.textContent = `Removed ${r.removed ?? ids.length} from “${name}”.`;
+  } catch (e) {
+    statusEl.textContent = `Remove from collection: ${e.message}`;
+  }
+  button.disabled = false;
+  await page.reload();
+  collectionsBar.refresh();
+  updateShownButtons();
+}
+
+function updateCollectionActions() {
+  const remove = document.getElementById("removeFromCollection");
+  if (!page) return;
+  const sel = selectedIds().length;
+  const targets = hasCollections ? collectionsBar.list().filter((c) => c.id !== shownCollection) : [];
+  importTo.hidden = !hasCollections;
+  importTo.innerHTML = "";
+  importTo.appendChild(new Option(sel ? `Import ${sel} to Collection…` : "Import to Collection…", ""));
+  targets.forEach((c) => importTo.appendChild(new Option(c.name, String(c.id))));
+  importTo.disabled = !sel || !targets.length;
+  importTo.title = sel ? "Copy the selected tracks into another collection (they stay here too)" : "Select tracks first";
+  if (remove) {
+    remove.hidden = !hasCollections || shownCollection === ALL;
+    remove.disabled = !sel;
+    remove.title = sel ? `Remove the ${sel} selected from this collection (they stay in All)` : "Select tracks first";
+  }
+}
+
+// In All, which collections each track is in (the column chooser has it; shown in All).
+function collectionsColumn() {
+  const names = (item) => (item.collections || []).map((id) => (collectionsBar ? collectionsBar.nameOf(id) : String(id)));
+  return {
+    id: "collections",
+    label: "Collections",
+    title: "The collections each track is in",
+    after: "tags",
+    sortKey: "collections",
+    compare: (a, b) => names(a).join(", ").localeCompare(names(b).join(", ")),
+    render(cell, key, item) {
+      cell.classList.add("collections-cell", "no-row-play");
+      names(item).forEach((n) => {
+        const chip = document.createElement("span");
+        chip.className = "chip collection-chip";
+        chip.textContent = n;
+        cell.appendChild(chip);
+      });
+    },
+  };
 }
 
 // After an import (the preview hands over what it imported and merged): those
@@ -265,6 +382,15 @@ async function refreshHealth() {
   bridge.connect(1000).then(() => nav.setExtension(bridge.info));
   bridge.on("connect", (info) => nav.setExtension(info));
 
+  // An import's hand-over opens in the collection it went to.
+  const imported = takeImportedSelection();
+  if (imported && imported.collection != null) {
+    shownCollection = imported.collection === ALL ? ALL : Number(imported.collection);
+    keepCollection(shownCollection);
+  }
+  ds.collection = shownCollection;
+  const listing = listCollections(); // alongside the items
+
   page = createCollectionPage({
     dataSource: ds,
     topBarStart: nav.el,
@@ -272,6 +398,7 @@ async function refreshHealth() {
     colWidthKey: "bc_app_col_widths_v2",
     extraColumns: [
       selectColumn(),
+      collectionsColumn(),
       ...appColumns({
         jobs,
         events,
@@ -307,7 +434,13 @@ async function refreshHealth() {
           button.disabled = false;
         },
       },
-      selectLastImportButton((ids) => selectOnly(ids)),
+      selectLastImportButton(async (ids, last) => {
+        // Opened in the collection the import went to.
+        if (hasCollections && last && Number.isInteger(last.collection_id) && last.collection_id !== shownCollection) {
+          await pickCollection(last.collection_id);
+        }
+        return selectOnly(ids);
+      }),
       {
         id: "clearSelection",
         label: "Clear selection",
@@ -318,6 +451,12 @@ async function refreshHealth() {
           document.querySelectorAll("#collectionTable .row-check").forEach((b) => (b.checked = false));
           updateShownButtons();
         },
+      },
+      {
+        id: "removeFromCollection",
+        label: "Remove from collection",
+        title: "Remove the selected tracks from this collection (they stay in All)",
+        run: removeFromCollection,
       },
       {
         id: "rescanDrive",
@@ -350,6 +489,7 @@ async function refreshHealth() {
     bandcampFallback: (item) => sourceOf(item) !== "other", // other sources: say why there's nothing to play
     localDuration,
     playable: playableItem,
+    hideColumns: () => (hasCollections && shownCollection === ALL ? [] : ["collections"]), // shown in All
     autoFetchArt: false, // no Bandcamp fetches on scroll: stored art only (Tools → Refresh thumbnails)
     filterItem: (item) => sourceFilter.filterItem(item) && statusFilter.filterItem(item),
     clearExtraFilters: () => {
@@ -367,6 +507,12 @@ async function refreshHealth() {
     },
     onItemsUpdated: () => updateShownButtons(), // e.g. a selected item got located
   });
+
+  // Collections: the bar at the top (once the server says it has them), Import to Collection by Remove.
+  collectionsBar = createCollectionsBar({ current: shownCollection, onPick: pickCollection, statusEl: () => page.statusEl });
+  collectionsBar.el.hidden = true;
+  document.getElementById("topControls").prepend(collectionsBar.el);
+  document.getElementById("removeFromCollection").before(importTo);
 
   // File index status next to "Rescan drive".
   indexStatus = createIndexStatus({ events, jobs, onScanning: updateScanBlocked });
@@ -395,10 +541,17 @@ async function refreshHealth() {
   statusFilter.mount(document.getElementById("searchBar"), scroller, () => page.refilter());
 
   events.on("tags", () => refreshHealth());
+  let counts = null;
+  events.on("collections", () => collectionsBar.refresh()); // made, renamed, deleted, reordered
+  events.on("item", () => {
+    clearTimeout(counts); // memberships: the counts
+    counts = setTimeout(() => collectionsBar.refresh(), 1000);
+  });
   followPreviews(() => page, events); // a preview made or dropped: that row's next player
   // Back from a hidden tab (its stream was closed): catch up.
   events.on("resume", () => {
-    page.reload();
+    page.reload().then(noteAllCount);
+    collectionsBar.refresh();
     indexStatus.refresh();
     refreshHealth();
   });
@@ -414,15 +567,25 @@ async function refreshHealth() {
   events.start(); // after the items: the stream holds a connection for good
   followRunning(jobs, page.statusEl, document.getElementById("buildPreviews")); // a build started before this page
 
-  // The kept selection: only items still in the collection. (Saved only if that changed it: what another tab
-  // selected meanwhile stays.)
-  const items = page.getItems();
-  const gone = [...selected].filter((k) => !(k in items));
-  gone.forEach((k) => selected.delete(k));
-  if (gone.length) saveSelection();
+  hasCollections = (await collectionsBar.refresh(await listing)) !== null;
+  collectionsBar.el.hidden = !hasCollections;
+  if (!hasCollections && shownCollection !== ALL) {
+    shownCollection = ALL; // a server without collections: everything, as before
+    ds.collection = ALL;
+  }
+  page.refreshColumns();
+  noteAllCount();
+
+  // The kept selection: only items still in the collection (in All: one shown alone has fewer). Saved only if
+  // that changed it: what another tab selected meanwhile stays.
+  if (shownCollection === ALL) {
+    const items = page.getItems();
+    const gone = [...selected].filter((k) => !(k in items));
+    gone.forEach((k) => selected.delete(k));
+    if (gone.length) saveSelection();
+  }
   updateShownButtons();
 
-  const imported = takeImportedSelection();
   if (imported) {
     // New Bandcamp items join as the extension adds them: they're selected as they appear.
     selectOnly(imported.ids);

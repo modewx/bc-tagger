@@ -4,7 +4,8 @@
 
 import { apiJson } from "../../shared/datasource/HttpDataSource";
 
-// selectOnly(ids) replaces the selection and returns how many are in the collection.
+// selectOnly(ids, last) replaces the selection and returns (or resolves to) how many are shown; `last` is the
+// import (its collection_id: where it went).
 export function selectLastImportButton(selectOnly) {
   return {
     id: "selectLastImport",
@@ -17,7 +18,7 @@ export function selectLastImportButton(selectOnly) {
         if (!last || !last.batch_id) {
           statusEl.textContent = "Select last import: nothing imported yet.";
         } else {
-          const n = selectOnly(last.item_ids || []);
+          const n = await selectOnly(last.item_ids || [], last);
           const when = last.committed_at ? ` on ${new Date(last.committed_at).toLocaleString()}` : "";
           statusEl.textContent = `Selected the ${n} items of the last import (${last.name || last.batch_id}${when}), newest Modified first.`;
         }

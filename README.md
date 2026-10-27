@@ -33,6 +33,15 @@ reachable, edits are queued on the server and applied by the extension on its ne
     - **Tools ▾**: maintenance (Refresh player files, Refresh thumbnails, Fix artists, Fix album IDs, Refresh
       ownership); **Columns ▾**.
   - The selection is kept in this browser across pages and reloads.
+  - **Collections** (Phase 8; shown once the server has them): the dropdown at the top lists **All** (every track,
+    once) and then each collection, with its count; the choice is kept in this browser, and `?collection=<id|all>`
+    opens one. **Create Collection** (a new, empty one), **Rename**, **Delete** (asks first; the tracks stay in All
+    and in other collections, and no file, preview or rekordbox entry is touched; "Collection" can't be deleted).
+    On the selection: **Import to Collection…** copies the tracks into another collection (and says how many were
+    already there), **Remove from collection** (asks first; not in All). In All, a **Collections** column of chips
+    (Columns ▾). Tags, files and everything else stay per track. An import's tracks go into the collection picked
+    next to **Import selected** (the last used, else "Collection"; an open batch chooses then), and the collection
+    page then opens in it, as does **Select last import**.
   - Rows (here and in the import preview): a click highlights a row, **Shift**-click a range, **Cmd**-click one more.
     Ticking a highlighted row ticks all highlighted rows (unticking unticks them all), and Shift on a checkbox ticks a
     range. Only the **player column** plays: a click anywhere in it, empty space too, plays or pauses that row.
@@ -160,7 +169,7 @@ Runs the extension, server and local app together in a Playwright Chromium with 
   real server (mapping, linking, browser lookups, downloads, re-locate, browse), settings, and rekordbox dry runs
   and a sandbox write.
 
-A full run (95 tests) takes about 3 minutes (2026-10-26: 110–147 s). For a quick check, run a subset by
+A full run (97 tests) takes about 3 minutes (2026-10-26: 110–147 s). For a quick check, run a subset by
 name. Include `Import \(replace\)`, which loads the test collection the others use:
 
 ```bash

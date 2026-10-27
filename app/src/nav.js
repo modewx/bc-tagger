@@ -37,7 +37,7 @@ export function buildNav(active) {
   nav.appendChild(brand);
   const links = {};
   [
-    ["collection", "/", "Collection"],
+    ["collection", "/", "Collections"],
     ["settings", "/settings/", "Settings"],
     ["import", "/settings/#import", "Import"],
   ].forEach(([id, href, label]) => {

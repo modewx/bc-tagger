@@ -48,6 +48,7 @@ export class HttpDataSource {
     this.events = events;
     this.pageFetchUnavailableReason =
       "Bandcamp fetches need the Bc Tagger extension (not connected to this page).";
+    this.collection = "all"; // which items getItems() reads: "all", or a collection's id (local app, Phase 8)
   }
 
   async init() {}
@@ -58,8 +59,9 @@ export class HttpDataSource {
   }
 
   async getItems() {
+    const one = this.collection != null && this.collection !== "all";
     const [data, pending] = await Promise.all([
-      apiJson("/api/items"),
+      apiJson(one ? `/api/items?collection=${encodeURIComponent(this.collection)}` : "/api/items"),
       apiJson("/api/tag-edits/pending").catch(() => []),
     ]);
     // Items with a queued edit the extension hasn't applied yet (the server

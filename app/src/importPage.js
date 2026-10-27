@@ -24,6 +24,7 @@ import { tickTargets } from "./rowTicks";
 import { runExport } from "./exportFlow";
 import { createRowSaves } from "./rowSaves";
 import { followPreviews } from "./previewBuild";
+import { createImportCollectionPicker } from "./collections";
 
 const batchId = new URLSearchParams(location.search).get("batch");
 document.body.classList.add("import-page");
@@ -67,6 +68,8 @@ function showSaveState(s) {
   }
 }
 const saves = batchId ? createRowSaves(batchId, showSaveState) : null;
+// Which collection Import selected puts the rows in (chosen now, at the commit; Phase 8).
+const intoCollection = createImportCollectionPicker();
 
 function el(tag, cls, text) {
   const e = document.createElement(tag);
@@ -1031,7 +1034,10 @@ async function transferToRekordbox(statusEl, button) {
 
 async function importSelected(statusEl, button) {
   const n = batch.rows.filter((r) => r.checked).length;
-  if (!confirm(`Import ${n} selected rows? Rows found on Bandcamp go to the tagger (the extension adds them), the rest to Other. Duplicates merge tags.`)) return;
+  await intoCollection.ready;
+  const into = intoCollection.value();
+  const where = into != null ? ` into “${intoCollection.name()}”` : "";
+  if (!confirm(`Import ${n} selected rows${where}? Rows found on Bandcamp go to the tagger (the extension adds them), the rest to Other. Duplicates merge tags.`)) return;
   button.disabled = true;
   // The server imports the rows it has ticked: the last ticks and tags first.
   statusEl.textContent = "Saving the last edits…";
@@ -1044,7 +1050,8 @@ async function importSelected(statusEl, button) {
   }
   statusEl.textContent = "Importing…";
   try {
-    const res = await commitBatch(batchId);
+    const res = await commitBatch(batchId, into);
+    intoCollection.used();
     rememberImport(null);
     const job = res && res.job_id ? await jobs.watch(res.job_id, (j) => (statusEl.textContent = `Importing: ${progressText(j)}`)) : null;
     if (job && job.status === "error") {
@@ -1074,7 +1081,10 @@ async function importSelected(statusEl, button) {
     // selected, newest Modified first, ready for "Export Selected to RB".
     if (Array.isArray(r.selected)) {
       try {
-        localStorage.setItem("bc_after_import", JSON.stringify({ ids: r.selected, at: Date.now(), batch: batchId, summary: statusEl.textContent, log }));
+        localStorage.setItem(
+          "bc_after_import",
+          JSON.stringify({ ids: r.selected, at: Date.now(), batch: batchId, summary: statusEl.textContent, log, collection: into })
+        );
       } catch (e) {
         /* no handoff: the link below still opens the collection */
       }
@@ -1241,7 +1251,7 @@ async function discard(statusEl) {
   const transferHint = el("span", "export-hint");
   transferHint.id = "transferHint";
   document.getElementById("transferToRekordbox").after(transferHint);
-  document.getElementById("importSelected").after(saveState);
+  document.getElementById("importSelected").after(intoCollection.el, saveState);
   // "Locate again": missing rows by default, every row on request.
   const allRows = document.createElement("label");
   allRows.className = "locate-all";
