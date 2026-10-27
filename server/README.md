@@ -330,7 +330,10 @@ Rows below the threshold keep up to three candidates to pick (`PUT …/rows/<n> 
 search misses can be linked from the extension to the Bandcamp page the user has open
 (`POST /api/import/<id>/rows/<n>/link {item}`; `POST /api/import/link-candidates {item}` says which
 rows fit that page). On commit, Bandcamp rows go to the extension's pending-adds queue and the rest
-to the server's `other` collection with Bandcamp/Discogs/YouTube links. The commit result lists
+to the server's `other` collection with Bandcamp/Discogs/YouTube links. Each committed row that is located gives
+its item that location right away (new items always; a merged item only if it wasn't located already, or the row
+confirms it), with SSE `item` events, so the collection shows it located without a Locate (`items_located`).
+The commit result lists
 `item_ids {added, merged, other_added, other_merged}`, `selected` and the `modified_at` it stamped, so the
 collection page can select exactly what the import added or merged and sort it to the top.
 

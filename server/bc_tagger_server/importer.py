@@ -1318,6 +1318,7 @@ def _commit(svc, batch: dict, earlier: set[int] = frozenset()) -> dict:
     if batch.get("kind") == "files":  # from now on the batch shows what was applied
         batch["location_updates"] = result["location_updates"]
     used_tags: list[str] = []
+    located_now: list[str] = []  # items this commit located (SSE "item" once the commit is done)
     for row in rows:
         if row.get("checked"):
             used_tags += row["tags"]  # also rows done before a restart: their new tags still count
@@ -1381,12 +1382,24 @@ def _commit(svc, batch: dict, earlier: set[int] = frozenset()) -> dict:
                 c.execute("DELETE FROM match_overrides WHERE item_id = ? AND decision = 'confirm'", (item_id,))
                 c.execute("INSERT INTO match_overrides(item_id, path, decision, created_at) VALUES(?, ?, 'confirm', ?)",
                           (item_id, located["best"]["path"], now_iso()))
+        # Where the row's file is, for the item (the collection shows it located at once): new items always;
+        # a merge only when its item wasn't located (or located by hand) already, unless this row confirmed it.
+        if located.get("status") == "located" and located.get("best") and (
+                row["committed"] in ("pending_add", "other") or confirm or not _location_state(store, item_id)):
+            from .matcher import save_result
+
+            save_result(store, item_id, {"status": "located", "best": located["best"],
+                                         "candidates": located.get("candidates") or [located["best"]]})
+            located_now.append(item_id)
         _save_rows(store, batch_id, [row])  # done rows are skipped if a restart makes the user import again
     new_tags = [t for t in dict.fromkeys(used_tags) if t not in vocab]
     if new_tags:
         svc.sync_tags(vocab + new_tags)
         queue_add(store, tags=new_tags)
     result["new_tags"] = new_tags
+    for item_id in dict.fromkeys(located_now):
+        svc.jobs.bus.publish("item", {"id": item_id})
+    result["items_located"] = len(set(located_now))
     # what the collection page selects afterwards (sorted by modified_at, newest first)
     result["item_ids"] = ids
     result["selected"] = list(dict.fromkeys(ids["added"] + ids["merged"] + ids["other_added"] + ids["other_merged"]))
