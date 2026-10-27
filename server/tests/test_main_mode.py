@@ -418,3 +418,26 @@ def test_main_chosen_with_writes_locked_reads_but_never_writes(svc, main_db):
     assert dry["blockers"] == [] and dry["can_confirm"]
     done = svc.export(ids=["t200"], confirm_token=dry["confirm_token"])
     assert done["changed"] and done["backup"]
+
+
+def test_playlists_of_the_library_picked_before_saving(svc, main_db, test_db):
+    """Settings reloads the playlist tree when the library radio changes, before Save: ``?target=`` reads that
+    library (main through a snapshot copy) whatever the saved target is."""
+    svc.settings.update({"rekordbox_db_path": str(test_db)})
+    before = _files(main_db.parent)
+    with TestClient(create_app(svc)) as c:
+        main_tree = {r["path"] for r in c.get("/api/rekordbox/playlists").json()}  # saved: main
+        assert "/DJ/Status/Must" in main_tree
+        test_tree = {r["path"] for r in c.get("/api/rekordbox/playlists", params={"target": "test"}).json()}
+        assert "/DJ/Status/Must" not in test_tree and test_tree != main_tree
+        svc.settings.update({"rekordbox_target": "test", "allow_main_writes": False})
+        assert {r["path"] for r in c.get("/api/rekordbox/playlists").json()} == test_tree
+        assert {r["path"] for r in c.get("/api/rekordbox/playlists", params={"target": "main"}).json()} == main_tree
+        r = c.post("/api/rekordbox/resolve", params={"target": "main"}, json={"names": ["/DJ/Status/Must"]}).json()
+        assert r[0]["status"] == "exists"
+        r = c.post("/api/rekordbox/resolve", json={"names": ["/DJ/Status/Must"], "target": "main"}).json()
+        assert r[0]["status"] == "exists"
+        assert c.post("/api/rekordbox/resolve", json={"names": ["/DJ/Status/Must"]}).json()[0]["status"] == "create"
+        assert c.get("/api/rekordbox/playlists", params={"target": "other"}).status_code == 422
+    assert _files(main_db.parent) == before  # main was only read, through its snapshot
+    assert svc.settings.get("rekordbox_target") == "test"  # nothing was saved

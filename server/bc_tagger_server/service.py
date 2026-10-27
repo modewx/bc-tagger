@@ -79,6 +79,21 @@ class Service:
             return Target("main", main, {**guard, **(guard_overrides or {})})
         return Target("test", str(Path(s["rekordbox_db_path"]).expanduser()), dict(guard_overrides or {}))
 
+    def read_target(self, kind: str | None = None):
+        """The library to *read* (playlist tree, name marks): ``kind`` "test"/"main" whatever the saved target
+        is (Settings shows the one picked before Save), else the saved one. Never used to write: a main read
+        opens a snapshot copy."""
+        from .rbguard import Target
+
+        if kind is None or kind == self.settings.get("rekordbox_target"):
+            return self.target()
+        if kind == "main":
+            return Target("main", str(Path(self.settings.get("rekordbox_main_db_path")).expanduser()),
+                          {"allow": False, "configured": str(Path(self.settings.get("rekordbox_main_db_path")).expanduser())})
+        if kind == "test":
+            return Target("test", str(Path(self.settings.get("rekordbox_db_path")).expanduser()), {})
+        raise ValueError(f"target must be 'test' or 'main', not {kind!r}")
+
     def db_path(self) -> str:
         return self.target().db_path
 
@@ -666,21 +681,21 @@ class Service:
                                     confirm_token=confirm_token, scan=scan, rows=rows),
         )
 
-    def rekordbox_playlists(self) -> list[dict[str, Any]]:
+    def rekordbox_playlists(self, target: str | None = None) -> list[dict[str, Any]]:
         from .playlists import Tree
 
-        db = self.target().open_read()
+        db = self.read_target(target).open_read()
         try:
             return Tree(db).listing()
         finally:
             db.close()
             db.engine.dispose()
 
-    def resolve_playlist_names(self, names: list[str]) -> list[dict[str, Any]]:
+    def resolve_playlist_names(self, names: list[str], target: str | None = None) -> list[dict[str, Any]]:
         from .playlists import PlaylistError, Tree, key_of, name_to_parts
 
         folder = self.settings.get("playlist_folder")
-        db = self.target().open_read()
+        db = self.read_target(target).open_read()
         try:
             tree = Tree(db)
             out = []
