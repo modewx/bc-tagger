@@ -95,8 +95,9 @@ npm run test:e2e                         # Playwright e2e: own profile, server :
   - The Artist cell has a copy button at its right edge: "Artist Title".
   - **"#" is explicit** (user request): each item has `order`, one sequence across Bandcamp (numbered by the
     extension) and Other (numbered by the server at import). Before this, "#" was Chrome's storage order (item IDs
-    sorted) on the extension page and date added in the app. Items without one are numbered in storage order
-    when the extension updates. A new tag gets max(own, the server's `max_order`) + 1, and a re-tag keeps its
+    sorted) on the extension page and date added in the app. Items without one are numbered 1, 2, … in storage
+    order when the extension updates, skipping numbers already in use. The server numbers imports above its
+    Bandcamp item count, so those numbers stay free. A new tag gets max(own, the server's `max_order`) + 1, and a re-tag keeps its
     number. Import → **Set the # order only** restores an order from a file.
 - **Extension:**
   - Syncs to the server (diffs, a guarded full sync) and is the bridge for the local app (tag edits, page fetches,

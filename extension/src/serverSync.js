@@ -14,7 +14,7 @@
 // Status:    chrome.storage.session bcSyncStatus = {...} (shown in the popup)
 // ---------------------------------------------------------------------------
 
-import { withItems, serialized, getStorage, setStorage, nowIso, sameTags, laterIso, maxOrder, orderFloor, setOrderFloor } from "./itemsStore";
+import { withItems, serialized, getStorage, setStorage, nowIso, sameTags, laterIso, fillOrder, nextOrder, orderFloor, setOrderFloor } from "./itemsStore";
 import { CHALLENGE_TEXT, isChallengePage } from "../../shared/bandcampChallenge";
 
 // http://127.0.0.1:8765 unless the build sets BC_DEFAULT_SERVER_URL (e2e builds).
@@ -237,7 +237,8 @@ export async function pullPendingAdds() {
   const floor = await orderFloor();
   await withItems((items) => {
     // "#": the server numbers an import's new items in row order; else they go last here.
-    let next = Math.max(maxOrder(items), floor);
+    fillOrder(items); // older items first, should they still have none
+    let next = nextOrder(items, floor) - 1;
     adds.forEach((entry) => {
       (Array.isArray(entry.tags) ? entry.tags : []).forEach((t) => vocab.push(t));
       const item = entry.item;

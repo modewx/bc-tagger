@@ -15,7 +15,7 @@ import {
   sameServerOrigin,
   syncTick,
 } from "./serverSync";
-import { serialized, withItems, getStorage, setStorage, nowIso, sameTags, maxOrder, fillOrder, orderFloor } from "./itemsStore";
+import { serialized, withItems, getStorage, setStorage, nowIso, sameTags, fillOrder, nextOrder, orderFloor } from "./itemsStore";
 import { isChallengePage } from "../../shared/bandcampChallenge";
 
 // ---------------------------------------------------------------------------
@@ -151,10 +151,9 @@ async function importOrder(data) {
   });
 }
 
-// Items without an explicit `order` (data from before it existed) get the next numbers.
-async function ensureOrder() {
-  const floor = await orderFloor();
-  return withItems((items) => (fillOrder(items, floor) ? { ok: true } : { ok: false, reason: "all numbered" }));
+// Items without an explicit `order` (data from before it existed) get numbers from 1, in storage order.
+function ensureOrder() {
+  return withItems((items) => (fillOrder(items) ? { ok: true } : { ok: false, reason: "all numbered" }));
 }
 
 function updateItemTags(id, tags) {
@@ -174,8 +173,9 @@ function updateItemTags(id, tags) {
 //   mode "replace": storage becomes exactly the file's items
 //   mode "order":   only the "#" order changes (importOrder)
 // The vocabulary always ends up as tags.json ∪ existing ∪ file ∪ used tags.
-// "#" (`order`): new items go after everything here, in the file's order;
-// items in both keep their number unless the file's copy has one (merge).
+// "#" (`order`): new items go after everything here (and on the server), in the
+// file's order; items in both keep their number unless the file's copy has one
+// (merge). Replace keeps the file's numbers and numbers the rest from 1.
 // ---------------------------------------------------------------------------
 
 async function importData(data, mode) {
@@ -198,23 +198,22 @@ async function importData(data, mode) {
     if (mode === "replace") taggedItems = incoming;
     else if (mode === "keep") taggedItems = { ...incoming, ...existing };
     else taggedItems = { ...existing, ...incoming };
-    if (mode !== "replace") {
-      // Existing items first, then the new ones in the file's order: they're numbered after the rest.
-      const ordered = {};
+    if (mode === "replace") {
+      fillOrder(taggedItems);
+    } else {
+      // Existing items keep their numbers (unnumbered ones get theirs first); new ones go last, in the file's order.
+      const kept = {};
       Object.keys(existing).forEach((id) => {
         const it = { ...taggedItems[id] };
         if (!Number.isFinite(it.order) && existing[id] && Number.isFinite(existing[id].order)) it.order = existing[id].order;
-        ordered[id] = it;
+        kept[id] = it;
       });
-      Object.keys(incoming).forEach((id) => {
-        if (id in ordered) return;
-        const it = { ...taggedItems[id] };
-        delete it.order;
-        ordered[id] = it;
-      });
-      taggedItems = ordered;
+      fillOrder(kept);
+      let next = nextOrder(kept, floor) - 1;
+      const added = Object.keys(incoming).filter((id) => !(id in kept));
+      added.forEach((id) => (kept[id] = { ...taggedItems[id], order: ++next }));
+      taggedItems = kept;
     }
-    fillOrder(taggedItems, floor);
     const tags = unionTags(
       seed,
       mode === "replace" ? [] : existingTags,
@@ -386,7 +385,8 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
         const item = { ...request.item };
         item.modified_at = !prev || !sameTags(prev.tags, item.tags) ? nowIso() : prev.modified_at || item.modified_at;
         if (!item.modified_at) delete item.modified_at;
-        item.order = prev && Number.isFinite(prev.order) ? prev.order : Math.max(maxOrder(items), floor) + 1;
+        fillOrder(items); // older items first, should they still have none
+        item.order = prev ? prev.order : nextOrder(items, floor);
         items[item.id] = item;
       })
     );

@@ -55,19 +55,28 @@ export function maxOrder(items) {
   return max;
 }
 
-// Number the items that have no `order` yet, after the highest, in storage
-// order (what "#" showed before it was explicit). Returns how many.
-export function fillOrder(items, floor = 0) {
-  let next = Math.max(maxOrder(items), floor || 0);
+// Number the items that have no `order` yet from 1 up, skipping numbers in
+// use, in storage order (what "#" showed before it was explicit). The server
+// numbers imports above its Bandcamp item count, so 1..N stay free for these.
+// Returns how many.
+export function fillOrder(items) {
+  const taken = new Set();
+  Object.values(items).forEach((it) => it && Number.isFinite(it.order) && taken.add(it.order));
+  let next = 0;
   let n = 0;
   Object.values(items).forEach((it) => {
     if (it && typeof it === "object" && !Number.isFinite(it.order)) {
-      it.order = ++next;
+      do next++;
+      while (taken.has(next));
+      it.order = next;
       n++;
     }
   });
   return n;
 }
+
+// A new item's number: after everything here and on the server.
+export const nextOrder = (items, floor) => Math.max(maxOrder(items), floor || 0) + 1;
 
 export async function orderFloor() {
   const { orderFloor: floor } = await get("orderFloor");

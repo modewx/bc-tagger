@@ -308,6 +308,31 @@ test("\"#\" is explicit: a new tag goes last, a re-tag keeps its number, \"Set t
   }
 });
 
+test("\"#\" migration: items with no number get 1, 2, … in storage order, skipping numbers in use (a server-numbered import above them stays)", async () => {
+  const send = (msg) => probe.evaluate((m) => new Promise((r) => chrome.runtime.sendMessage(m, r)), msg);
+  const saved = (await storage("taggedItems")).taggedItems;
+  const keys = Object.keys(saved); // storage order
+  const n = keys.length;
+  const fromServer = keys[5]; // as if a pending add numbered by the server came in before the migration
+  try {
+    const stripped = Object.fromEntries(keys.map((k) => {
+      const { order, ...rest } = saved[k];
+      return [k, k === fromServer ? { ...rest, order: n + 1 } : rest];
+    }));
+    await probe.evaluate((items) => chrome.storage.local.set({ taggedItems: items }), stripped);
+    // Any write numbers them first: re-tag one (its copy has no "order").
+    const target = keys[0];
+    await send({ type: "addTaggedItem", item: { ...stripped[target], tags: [...(stripped[target].tags || [])] } });
+    await waitFor(async () => Number.isFinite((await storage("taggedItems")).taggedItems[keys[1]].order), { what: "the migration" });
+    const items = (await storage("taggedItems")).taggedItems;
+    assert.equal(items[fromServer].order, n + 1, "the server's number stays");
+    const others = keys.filter((k) => k !== fromServer);
+    assert.deepEqual(others.map((k) => items[k].order), others.map((k, i) => i + 1), "1..N-1 in storage order");
+  } finally {
+    await probe.evaluate((items) => chrome.storage.local.set({ taggedItems: items }), saved);
+  }
+});
+
 test("Import modes: keep mine leaves tags, merge takes the file's", async () => {
   const changed = JSON.parse(JSON.stringify(exportData));
   const original = changed.taggedItems[ITEM].tags;
@@ -2389,6 +2414,8 @@ test("import end to end (real server): resolve, map tags, paste a URL, link from
   page.on("response", async (r) => {
     if (/\/api\/import\/[^/]+\/commit$/.test(new URL(r.url()).pathname)) commits.push(await r.json().catch(() => null));
   });
+  const maxOrderBefore = (await api("/api/health")).max_order;
+  assert.ok(Number.isFinite(maxOrderBefore), "health.max_order");
   await page.click("#importSelected");
   await page.waitForURL(SERVER + "/", { timeout: 30000 });
   const res = await waitFor(async () => commits[0], { what: "the commit result" });
@@ -2402,6 +2429,7 @@ test("import end to end (real server): resolve, map tags, paste a URL, link from
   assert.equal(Object.keys(after).length, before + res.pending_adds);
   assert.ok(after.t3738475288.tags.includes("vocal"));
   assert.ok(after.t3738475288.modified_at, "new items carry modified_at");
+  assert.ok(after.t3738475288.order > maxOrderBefore, `"#" after everything before the import: ${after.t3738475288.order}`);
   const elhwah = batch.rows.find((r) => r.title === "Elhwah").tags;
   await waitFor(
     async () => {
@@ -2473,6 +2501,12 @@ test("import end to end (real server): resolve, map tags, paste a URL, link from
   const others = await page.$$eval("#collectionTable tbody tr", (trs) => trs.map((tr) => tr.dataset.key));
   assert.equal(others.length, res.other_added);
   assert.ok(others.every((k) => /^o[0-9a-f]+$/.test(k)), others.join(","));
+  // "#": the Other rows, numbered after everything before the import, in the file's row order.
+  const otherItems = await api(`/api/items?ids=${others.join(",")}`).then((d) => (Array.isArray(d) ? d : d.items));
+  const byKey = Object.fromEntries(otherItems.map((it) => [it.id, it]));
+  assert.ok(others.every((k) => byKey[k].order > maxOrderBefore), JSON.stringify(otherItems.map((it) => it.order)));
+  const lines = others.map((k) => byKey[k].line); // shown by "#": the file's lines, in order (a line can expand to several)
+  assert.ok(lines.every((l, i) => Number.isFinite(l) && (i === 0 || l >= lines[i - 1])), `lines by "#": ${lines}`);
   await page.click("#source_bandcamp");
   await page.close();
 });
