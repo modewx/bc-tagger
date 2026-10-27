@@ -132,8 +132,11 @@ def build(svc, batch: dict, rows: list[dict], result: dict | None, earlier: set[
             "imported_earlier": sum(e["imported_earlier"] for e in entries),
             "located": sum(e["located"]["status"] == "located" for e in entries),
             "downloaded": sum(any(d["state"] == "done" for d in e["downloads"]) for e in entries),
+            "located_items": sum(u.get("applied", False) for u in (result or {}).get("location_updates") or []),
         },
         "selected": (result or {}).get("selected"),
+        # files imports: collection items located to the batch's files at commit (checked rows or not)
+        "location_updates": (result or {}).get("location_updates") or [],
         "rows": entries,
     }
 
@@ -166,6 +169,8 @@ def markdown(log: dict) -> str:
         lines.append(f"| Imported by an earlier attempt | {c['imported_earlier']} |")
     if b["new_tags"]:
         lines.append(f"| New tags | {', '.join(b['new_tags'])} |")
+    if c.get("located_items"):
+        lines.append(f"| Collection items located to these files | {c['located_items']} |")
     lines += ["", "| Line | Artist – Title | Outcome | Tags | Located | Download |", "|---|---|---|---|---|---|"]
     for e in log["rows"]:
         outcome = LABELS[e["outcome"]] + (f" ({e['item_id']})" if e["item_id"] else "")
@@ -178,6 +183,15 @@ def markdown(log: dict) -> str:
         name = " – ".join(x for x in (e["artist"], e["title"]) if x)
         lines.append("| " + " | ".join(_cell(v) for v in (e["line"], name, outcome, ", ".join(e["tags"]), located,
                                                           download)) + " |")
+    updates = [u for u in log.get("location_updates") or [] if u.get("applied")]
+    if updates:
+        lines += ["", "Collection items located to these files (checked or not):", "",
+                  "| Line | Item | Artist – Title | File |", "|---|---|---|---|"]
+        for u in updates:
+            name = " – ".join(x for x in (u.get("artist"), u.get("title")) if x)
+            lines.append("| " + " | ".join(_cell(v) for v in (u.get("line"), u["item_id"], name,
+                                                              "/".join(Path(u["located_path"] or u["path"]).parts[-2:])))
+                         + " |")
     return "\n".join(lines) + "\n"
 
 
