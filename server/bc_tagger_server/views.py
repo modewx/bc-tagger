@@ -7,6 +7,7 @@ from collections import defaultdict
 from typing import Any
 
 from .items import is_album, item_tags
+from .membership import memberships
 from .store import Store
 
 
@@ -42,6 +43,7 @@ class ViewData:
         for r in store.query_all("SELECT DISTINCT item_id, tag, content_id FROM rb_claims WHERE db_path = ?",
                                  ["item_id", "tag", "content_id"], (db_path,)):
             self.claims[r["item_id"]].append({"tag": r["tag"], "content_id": r["content_id"]})
+        self.collections = memberships(store)  # {item_id: [collection ids]}
         # every located file (a track's, or each of a release's tracks)
         self.files = {r["path"]: r for r in store.query_all(
             _FILE_INFO_SQL + "f.path IN ("
@@ -194,9 +196,14 @@ def item_view(store: Store, item: dict, db_path: str, playlist_rule=None,
     local = local_status(store, item["id"], data)
     owned = ownership_status(store, item, data)
     local["hints"] = local_hints(local, owned)
+    if data is not None:
+        in_collections = data.collections.get(item["id"], [])
+    else:
+        in_collections = memberships(store, [item["id"]]).get(item["id"], [])
     return {
         **item,
         "is_album": is_album(item),
+        "collections": in_collections,
         "local": local,
         "owned": owned,
         "rekordbox": rekordbox_status(store, item, local, db_path, playlist_rule, data),

@@ -134,16 +134,30 @@ class Service:
         sources: Iterable[str] | None = None,
         sort: str | None = None,
         order: str | None = None,
+        collection: int | str = "all",
     ) -> tuple[int, list[dict]]:
-        """``sort``: "order" ("#", the default; ascending unless ``order="desc"``; items without one last,
-        newest first) or "modified_at"/"date_added" (newest first unless ``order="asc"``; undated earliest)."""
-        from .collection import SOURCES, all_items, by_date, by_order
+        """``collection``: an id (its members) or "all" (every item, in a collection or not). ``sort``: "order"
+        ("#", the default; ascending unless ``order="desc"``) or "modified_at"/"date_added" (newest first unless
+        ``order="asc"``; undated earliest). "#" is the collection's own; in All, collection 0's, then the rest by
+        when they joined a collection; items with neither come last, newest first. Raises KeyError for an unknown
+        collection."""
+        from .collection import SOURCES, all_items, by_date
+        from . import membership
 
         items = all_items(self.store, sources or SOURCES)
+        if collection != "all":
+            membership.get(self.store, int(collection))
+            pos_added = membership.positions(self.store, int(collection))
+            items = [it for it in items if it["id"] in pos_added]
+            pos = {k: v[0] for k, v in pos_added.items()}
+            added = {k: v[1] for k, v in pos_added.items()}
+        else:
+            pos = {k: v[0] for k, v in membership.positions(self.store, membership.MAIN).items()}
+            added = membership.first_added(self.store)
         if sort in ("modified_at", "date_added"):  # undated items count as earlier than any date
             items = by_date(items, sort, newest_first=order != "asc")
         else:
-            items = by_order(items, ascending=order != "desc")
+            items = membership.by_position(items, pos, added, ascending=order != "desc")
         if ids is not None:
             wanted = set(ids)
             items = [it for it in items if it["id"] in wanted]
@@ -157,6 +171,62 @@ class Service:
         rule = self.playlist_rule()
         data = ViewData(self.store, db_path) if len(page) > 20 else None
         return total, [item_view(self.store, it, db_path, rule, data) for it in page]
+
+    # -- collections (Phase 8; membership.py) ---------------------------------------------------
+
+    def collection_create(self, name: str) -> dict:
+        from . import membership
+
+        made = membership.create(self.store, name)
+        self.jobs.bus.publish("collections", {"action": "created", "id": made["id"], "collection": made})
+        return made
+
+    def collection_update(self, collection_id: int, name: str | None = None, pos: int | None = None) -> dict:
+        from . import membership
+
+        before = membership.get(self.store, collection_id)
+        after = membership.update(self.store, collection_id, name, pos)
+        action = "renamed" if after["name"] != before["name"] else "reordered" if after["pos"] != before["pos"] else None
+        if action:
+            self.jobs.bus.publish("collections", {"action": action, "id": collection_id, "collection": after})
+        return after
+
+    def collection_delete(self, collection_id: int) -> dict:
+        """Removes the collection and its memberships; the items stay (in All, and any other collection)."""
+        from . import membership
+
+        ids = membership.delete(self.store, collection_id)
+        self.jobs.bus.publish("collections", {"action": "deleted", "id": collection_id})
+        for item_id in ids:
+            self.jobs.bus.publish("item", {"id": item_id})
+        return {"deleted": collection_id, "items": len(ids)}
+
+    def collection_add(self, collection_id: int, ids: list[str]) -> dict:
+        """Copy items into a collection ("Import to Collection"): ``{added, already, unknown}`` (counts)."""
+        from . import membership
+        from .collection import all_items
+
+        membership.get(self.store, collection_id)
+        index = {it["id"]: it for it in all_items(self.store)}
+        wanted = list(dict.fromkeys(ids))
+        result = membership.add_items(self.store, collection_id, [index[i] for i in wanted if i in index])
+        self._membership_changed(collection_id, result["added"], "added")
+        return {"added": len(result["added"]), "already": len(result["already"]),
+                "unknown": sum(i not in index for i in wanted)}
+
+    def collection_remove(self, collection_id: int, ids: list[str]) -> dict:
+        """Take items out of a collection (membership only): ``{removed}``."""
+        from . import membership
+
+        gone = membership.remove_items(self.store, collection_id, ids)
+        self._membership_changed(collection_id, gone, "removed")
+        return {"removed": len(gone)}
+
+    def _membership_changed(self, collection_id: int, ids: list[str], what: str) -> None:
+        for item_id in ids:
+            self.jobs.bus.publish("item", {"id": item_id})
+        if ids:
+            self.jobs.bus.publish("collections", {"action": "items", "id": collection_id, what: len(ids)})
 
     def get_item_view(self, item_id: str) -> dict | None:
         from .collection import all_items

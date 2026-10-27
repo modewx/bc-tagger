@@ -79,17 +79,27 @@ def other_get(store: Store, item_id: str) -> dict | None:
     return json.loads(row["data"]) if row else None
 
 
-def other_put(store: Store, item: dict) -> dict:
+def other_put(store: Store, item: dict, collection_id: int = 0) -> dict:
+    """Save an Other item. A new one joins ``collection_id`` (an import's choice; else "Collection"), unless it's
+    in a collection already."""
     item = {**item, "source": "other"}
     item["album_title"] = item.get("album")
     item["links"] = links_for(item)
+    ts = now_iso()
     with store.tx() as c:
+        new = c.execute("SELECT 1 FROM other_items WHERE id = ?", (item["id"],)).fetchone() is None
         c.execute(
             "INSERT INTO other_items(id, data, date_added, updated_at) VALUES(?, ?, ?, ?) "
             "ON CONFLICT(id) DO UPDATE SET data = excluded.data, date_added = excluded.date_added, "
             "updated_at = excluded.updated_at",
-            (item["id"], json.dumps(item), item.get("date_added"), now_iso()),
+            (item["id"], json.dumps(item), item.get("date_added"), ts),
         )
+        if new:  # collection 0's "#" is the item's; elsewhere, after the last
+            pos = item_order(item) if collection_id == 0 else None
+            c.execute("INSERT INTO collection_items(collection_id, item_id, pos, added_at) SELECT ?, ?, "
+                      "COALESCE(?, (SELECT COALESCE(MAX(pos), 0) + 1 FROM collection_items WHERE collection_id = ?)), "
+                      "? WHERE NOT EXISTS (SELECT 1 FROM collection_items WHERE item_id = ?)",
+                      (collection_id, item["id"], pos, collection_id, ts, item["id"]))
     return item
 
 
