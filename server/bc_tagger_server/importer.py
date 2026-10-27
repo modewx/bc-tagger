@@ -923,8 +923,10 @@ def get_batch(svc, batch_id: str) -> dict:
     for row in rows:  # what Download can fetch for Bandcamp rows (not stored: ownership changes)
         item = (row.get("bandcamp") or {}).get("item")
         row["owned"] = ownership_status(svc.store, item) if item else None
-    vocab = set(svc.store.get_tags())  # live: tags the rows use that aren't created yet ("Create New Tags")
-    batch["uncreated_tags"] = [t for t in dict.fromkeys(t for r in rows for t in r.get("tags") or []) if t not in vocab]
+    if batch["status"] != "committed":  # live: tags the rows use that aren't in the tag list yet (created on
+        vocab = set(svc.store.get_tags())  # commit or transfer; "uncreated_tags" is the older name)
+        batch["new_tags"] = [t for t in dict.fromkeys(t for r in rows for t in r.get("tags") or []) if t not in vocab]
+        batch["uncreated_tags"] = batch["new_tags"]
     if batch.get("kind") == "files" and batch["status"] != "committed":  # live: items may have been located since
         batch["location_updates"] = location_updates(svc.store, batch, rows)
         batch["stats"] = {**(batch.get("stats") or {}), "location_updates": len(batch["location_updates"])}
@@ -1303,8 +1305,11 @@ def _commit(svc, batch: dict, earlier: set[int] = frozenset()) -> dict:
     store, batch_id = svc.store, batch["batch_id"]
     rows = load_rows(store, batch_id)
     dups = DuplicateIndex(store)
-    vocab = store.get_tags()
     result = {"pending_adds": 0, "tag_merges": 0, "other_added": 0, "other_merged": 0, "new_tags": [], "skipped": 0}
+    # New tags first: in the tag list and queued for the extension before any item or tag edit that uses them
+    # (also rows done before a restart: their new tags still count).
+    used = [t for r in rows if r.get("checked") for t in r.get("tags") or []]
+    result["new_tags"] = svc.create_tags(used)["created"] if used else []
     ids: dict[str, list[str]] = {"added": [], "merged": [], "other_added": [], "other_merged": []}
     stamp = now_ms_iso()  # date_added of new items, modified_at of everything this commit touches
     order = max_order(store)  # "#": new items are numbered after everything, in row order; merges keep theirs
@@ -1315,10 +1320,7 @@ def _commit(svc, batch: dict, earlier: set[int] = frozenset()) -> dict:
     result["located_items"] = sum(u["applied"] for u in result["location_updates"])
     if batch.get("kind") == "files":  # from now on the batch shows what was applied
         batch["location_updates"] = result["location_updates"]
-    used_tags: list[str] = []
     for row in rows:
-        if row.get("checked"):
-            used_tags += row["tags"]  # also rows done before a restart: their new tags still count
         if not row.get("checked") or row.get("committed"):
             result["skipped"] += 1
             continue
@@ -1380,11 +1382,6 @@ def _commit(svc, batch: dict, earlier: set[int] = frozenset()) -> dict:
                 c.execute("INSERT INTO match_overrides(item_id, path, decision, created_at) VALUES(?, ?, 'confirm', ?)",
                           (item_id, located["best"]["path"], now_iso()))
         _save_rows(store, batch_id, [row])  # done rows are skipped if a restart makes the user import again
-    new_tags = [t for t in dict.fromkeys(used_tags) if t not in vocab]
-    if new_tags:
-        svc.sync_tags(vocab + new_tags)
-        queue_add(store, tags=new_tags)
-    result["new_tags"] = new_tags
     # what the collection page selects afterwards (sorted by modified_at, newest first)
     result["item_ids"] = ids
     result["selected"] = list(dict.fromkeys(ids["added"] + ids["merged"] + ids["other_added"] + ids["other_merged"]))

@@ -628,6 +628,9 @@ class Service:
             scan_stats = self.last_prepare
         selection = build_selection(self.store, items, self.store.get_tags(), self.playlist_rule())
         selection.skipped += missing
+        created: list[str] = []
+        if rows is not None and not dry_run:  # a transfer creates the rows' new tags, as a commit would
+            created = self.create_tags([t for it in selection.items for t in it.get("tags") or []])["created"]
         progress = (lambda cur, tot, msg: ctx.progress(cur, tot, msg)) if ctx else None
         diff = export(
             self.store,
@@ -648,6 +651,10 @@ class Service:
                 c.execute("UPDATE confirm_tokens SET used_at = ? WHERE token = ?", (now_iso(), confirm_token))
         diff["tag_playlists"] = self.tag_playlists(selection.tag_order)
         diff["new_tags"] = [t["tag"] for t in diff["tag_playlists"] if t["new"]]
+        if rows is not None:
+            diff["created_tags"] = created
+            for t in diff["tag_playlists"]:
+                t["created"] = t["tag"] in created
         if rows is not None:
             diff["rows"] = True
             if not dry_run:

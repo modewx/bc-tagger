@@ -403,9 +403,15 @@ rekordbox without adding them to the collection. It's the same job, result, guar
 - Rows go out with their tags as they are, even before an import's tag-mapping step. Every export result has
   `tag_playlists: [{tag, new, playlists}]` (where each tag goes under the collection's mapping; `new`: not in the
   tag list yet; `playlists: []`: not exported) and `new_tags`.
-- An import batch lists `uncreated_tags`, the tags its rows use that don't exist yet. `POST /api/tags/create {tags}`
-  creates them now, as a commit would: the server's list, plus queued for the extension. It returns `{created,
-  existing, tags}`. Then they can be mapped in Settings (custom mode).
+- An import batch lists `new_tags` (also as `uncreated_tags`), the tags its rows use that aren't in the tag list
+  yet, computed live. Rows keep them through edits, default tags and the mapping step; only an explicit "ignore"
+  in the mapping step drops the file's unknown tags.
+- A commit creates the new tags of its checked rows **first**: the server's list, then queued for the extension
+  ahead of any item add or tag edit that uses them. They come back in the result's and the log's `new_tags`.
+  A transfer (`rows`, not a dry run) creates the exported rows' new tags the same way (`created_tags`, and
+  `created` in `tag_playlists`).
+- `POST /api/tags/create {tags}` still creates them on demand. It returns `{created, existing, tags}`; then they
+  can be mapped in Settings (custom mode).
 
 ### Import logs
 
