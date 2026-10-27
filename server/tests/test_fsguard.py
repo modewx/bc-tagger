@@ -70,14 +70,16 @@ def test_drive_unplugged_during_a_download_job(make_service, tmp_path, monkeypat
         for i in ("a1", "a2"):
             c.execute("INSERT INTO owned_ids(id, source, checked_at) VALUES(?, 'test', 'x')", (i,))
     monkeypatch.setenv(downloader.STUB_ENV, str(Path(__file__).parent / "fixtures" / "stub_downloader.py"))
-    real = downloader.run_release
+    svc.settings.update({"download_parallel": 1})
+    monkeypatch.setattr(downloads, "CHUNK_FACTOR", 1)  # one release per downloader run
+    real = downloader.run_releases
 
     def unplug_after_first(*a, **kw):
         result = real(*a, **kw)
         os.rename(owned, tmp_path / "unplugged")  # the root is gone now
         return result
 
-    monkeypatch.setattr(downloader, "run_release", unplug_after_first)
+    monkeypatch.setattr(downloader, "run_releases", unplug_after_first)
     result = downloads.run(svc, ["t1", "t2"])
     items = {e["ref"]: e for e in result["items"]}
     assert items["t1"]["state"] == "done"

@@ -4,10 +4,14 @@ Run by the server instead of the jar when ``BC_TAGGER_DOWNLOADER_STUB=<this file
 jar's lines and writes ``<folder>/<artist>/<year> - <title>/NN <track>.aiff`` with tags.
 
 ``BC_TAGGER_STUB_RELEASES=<json file>``: ``{"a123": {"artist", "title", "year", "tracks": [..],
-"fail": "not_in_collection"|"challenge"|"rate_limit"|"error"}}``; unknown ids get a generic release.
+"fail": "not_in_collection"|"challenge"|"rate_limit"|"error", "retry_error": "<exception text>"}}``; unknown
+ids get a generic release. ``retry_error``: that release's first attempt fails with it and is retried.
 ``BC_TAGGER_STUB_DELAY=<seconds>``: wait that long before writing (to see progress in a UI).
-``BC_TAGGER_STUB_RETRY=1``: the first download attempt fails and is retried, like the tool's retries.
-Download progress is printed like the tool does: "Progress: 42.00 %" ending in "\r", no newline.
+``BC_TAGGER_STUB_RETRY=1``: every release's first attempt fails ("Read timed out") and is retried.
+``BC_TAGGER_STUB_ARGS=<file>``: append each run's arguments there (one JSON list per line).
+Download progress is printed like the tool does: "Progress: 42.00 %" ending in "\r", no newline. With
+``--jobs`` > 1 the releases run "in parallel" like the tool's threads: each line starts with
+"[pool-1-thread-N] ", and progress reads "Progresses: [pool-1-thread-1] 12.50 % || [pool-1-thread-2] …".
 """
 
 import argparse
@@ -37,8 +41,8 @@ def write_aiff(path: Path, title: str, artist: str, album: str, track: int) -> N
     f.save()
 
 
-def log(line: str) -> None:
-    print(line, flush=True)
+def log(line: str, thread: str | None = None) -> None:
+    print(f"[{thread}] {line}" if thread else line, flush=True)
 
 
 def main() -> int:
@@ -49,7 +53,12 @@ def main() -> int:
     p.add_argument("--user-agent")
     p.add_argument("--force", action="store_true")
     p.add_argument("--cookies-file")
+    p.add_argument("--jobs", type=int, default=4)
+    p.add_argument("--timeout", type=int, default=50000)
     args, rest = p.parse_known_args()
+    if os.environ.get("BC_TAGGER_STUB_ARGS"):
+        with open(os.environ["BC_TAGGER_STUB_ARGS"], "a") as f:
+            f.write(json.dumps([a for a in sys.argv[1:] if not a.startswith("--cookies-file")]) + "\n")
     releases = {}
     if os.environ.get("BC_TAGGER_STUB_RELEASES"):
         releases = json.loads(Path(os.environ["BC_TAGGER_STUB_RELEASES"]).read_text())
@@ -59,51 +68,70 @@ def main() -> int:
     log(f"User-Agent: {args.user_agent}")
     ids = [i for raw in args.item_id for i in raw.split(",") if i]
     log(f"Items: {', '.join(ids)}")
-    cache_file = folder / "bandcamp-collection-downloader.cache"
-    cache = set(cache_file.read_text().split()) if cache_file.exists() else set()
-    for item_id in ids:
-        rel = {"artist": "Stub Artist", "title": f"Stub Release {item_id}", "year": 2026, "tracks": ["Stub Track"],
-               **releases.get(item_id, {})}
-        fail = rel.get("fail")
-        if fail == "not_in_collection":
-            log(f"Not in the collection: {item_id}")
-            print(f"ERROR: None of the requested items are in the collection: {item_id}", file=sys.stderr, flush=True)
-            return 0
-        if fail == "challenge":
+    rels = {i: {"artist": "Stub Artist", "title": f"Stub Release {i}", "year": 2026, "tracks": ["Stub Track"],
+                **releases.get(i, {})} for i in ids}
+    for i, rel in rels.items():
+        if rel.get("fail") == "challenge":
             log("<!DOCTYPE html><html><head><title>Client Challenge</title></head></html>")
             print("ERROR: Could not perform task", file=sys.stderr, flush=True)
             return 0
-        if fail == "rate_limit":
+        if rel.get("fail") == "rate_limit":
             print("ERROR: HTTP error fetching URL. Status=429", file=sys.stderr, flush=True)
             return 0
-        sale_id = "p" + item_id[1:]
-        if sale_id in cache and not args.force:
-            log(f"Ignoring 1 already downloaded items (based on '{cache_file}').")
-            return 0
-        name = f'"{rel["title"]}" ({rel["year"]}) by {rel["artist"]}'
-        log(f"Found release {name} (Bandcamp ID: {sale_id}).")
-        if fail == "error":
-            log("Could not download item: No URL found for item")
-            return 0
-        release_folder = folder / rel["artist"] / f'{rel["year"]} - {rel["title"]}'
-        log(f"Starting the download of {name}.")
-        log(f"Release folder: {release_folder}")
-        if os.environ.get("BC_TAGGER_STUB_RETRY"):
-            log('Error while trying: "java.net.SocketTimeoutException: Read timed out".')
-            log("Retrying (1/3).")
+    missing = [i for i in ids if rels[i].get("fail") == "not_in_collection"]
+    if missing:
+        log(f"Not in the collection: {', '.join(missing)}")
+    found = [i for i in ids if i not in missing]
+    if not found:
+        print(f"ERROR: None of the requested items are in the collection: {', '.join(ids)}", file=sys.stderr, flush=True)
+        return 0
+    cache_file = folder / "bandcamp-collection-downloader.cache"
+    cache = set(cache_file.read_text().split()) if cache_file.exists() else set()
+    todo = [i for i in found if args.force or "p" + i[1:] not in cache]
+    if len(todo) < len(found):
+        log(f"Ignoring {len(found) - len(todo)} already downloaded items (based on '{cache_file}').")
+    log("------------")
+    jobs = max(1, args.jobs)
+    for start in range(0, len(todo), jobs):  # each group runs "at the same time", one per thread
+        group = todo[start:start + jobs]
+        thread = {i: (f"pool-1-thread-{k + 1}" if jobs > 1 else None) for k, i in enumerate(group)}
+        names, folders = {}, {}
+        for n, i in enumerate(group, start + 1):
+            rel, t = rels[i], thread[i]
+            log(f"Managing item {n}/{len(todo)}", t)
+            names[i] = f'"{rel["title"]}" ({rel["year"]}) by {rel["artist"]}'
+            log(f"Found release {names[i]} (Bandcamp ID: p{i[1:]}).", t)
+        for i in [i for i in group if rels[i].get("fail") == "error"]:
+            log("Could not download item: No URL found for item", thread[i])
+            group.remove(i)
+        for i in group:
+            folders[i] = folder / rels[i]["artist"] / f'{rels[i]["year"]} - {rels[i]["title"]}'
+            log(f"Starting the download of {names[i]}.", thread[i])
+            log(f"Release folder: {folders[i]}", thread[i])
+            error = rels[i].get("retry_error") or (
+                "java.net.SocketTimeoutException: Read timed out" if os.environ.get("BC_TAGGER_STUB_RETRY") else None)
+            if error:
+                log(f'Error while trying: "{error}".', thread[i])
+                log("Retrying (1/3).", thread[i])
         for pct in (0, 12.5, 12.9, 50, 99.99):
-            print(f"Progress: {pct:.2f} %" + " " * 20 + "\r", end="", flush=True)
+            if jobs > 1:  # the tool's threads share one line
+                line = "Progresses: " + " || ".join(f"[{thread[i]}] {pct + k:.2f} %" for k, i in enumerate(group))
+            else:
+                line = f"Progress: {pct:.2f} %"
+            print(line + " " * 20 + "\r", end="", flush=True)
         time.sleep(float(os.environ.get("BC_TAGGER_STUB_DELAY", "0")))
-        if release_folder.exists() and not args.force:
-            log(f"{name} already exists on disk, skipping.")
-        else:
-            release_folder.mkdir(parents=True, exist_ok=True)
-            for n, track in enumerate(rel["tracks"], 1):
-                write_aiff(release_folder / f"{n:02d} {track}.aiff", track, rel["artist"], rel["title"], n)
-            log(f"{name} successfully downloaded.")
-        if sale_id not in cache:
-            with cache_file.open("a") as f:
-                f.write(sale_id + "\n")
+        for i in group:
+            rel = rels[i]
+            if folders[i].exists() and not args.force:
+                log(f"{names[i]} already exists on disk, skipping.", thread[i])
+            else:
+                folders[i].mkdir(parents=True, exist_ok=True)
+                for n, track in enumerate(rel["tracks"], 1):
+                    write_aiff(folders[i] / f"{n:02d} {track}.aiff", track, rel["artist"], rel["title"], n)
+                log(f"{names[i]} successfully downloaded.", thread[i])
+            if "p" + i[1:] not in cache:
+                with cache_file.open("a") as f:
+                    f.write("p" + i[1:] + "\n")
     return 0
 
 

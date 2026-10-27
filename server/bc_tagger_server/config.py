@@ -105,6 +105,10 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     # Downloads of owned releases (Phase 4); empty: the owned root. Must be inside an owned root.
     "downloads_dir": "",
     "download_format": "aiff-lossless",
+    # Several releases go to one downloader run with this many parallel downloads (its --jobs), 1–8.
+    "download_parallel": 4,
+    # The downloader's HTTP read/connect timeout (its --timeout), seconds; at least 30.
+    "download_timeout_s": 180,
     # Imports: a JSON + Markdown log of each commit goes here; empty: <data dir>/import-logs. Never on the
     # music drive or inside a root.
     "import_log_dir": "",
@@ -209,6 +213,12 @@ def _validate(merged: dict[str, Any]) -> dict[str, Any]:
     if out.get("download_format") not in ("flac", "wav", "aac-hi", "mp3-320", "aiff-lossless", "vorbis", "mp3-v0", "alac"):
         raise SettingsError("download_format must be one of the downloader's audio formats")
     out["downloads_dir"] = out.get("downloads_dir") or ""
+    parallel = out.get("download_parallel")
+    if isinstance(parallel, bool) or not isinstance(parallel, int) or not 1 <= parallel <= 8:
+        raise SettingsError("download_parallel must be a whole number from 1 to 8")
+    timeout = out.get("download_timeout_s")
+    if isinstance(timeout, bool) or not isinstance(timeout, (int, float)) or timeout < 30:
+        raise SettingsError("download_timeout_s must be a number of seconds, at least 30")
     out["import_log_dir"] = out.get("import_log_dir") or ""
     if not isinstance(out["import_log_dir"], str):
         raise SettingsError("import_log_dir must be a string path")

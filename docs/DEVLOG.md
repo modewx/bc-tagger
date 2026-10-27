@@ -90,6 +90,12 @@ Tests never touch Bandcamp, the music drive or a real rekordbox library: Bandcam
     rows' tags) without joining the collection.
   - Their playlist claims are their own, so a collection export never removes them, and they never change a
     collection item's playlists.
+- **Faster downloads (user approved: "parallel downloads setting (default 4, like my script), longer read timeout, and
+  show the retry reason"):**
+  - Several releases now go to one downloader run with `--jobs=<download_parallel>` (default 4), and the
+    timeout is 180 s instead of the tool's 50 s.
+  - Each release's progress and retry reason (e.g. "retry 1/3: read timed out") are read from the tool's
+    parallel output.
 
 ## App and extension (`app/`, `extension/`, `shared/`, branch `claude/local-collection-ui-e8f6f6`)
 
