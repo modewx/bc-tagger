@@ -311,3 +311,21 @@ def test_import_rows_go_to_rekordbox_without_joining_the_collection(svc, library
         job = c.post("/api/rekordbox/export", json={"rows": [f"{bid}:0"], "dry_run": True}).json()
         result = svc.jobs.wait(job["job_id"], timeout=60)
         assert result.status == "done" and not result.result["changed"]
+
+
+def test_import_rows_use_the_collections_tag_to_playlist_mapping(svc, library, test_db):
+    from bc_tagger_server import importer
+
+    svc.settings.update({"tag_playlist_mode": "custom", "tag_playlist_map": {"temp": ["Sets/Warmup"], "must": ["Must"]}})
+    batch = importer.create_batch(svc, {"format": "bc-tagger-import/1", "source": "temp", "items": [
+        {"line": 1, "artist": "Alpha", "title": "Alpha 1", "album": "Alpha Album", "tags": ["temp", "must", "ritual"]}]},
+        [])
+    svc.scan()
+    rows = importer.load_rows(svc.store, batch["batch_id"])
+    importer._locate(svc, rows)
+    importer._save_rows(svc.store, batch["batch_id"], rows)
+    diff = export(svc, rows=[f"{batch['batch_id']}:0"])
+    assert sorted(e["tag"] for e in diff["entries_added"]) == [f"/{FOLDER}/Must", f"/{FOLDER}/Sets/Warmup"]
+    # no playlist for it in the mapping: not exported, the same warning as for items
+    assert [w["message"] for w in diff["warnings"] if w["code"] == "unmapped_tags"] == [
+        "not exported (no playlist mapped): ritual"]
