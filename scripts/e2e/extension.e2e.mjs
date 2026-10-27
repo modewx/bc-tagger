@@ -4518,3 +4518,220 @@ test("collection: the toolbar is everyday actions (test ones in Settings → Tes
     await app.close();
   }
 });
+
+// --- Previews: Build previews (Tools ▾) and Settings → Previews ----------------------
+
+const GB = 1024 ** 3;
+const MB = 1024 ** 2;
+// The collection with nothing selected or filtered: a bulk button acts on all of it.
+const unfiltered = (page) =>
+  page.evaluate(() => ["bc_app_selection", "bc_app_status_filter", "bc_app_source_filter"].forEach((k) => localStorage.removeItem(k)));
+
+test("Build previews (Tools ▾): the dry run asks first (what's left out, and why); then its progress (built/total, MB/s, ETA, file) and Cancel; the summary lists the errors (stubbed build)", async () => {
+  const plan = {
+    files: 130, native: 6, already: 4, missing: 0, needed: 120, planned: 100, left_out: 20,
+    needed_bytes: 480 * MB, planned_bytes: 400 * MB, left_out_bytes: 80 * MB, source_bytes: 14.4 * GB, audio_hours: 8.3,
+    fits_cap: false, fits_space: true, cap_bytes: 3.5 * GB, used_bytes: 3.1 * GB, free_bytes: 120 * GB, min_free_bytes: 2 * GB,
+    kbps: 96, parallel: 6,
+  };
+  const running = {
+    id: "e2e-previews-1", kind: "previews", status: "running",
+    progress: {
+      current: 40, total: 100, message: "previews 40/100", built: 38, failed: 2, skipped: 0, bytes_read: 6 * GB, bytes_total: 14.4 * GB,
+      read_mb_s: 112.4, eta_s: 95, current_file: "/Volumes/E2E/Music/Artist - EP/03 Track.aiff", encoding: 6, queued: 3, elapsed_s: 53,
+    },
+  };
+  const errors = [
+    { path: "/Volumes/E2E/Music/Bad - One/01 Bad One.aiff", status: "failed", reason: "ffmpeg: Invalid data found when processing input" },
+    { path: "/Volumes/E2E/Music/Bad - Two/01 Bad Two.aiff", status: "failed", reason: "not an AIFF file" },
+  ];
+  const done = {
+    ...running, status: "done",
+    result: { ...plan, built: 41, failed: 2, skipped: 0, cancelled: true, not_built: 57, dropped: 0, stopped: null, errors, bytes_read: 6.6 * GB, read_mb_s: 110, elapsed_s: 61 },
+  };
+  const app = await context.newPage();
+  const bodies = [];
+  let cancelled = false;
+  await app.route("**/api/previews/build", (route) => {
+    const body = JSON.parse(route.request().postData());
+    bodies.push(body);
+    return route.fulfill({ json: body.dry_run ? { plan } : { job_id: "e2e-previews-1", plan } });
+  });
+  await app.route("**/api/previews/build/e2e-previews-1/cancel", (route) => {
+    cancelled = true;
+    return route.fulfill({ json: { job_id: "e2e-previews-1", cancelled: true } });
+  });
+  await app.route("**/api/jobs/e2e-previews-1", (route) => route.fulfill({ json: cancelled ? done : running }));
+  const status = () => app.textContent("#refreshStatus");
+  try {
+    await app.goto(SERVER + "/");
+    await unfiltered(app);
+    await app.reload();
+    await app.waitForSelector("#collectionTable tbody tr[data-key]");
+    const n = await app.$$eval("#collectionTable tbody tr[data-key]", (rs) => rs.length);
+    await tool(app, "buildPreviews");
+    await app.waitForSelector("#previewBuildConfirm");
+    assert.deepEqual(bodies[0], { all: true, dry_run: true }, "nothing selected or filtered: the whole collection");
+    assert.equal(await app.textContent("#previewBuildConfirm h3"), "Build 100 previews?");
+    const text = await app.textContent("#previewBuildConfirm .dialog-body");
+    assert.match(text, new RegExp(`^Of all ${n} items: 120 tracks need a preview; 4 tracks already have one; 6 tracks play as they are \\(MP3, FLAC, WAV…\\)\\.`));
+    assert.match(text, /100 of them fit; 20 tracks \(about 80 MB\) are left out: the space for previews is full \(raise it in Settings → Previews\)\./);
+    assert.match(text, /About 400 MB of the 3\.5 GB for previews \(3\.1 GB used now; 120 GB free on this Mac\)\. Opus at 96 kbps\./);
+    assert.match(text, /Time: about 2 min, to read 14 GB from the music drive at about 120 MB\/s \(6 encoders at once\)\. An estimate: the drive's speed decides\./);
+    assert.match(text, /The music drive must stay connected until it's done\./);
+    if (process.env.E2E_SHOTS) await app.locator("#previewBuildConfirm").screenshot({ path: path.join(process.env.E2E_SHOTS, "preview-build-confirm-left-out.png") });
+    await app.click("#previewBuildConfirm .dialog-confirm");
+    // Its progress, with Cancel.
+    await app.waitForFunction(() => /^Build previews: 38\/100 built/.test(document.getElementById("refreshStatus").textContent), null, { timeout: 10000 });
+    assert.equal(await status(), "Build previews: 38/100 built · 2 failed · 112 MB/s · ETA 1:35 · 03 Track.aiff Cancel");
+    assert.deepEqual(bodies[1], { all: true });
+    assert.equal(await app.isDisabled("#buildPreviews"), true, "one build at a time");
+    if (process.env.E2E_SHOTS) await app.locator("#refreshStatus").screenshot({ path: path.join(process.env.E2E_SHOTS, "preview-build-progress.png") });
+    await app.click("#cancelPreviewBuild");
+    assert.equal(await app.textContent("#cancelPreviewBuild"), "Cancelling…");
+    await app.waitForFunction(() => /cancelled/.test(document.getElementById("refreshStatus").textContent), null, { timeout: 10000 });
+    assert.ok(cancelled);
+    assert.equal(await app.$$eval("#refreshStatus .preview-progress, #cancelPreviewBuild", (es) => es.length), 0, "no progress or Cancel left");
+    assert.match(await status(), /^Build previews: 41 built, 2 failed, 0 skipped · cancelled \(57 not built\) · in 1:01 at 110 MB\/s 2 errors/);
+    await app.click("#refreshStatus .preview-errors summary");
+    assert.deepEqual(await app.$$eval("#refreshStatus .preview-errors li", (ls) => ls.map((l) => l.textContent)), [
+      "01 Bad One.aiff: ffmpeg: Invalid data found when processing input",
+      "01 Bad Two.aiff: not an AIFF file",
+    ]);
+    assert.equal(await app.isDisabled("#buildPreviews"), false);
+  } finally {
+    await app.close();
+  }
+});
+
+test("Build previews on the e2e server (3 AIFFs and a FLAC): the dialog's numbers, the build, the rows' next players play src=preview; Settings → Previews: a lower cap drops some at once, Clear previews the rest", async () => {
+  const base = path.join(E2E, "previews");
+  fs.rmSync(base, { recursive: true, force: true });
+  const coll = path.join(base, "Collection");
+  const rel = path.join(coll, "E2E Preview Artist - Preview EP");
+  const song = { artist: "E2E Preview Artist", album: "Preview EP", days: 1 };
+  writeFixtureFiles([
+    ...[1, 2, 3].map((n) => ({ ...song, path: path.join(rel, `0${n} Preview ${n}.aiff`), title: `Preview ${n}`, track: n, seconds: 3 })),
+    { ...song, path: path.join(rel, "04 Native.flac"), title: "Native", track: 4 },
+  ]);
+  const before = await api("/api/settings").then((d) => d.settings || d);
+  // No previews of the commit's own (cap 0) until the build.
+  await put({ owned_root: coll, not_owned_roots: [], downloads_dir: "", preview_cache_gb: 0 });
+  const weekAgo = new Date(Date.now() - 7 * 86400e3).toISOString().slice(0, 10);
+  const pages = [];
+  let batchId = null;
+  try {
+    ({ batch_id: batchId } = await post("/api/import/files", { folders: [{ path: coll, since: weekAgo }], default_tags: ["pool"], default_tags_all: true, name: "e2e-previews" }));
+    await waitFor(() => api(`/api/import/${batchId}`).then((b) => b.status === "ready" && b.rows.length === 4), { what: "the files batch", timeout: 30000 });
+    await post(`/api/import/${batchId}/commit`, {});
+    await waitFor(() => api("/api/import/last-committed").then((l) => l.batch_id === batchId), { what: "the commit", timeout: 30000 });
+    const ids = (await api("/api/import/last-committed")).item_ids;
+    const located = await waitFor(
+      async () => {
+        const list = await api(`/api/items?ids=${ids.join(",")}`).then((d) => (Array.isArray(d) ? d : d.items));
+        return list.length === 4 && list.every((i) => i.local && i.local.status === "located" && Number.isFinite(i.order)) && list;
+      },
+      { what: "the 4 items located and numbered", timeout: 30000 }
+    );
+    const aiffs = located.filter((i) => /\.aiff$/.test(i.local.best.path)).map((i) => i.id);
+    const flac = located.find((i) => /\.flac$/.test(i.local.best.path)).id;
+    assert.equal(aiffs.length, 3);
+    await put({ preview_cache_gb: 3.5 });
+    await api("/api/previews", { method: "DELETE" });
+    assert.equal((await api("/api/previews/status")).count, 0);
+
+    const app = await context.newPage();
+    pages.push(app);
+    await app.goto(SERVER + "/");
+    await unfiltered(app);
+    await app.evaluate((ks) => localStorage.setItem("bc_app_selection", JSON.stringify(ks)), ids);
+    await app.reload();
+    await app.waitForFunction((ks) => ks.every((k) => document.querySelector(`tr[data-key="${k}"] audio.local-audio`)), aiffs);
+    for (const k of aiffs) assert.match(await srcOf(app, k), /&src=original$/, "no preview yet");
+    // The dry run, in a dialog.
+    await tool(app, "buildPreviews");
+    await app.waitForSelector("#previewBuildConfirm");
+    assert.equal(await app.textContent("#previewBuildConfirm h3"), "Build 3 previews?");
+    const text = await app.textContent("#previewBuildConfirm .dialog-body");
+    assert.match(text, /^Of the 4 selected items: 3 tracks need a preview; 1 track plays as it is \(MP3, FLAC, WAV…\)\./);
+    assert.match(text, /About \d+ KB of the 3\.5 GB for previews \(none used yet; [\d.]+ GB free on this Mac\)\. Opus at 96 kbps\./);
+    assert.match(text, /Time: under a minute, to read [\d.]+ (KB|MB) from the music drive at about 120 MB\/s \(\d+ encoders? at once\)\./);
+    assert.doesNotMatch(text, /left out/);
+    if (process.env.E2E_SHOTS) await app.locator("#previewBuildConfirm").screenshot({ path: path.join(process.env.E2E_SHOTS, "preview-build-confirm.png") });
+    await app.click("#previewBuildConfirm .dialog-confirm");
+    await app.waitForFunction(() => /^Build previews: 3 built, 0 failed, 0 skipped/.test(document.getElementById("refreshStatus").textContent), null, { timeout: 60000 });
+    assert.equal((await api("/api/previews/status")).count, 3);
+    // The rows heard of each preview: their next players play it; the FLAC plays as it is.
+    await app.waitForFunction(
+      (ks) => ks.every((k) => /&src=preview$/.test(document.querySelector(`tr[data-key="${k}"] audio`).getAttribute("src"))),
+      aiffs,
+      { timeout: 10000 }
+    );
+    assert.match(await srcOf(app, flac), /&src=original$/);
+    // (By its own key: in global-player mode the one playing goes to the top bar.)
+    const played = `audio[data-key="${aiffs[0]}"]`;
+    await app.locator(`tr[data-key="${aiffs[0]}"]`).scrollIntoViewIfNeeded();
+    await app.click(`tr[data-key="${aiffs[0]}"] .rp-play`);
+    await app
+      .waitForFunction((sel) => {
+        const au = document.querySelector(sel);
+        return au && !au.paused && au.readyState >= 3 && au.currentTime > 0.3;
+      }, played, { timeout: 15000 })
+      .catch(async (e) => {
+        const st = await app.$eval(played, (au) => ({ src: au.getAttribute("src"), paused: au.paused, ready: au.readyState, net: au.networkState, t: au.currentTime, err: au.error && au.error.code }));
+        throw new Error(`${e.message} ${JSON.stringify(st)}`);
+      });
+    assert.match(await app.getAttribute(played, "src"), /&src=preview$/);
+    assert.equal(await app.textContent("#playingSource"), "▶ preview");
+    await app.$eval(played, (au) => au.pause());
+    // Built: nothing more to do.
+    await tool(app, "buildPreviews");
+    await app.waitForSelector("#previewBuildConfirm");
+    assert.equal(await app.textContent("#previewBuildConfirm h3"), "Nothing to build");
+    assert.match(await app.textContent("#previewBuildConfirm .dialog-body"), /: 0 tracks need a preview; 3 tracks already have one; 1 track plays as it is/);
+    await app.click("#previewBuildConfirm .dialog-cancel");
+
+    // Settings → Previews: the usage; a lower cap drops the least recently played at once.
+    const settings = await context.newPage();
+    pages.push(settings);
+    await settings.goto(SERVER + "/settings/#previews");
+    await settings.waitForFunction(() => /^3 previews: /.test(document.getElementById("previewUsageText").textContent));
+    assert.equal(await settings.inputValue("#f_preview_cache_gb"), "3.5");
+    assert.match(await settings.textContent("#previewUsageText"), /Free on this Mac: [\d.]+ GB\. No preview is written when that would drop below 2 GB\./);
+    if (process.env.E2E_SHOTS) await settings.locator("#sec_previews").screenshot({ path: path.join(process.env.E2E_SHOTS, "settings-previews.png") });
+    const { bytes } = await api("/api/previews/status");
+    await settings.fill("#f_preview_cache_gb", String(((bytes / 3) * 1.5) / GB)); // room for one
+    await settings.click("#saveBtn");
+    await settings.waitForFunction(() => /^1 preview: /.test(document.getElementById("previewUsageText").textContent), null, { timeout: 10000 });
+    assert.equal((await api("/api/previews/status")).count, 1);
+    // The collection heard: the two dropped rows' next players play the original.
+    await app.waitForFunction(
+      (ks) => ks.filter((k) => /&src=original$/.test(document.querySelector(`audio[data-key="${k}"]`).getAttribute("src"))).length === 2,
+      aiffs,
+      { timeout: 10000 }
+    );
+    // Clear previews (asks first).
+    await settings.click("#clearPreviews");
+    await settings.waitForSelector("#clearPreviewsConfirm");
+    assert.match(await settings.textContent("#clearPreviewsConfirm .dialog-body"), /^Deletes the 1 preview \(\d+ KB\) from this Mac\./);
+    await settings.click("#clearPreviewsConfirm .dialog-confirm");
+    await settings.waitForFunction(() => /^0 previews: /.test(document.getElementById("previewUsageText").textContent), null, { timeout: 10000 });
+    assert.match(await settings.textContent("#previewClearState"), /^Cleared: 1 preview \(\d+ KB\)\.$/);
+    assert.equal(await settings.isDisabled("#clearPreviews"), true);
+    assert.equal((await api("/api/previews/status")).count, 0);
+    await app.reload();
+    await app.waitForFunction((ks) => ks.every((k) => document.querySelector(`tr[data-key="${k}"] audio.local-audio`)), aiffs);
+    for (const k of aiffs) assert.match(await srcOf(app, k), /&src=original$/);
+  } finally {
+    for (const p of pages) await p.evaluate(() => localStorage.removeItem("bc_app_selection")).catch(() => {});
+    for (const p of pages) await p.close().catch(() => {});
+    if (batchId) await api(`/api/import/${batchId}`, { method: "DELETE" }).catch(() => {});
+    await put({
+      owned_root: before.owned_root,
+      not_owned_roots: before.not_owned_roots,
+      downloads_dir: before.downloads_dir,
+      preview_cache_gb: before.preview_cache_gb ?? 3.5,
+    });
+    await api("/api/previews", { method: "DELETE" }).catch(() => {});
+  }
+});

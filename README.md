@@ -52,6 +52,14 @@ reachable, edits are queued on the server and applied by the extension on its ne
     Bandcamp's stream instead (the cell's tooltip says why); an item from another source shows "File not available
     (drive not connected)" (asked of `/api/index/status`, which reads the mount table, never the drive), and ↻ (or a
     click on the cell) tries the file again, e.g. once the drive is back.
+  - **Build previews** (Tools ▾): previews for the selected items (or the ones shown; with nothing selected or
+    filtered, the whole collection). A dry run first, in a dialog: how many tracks need one, already have one or
+    play as they are, how much of the space for previews it takes, what's left out and why, and roughly how long
+    (the files to read at about 120 MB/s, the drive's speed: an estimate). The music drive must stay connected.
+    Then its progress in the status line (built/total, MB/s, ETA, the file) with **Cancel**, and at the end what it
+    built, failed and skipped, why it stopped early if it did, and the errors in a list to open. Rows follow the
+    previews as they're made or dropped: a row's next player plays its preview. A build started before the page
+    (or elsewhere) shows there too.
   - Test-only actions (Locate / Export latest 10) are in **Settings → Test**.
   - **Nothing runs unasked:** the app reads the music drive or Bandcamp only when you click (Play, Locate, Tools,
     Refresh ownership) or rest on a player: passing over players loads nothing, resting on one for a moment loads
@@ -99,7 +107,9 @@ reachable, edits are queued on the server and applied by the extension on its ne
 - **Settings → General:** music folders, matching, downloads (folder and format), Bandcamp request pacing, the
   lookup source (Bandcamp / MusicBrainz / both), the import log folder (not inside a music folder or on the music
   drive); **Rekordbox:** the Target library (Test / Main), whether bc-tagger may write to the main one, and the tag →
-  playlist mapping.
+  playlist mapping; **Previews:** their space (GB; saving a lower value drops the least recently played at once;
+  0 turns them off), bitrate and parallel encoders, what they take (and the Mac's free space, with the 2 GB the
+  server keeps free), and **Clear previews** (asks first).
 - **Main library:** picking Main is safe on its own: exports to it stop at the dry run, which says writes are
   locked and links to **Allow bc-tagger to write to my main rekordbox collection**. Ticking that asks for a backup
   first; unticking it locks writes again and keeps Main. The header says **MAIN LIBRARY · read-only** or **MAIN
@@ -150,7 +160,7 @@ Runs the extension, server and local app together in a Playwright Chromium with 
   real server (mapping, linking, browser lookups, downloads, re-locate, browse), settings, and rekordbox dry runs
   and a sandbox write.
 
-A full run (93 tests) takes about 2.5 minutes (2026-10-26: 110–147 s). For a quick check, run a subset by
+A full run (95 tests) takes about 3 minutes (2026-10-26: 110–147 s). For a quick check, run a subset by
 name. Include `Import \(replace\)`, which loads the test collection the others use:
 
 ```bash

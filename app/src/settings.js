@@ -10,14 +10,17 @@ import { confirmDialog } from "./dialog";
 import { createMappingEditor } from "./mappingEditor";
 import { createTestTab } from "./testTab";
 import { createImportTab } from "./importTab";
+import { createPreviewUsage } from "./previewUsage";
 
 const TABS = [
   ["general", "General"],
   ["rekordbox", "Rekordbox"],
+  ["previews", "Previews"],
   ["import", "Import"],
   ["test", "Test"], // test-only actions (Locate / Export latest 10)
 ];
 let importTab = null;
+let previewUsage = null;
 
 // "#import/<batch id>" → {tab: "import", arg: "<batch id>"}; unknown tabs → null.
 function fromHash() {
@@ -39,6 +42,14 @@ const SECTIONS = [
   ["rb_target", "rekordbox", "Target library", "Where exports write. Your main collection needs an explicit opt-in, and every export to it shows a dry run first."],
   ["rb_playlists", "rekordbox", "Playlists", "Which rekordbox playlists each tag goes to."],
   ["rb_files", "rekordbox", "Files", ""],
+  [
+    "previews",
+    "previews",
+    "Previews",
+    "Quick-starting copies of your AIFF and ALAC files (Opus), kept on this Mac: they play at once, even with the " +
+      "music drive asleep or unplugged. Made in the background (an import, a download, a first play) or all at once " +
+      "with Build previews in the collection's Tools ▾.",
+  ],
 ];
 
 const FIELDS = {
@@ -194,6 +205,34 @@ const FIELDS = {
     step: 10,
     label: "Download timeout (s)",
     help: "How long a download may go without data before it's retried (the reason shows in its row). At least 30; default 180.",
+  },
+  preview_cache_gb: {
+    section: "previews",
+    type: "number",
+    min: 0,
+    step: 0.5,
+    label: "Space for previews (GB)",
+    help:
+      "Default 3.5: about 850 five-minute tracks. 0 turns previews off. Saving a lower value drops the least " +
+      "recently played previews at once, down to it.",
+  },
+  preview_bitrate_kbps: {
+    section: "previews",
+    type: "number",
+    min: 32,
+    max: 256,
+    step: 8,
+    label: "Bitrate (kbps)",
+    help: "Opus; default 96. For new previews: the ones made keep theirs (Clear previews, then build again).",
+  },
+  preview_build_parallel: {
+    section: "previews",
+    type: "number",
+    min: 1,
+    max: 32,
+    step: 1,
+    label: "Parallel encoders",
+    help: "How many files Build previews encodes at once (one reader feeds them from the drive). Default: this Mac's cores but two.",
   },
   downloader_dir: { section: "advanced", type: "path", label: "Downloader folder" },
   dev_extension_build_dir: { section: "advanced", type: "path", label: "Dev extension build folder" },
@@ -632,6 +671,8 @@ function render(main, data) {
     mapping.setTargetFolder(folderInput.value);
     folderInput.addEventListener("input", () => mapping.setTargetFolder(folderInput.value));
   }
+  const previewsBody = document.querySelector("#sec_previews .section-body");
+  if (previewsBody) previewUsage = createPreviewUsage(previewsBody);
   importTab = createImportTab(main, { bridge });
   createTestTab(main);
   const start = fromHash();
@@ -650,6 +691,7 @@ function showTab(id, arg) {
   const bar = document.getElementById("saveBar");
   if (bar) bar.hidden = id === "import" || id === "test";
   if (id === "import" && importTab) importTab.show(arg);
+  if (id === "previews" && previewUsage) previewUsage.refresh();
   if (id === "rekordbox" && mapping && arg && arg.startsWith("tags=")) mapping.focusTags(arg.slice(5).split(",").filter(Boolean));
 }
 
@@ -677,6 +719,7 @@ async function save() {
     fill(saved);
     state.className = "ok";
     state.textContent = "Saved.";
+    if (previewUsage) previewUsage.refresh(); // a lower cap has dropped some
     nav.setTarget(saved);
     refreshHealth();
     loadMappingData(); // the target library may have changed

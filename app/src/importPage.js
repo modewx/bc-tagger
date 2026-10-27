@@ -23,6 +23,7 @@ import { logNote } from "./importLogs";
 import { tickTargets } from "./rowTicks";
 import { runExport } from "./exportFlow";
 import { createRowSaves } from "./rowSaves";
+import { followPreviews } from "./previewBuild";
 
 const batchId = new URLSearchParams(location.search).get("batch");
 document.body.classList.add("import-page");
@@ -1263,6 +1264,7 @@ async function discard(statusEl) {
   });
   // Back from a hidden tab (its stream was closed): catch up.
   events.on("resume", () => page.reload().then(renderInfo));
+  followPreviews(() => page, events); // a preview made or dropped: that row's next player
   await page.start();
   restoreView();
   events.start(); // after the rows: the stream holds a connection for good

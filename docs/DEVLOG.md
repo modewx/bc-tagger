@@ -257,6 +257,18 @@ npm run test:e2e                         # Playwright e2e: own profile, server :
   that has started swaps its source at the same moment and keeps playing (`swapSource`), the others when they
   next load. "▶ preview / original / Bandcamp stream" says what the track playing is heard from (the toggle and
   `local.best.preview`). Play/pause are SVG icons (the text glyphs rendered as a square in the docked player).
+- **Build previews; Settings → Previews** (user, A's API in `960b36c`): Tools ▾ → Build previews runs the dry run
+  (`POST /api/previews/build {ids|all, dry_run}`) and shows its plan in a dialog (needed / already / native /
+  missing, what's left out and whether the cap or the 2 GB guard, size of the cap, time from `source_bytes` at
+  120 MB/s, "an estimate"); then the build, its SSE `job` progress (built/total, MB/s, ETA, file) with Cancel, and a
+  summary (built/failed/skipped, cancelled, `stopped`, errors in a `<details>`). Selected items → `ids`; nothing
+  selected or filtered → `all`; else the shown ids. 409 or a build running at load: follow it
+  (`/api/previews/status`'s `batch`). SSE `preview` (`{path, preview}`, `{cleared}`) updates the items' flags
+  (a release's from its tracks) and redraws those rows, so their next players take `src=preview` (one in use
+  keeps its source). Settings → Previews: `preview_cache_gb` / `preview_bitrate_kbps` / `preview_build_parallel`,
+  the usage (status), Clear previews (`DELETE /api/previews`, asks). e2e: a stubbed build (dialog with left-out,
+  progress line, Cancel, errors) and a real one on the e2e server (3 AIFFs + a FLAC from Import from Files; cap 0
+  during the commit so it queues none): 3 built, rows play `src=preview`, a lower cap leaves 1, Clear leaves 0.
 - **Import ticks never lost** (user: the selection in `imp-45e20d7a`): ticks went one PUT per row (4 at a time),
   so Select all over hundreds of rows took seconds, and a reload meanwhile dropped the rest; a failed save only
   logged. `rowSaves.js`: one request per action (A's bulk `PUT /api/import/<id>/rows {ns, changes}`; 404/405/422:

@@ -235,3 +235,9 @@ button.chip:hover { filter: brightness(0.95); border-color: #bbb; }
 .save-state.retrying,
 .save-state.failed { color: #b42318; white-space: normal; }
 .save-state .save-retry { font: inherit; font-size: 12px; padding: 1px 8px; margin-left: 2px; cursor: pointer; }
+/* Build previews (previewBuild.js): progress with Cancel, the summary's errors, the dry run's dialog. */
+.preview-cancel { font: inherit; font-size: 12px; padding: 1px 8px; margin-left: 4px; cursor: pointer; }
+.preview-errors { display: inline-block; vertical-align: top; }
+.preview-errors summary { cursor: pointer; color: #b42318; }
+.preview-errors ul { margin: 4px 0; padding-left: 18px; font-size: 12px; }
+.preview-plan p { margin: 0 0 8px; }

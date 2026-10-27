@@ -9,6 +9,7 @@ import { Jobs, progressText, resultText } from "./jobs";
 import { buildNav } from "./nav";
 import { appColumns, downloadable, isLocated, localPlayUrl, localDuration, localUnavailable } from "./columns";
 import { originalOf, previewToggle } from "./previews";
+import { buildPreviews, followPreviews, followRunning } from "./previewBuild";
 import { downloadFlow, fullReleasesToggle } from "./downloads";
 import { startDevReload } from "./devReload";
 import { createStatusFilter, createSourceFilter, sourceOf, playableItem } from "./statusFilter";
@@ -125,6 +126,16 @@ function exportShown(onProgress) {
   const ids = targetIds();
   if (!ids.length) return Promise.resolve({ status: "done", result: { message: "nothing selected or shown" } });
   return runExport(jobs, { ids }, onProgress, { ask: true });
+}
+
+// Build previews: the selected items, else the ones shown (all of them: the whole collection, in "#" order).
+function buildPreviewsRun(statusEl, button) {
+  const sel = selectedIds();
+  const shown = Object.keys(page.getView());
+  const all = !sel.length && shown.length === Object.keys(page.getItems()).length;
+  const target = sel.length ? { ids: sel } : all ? { all: true } : { ids: shown };
+  const what = sel.length ? `the ${sel.length} selected items` : all ? `all ${shown.length} items` : `the ${shown.length} items shown`;
+  return buildPreviews({ jobs, statusEl, button, target, what });
 }
 
 function updateShownButtons() {
@@ -322,6 +333,16 @@ async function refreshHealth() {
         },
       },
       { ...jobButton("refreshOwnership", "Refresh ownership", "Check which items you own on Bandcamp", refreshOwnership), group: "tools" },
+      {
+        id: "buildPreviews",
+        label: "Build previews",
+        title:
+          "Quick-starting copies of the selected (or shown) AIFF/ALAC tracks on this Mac: they play at once, even with " +
+          "the drive asleep or unplugged. Shows what it would do first; reads the music drive.",
+        className: "job-btn",
+        group: "tools",
+        run: buildPreviewsRun,
+      },
     ],
     localPlayUrl,
     localFallbackUrl: originalOf,
@@ -374,6 +395,7 @@ async function refreshHealth() {
   statusFilter.mount(document.getElementById("searchBar"), scroller, () => page.refilter());
 
   events.on("tags", () => refreshHealth());
+  followPreviews(() => page, events); // a preview made or dropped: that row's next player
   // Back from a hidden tab (its stream was closed): catch up.
   events.on("resume", () => {
     page.reload();
@@ -390,6 +412,7 @@ async function refreshHealth() {
     page.statusEl.textContent = `Could not load the collection from the server: ${e.message}`;
   }
   events.start(); // after the items: the stream holds a connection for good
+  followRunning(jobs, page.statusEl, document.getElementById("buildPreviews")); // a build started before this page
 
   // The kept selection: only items still in the collection.
   const items = page.getItems();

@@ -214,3 +214,11 @@ section[hidden] { display: none; }
 /* Settings → Test: a discreet tab at the end (test-only actions). */
 #tabs #tab_test { margin-left: auto; color: #999; font-size: 12px; }
 .test-actions button { margin-right: 6px; }
+/* Settings → Previews: usage and Clear previews (previewUsage.js). */
+.preview-usage { margin-top: 14px; padding-top: 10px; border-top: 1px solid #eee; }
+.preview-usage h3 { font-size: 14px; margin: 0 0 6px; }
+.preview-usage .pu-lines p { margin: 0 0 4px; font-size: 13px; }
+.preview-usage .pu-lines p.muted { color: #777; font-size: 12px; }
+.preview-usage .pu-actions { display: flex; align-items: center; gap: 10px; margin-top: 8px; }
+.preview-usage button.secondary.danger { color: #b42318; border-color: #d92d20; }
+.preview-usage .pu-note { font-size: 12px; color: #555; }
