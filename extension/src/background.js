@@ -288,7 +288,9 @@ async function handleAppBridge(op, payload, sender) {
     case "refreshOwnership":
       return refreshOwnership();
     case "syncNow": {
-      await fullSync("app", { force: true });
+      // Guarded like an automatic sync: an empty (or much smaller) storage never replaces the server's mirror
+      // from a page (the import page asks after a commit); only the popup's "sync" forces that.
+      await fullSync("app");
       const edits = await pullTagEdits();
       const adds = await pullPendingAdds().catch((e) => ({ error: e.message }));
       return { ...edits, adds };

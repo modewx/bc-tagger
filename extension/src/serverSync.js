@@ -156,7 +156,7 @@ async function pushPending() {
 // Push everything; the server drops items that are no longer in storage.
 // Automatic syncs never let an empty or much smaller storage (a fresh
 // install, a new profile) wipe the server's mirror: they then only upsert.
-// Manual syncs (popup "sync", the app) pass {force: true}.
+// Only the popup's "sync" passes {force: true} (the app's syncNow is guarded too).
 export async function fullSync(reason, { force = false } = {}) {
   const { taggedItems, tags } = await chrome.storage.local.get(["taggedItems", "tags"]);
   const items = taggedItems || {};

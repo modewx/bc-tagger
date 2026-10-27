@@ -263,6 +263,13 @@ npm run test:e2e                         # Playwright e2e: own profile, server :
   that has started swaps its source at the same moment and keeps playing (`swapSource`), the others when they
   next load. "▶ preview / original / Bandcamp stream" says what the track playing is heard from (the toggle and
   `local.best.preview`). Play/pause are SVG icons (the text glyphs rendered as a square in the docked player).
+- **Collections e2e on A's real server** (after the merge of `e422c37`): the route stand-in is gone; the two
+  collections tests create, fill, rename and delete real collections (and drop what they made), and the import
+  test commits a real track-list batch with `collection_id` (`last-committed` says where it went). The toolbar test
+  expects the bar (All, Collection) and Remove hidden in All. Found on the way: the app's `syncNow` (the import page
+  asks after a commit) forced a full sync, so an extension with empty storage replaced the server's whole mirror
+  (946 items → 0 in an alone run). It's guarded now like the automatic syncs (an empty or much smaller storage only
+  upserts); only the popup's "sync" forces.
 - **Phase 8: collections, the UI** (user; contract in LOCAL_COLLECTION_PLAN.md, A building the server): `collections.js`:
   the bar at the top (All first, then the collections by `pos`, with counts; kept in localStorage
   `bc_app_collection`, `?collection=` wins and follows a switch), Create Collection / Rename (a name dialog: empty or

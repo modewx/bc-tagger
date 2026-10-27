@@ -4461,16 +4461,22 @@ test("collection: the toolbar is everyday actions (test ones in Settings → Tes
   const app = await context.newPage();
   const checked = () => app.$$eval("#collectionTable .row-check:checked", (b) => b.map((x) => x.closest("tr").dataset.key).sort());
   const batchIds = [];
+  await storageFirst(app, { remove: ["bc_app_collection"] }); // All
   try {
     await app.goto(SERVER + "/");
     await app.waitForFunction(() => document.querySelectorAll("#collectionTable tbody tr").length > 2);
+    // The collections at the top: All, then "Collection".
+    await app.waitForSelector("#collectionsBar:not([hidden])");
+    const options = await app.$$eval("#collectionSelect option", (os) => os.map((o) => o.textContent));
+    assert.match(options[0], /^All \(\d+\)$/);
+    assert.match(options[1], /^Collection \(\d+\)$/);
+    assert.equal(await app.inputValue("#collectionSelect"), "all");
     // The toolbar: selection actions, the drive, Tools ▾, Columns ▾; no test buttons.
     const bar = await app.$$eval("#toolbar button", (bs) => bs.map((b) => b.id));
     assert.deepEqual(bar.slice(0, 7), [
       "locateShown", "exportShown", "downloadOwnedMissing", "selectLastImport", "clearSelection", "removeFromCollection", "rescanDrive",
     ]);
-    assert.equal(await app.isHidden("#removeFromCollection"), true, "a server without collections: hidden");
-    assert.equal(await app.isHidden("#collectionsBar"), true);
+    assert.equal(await app.isHidden("#removeFromCollection"), true, "not in All");
     assert.ok(bar.includes("toolsMenuBtn") && bar.includes("columnsChooser"));
     assert.ok(!bar.includes("locateLatest") && !bar.includes("exportLatest"), "no test buttons");
     assert.ok(await app.$("#toolsMenu #refreshOwnership"), "Refresh ownership is in Tools");
@@ -4749,101 +4755,37 @@ test("Build previews on the e2e server (3 AIFFs and a FLAC): the dialog's number
   }
 });
 
-// --- Phase 8: collections (UI against the contract in LOCAL_COLLECTION_PLAN.md) ---------------
+// --- Phase 8: collections (the real server: A's collections, e422c37) --------------------------
 
-// A stand-in for the server's collections until A's lands (the contract's shapes): collection 0 "Collection" holds
-// every one of `items` (the server's, read at the start); others as the page makes them. Answers /api/collections…
-// and the items from that snapshot (`?collection=`, each item's `collections`, a collection's own "#"), so what the
-// extension syncs meanwhile changes nothing; `calls` records the collection requests.
 const serverItems = () => api("/api/items").then((d) => (Array.isArray(d) ? d : d.items));
-function collectionsDouble(items) {
-  const allIds = items.map((i) => i.id);
-  const d = { list: [{ id: 0, name: "Collection", pos: 0, created_at: "2026-10-27T00:00:00Z" }], members: new Map([[0, allIds]]), next: 1, calls: [] };
-  const count = (id) => (d.members.get(id) || []).length;
-  const json = (route, body, status = 200) => route.fulfill({ status, contentType: "application/json", body: JSON.stringify(body) });
-  d.add = (name) => {
-    const c = { id: d.next++, name, pos: d.list.length, created_at: new Date().toISOString() };
-    d.list.push(c);
-    d.members.set(c.id, []);
-    return c;
-  };
-  d.install = async (page) => {
-    await page.route(/\/api\/collections(\/.*)?$/, async (route) => {
-      const req = route.request();
-      const p = new URL(req.url()).pathname;
-      const body = req.postData() ? JSON.parse(req.postData()) : null;
-      d.calls.push({ method: req.method(), path: p, body });
-      if (p === "/api/collections" && req.method() === "GET") return json(route, d.list.map((c) => ({ ...c, count: count(c.id) })));
-      if (p === "/api/collections" && req.method() === "POST") {
-        if (d.list.some((c) => c.name === body.name)) return json(route, { detail: "a collection with that name exists" }, 409);
-        return json(route, { ...d.add(body.name), count: 0 });
-      }
-      let m = p.match(/^\/api\/collections\/(\d+)$/);
-      if (m) {
-        const id = Number(m[1]);
-        const c = d.list.find((x) => x.id === id);
-        if (!c) return json(route, { detail: "no such collection" }, 404);
-        if (req.method() === "PATCH") return json(route, { ...Object.assign(c, body), count: count(id) });
-        if (req.method() === "DELETE") {
-          if (id === 0) return json(route, { detail: "“Collection” can't be deleted" }, 409);
-          d.list = d.list.filter((x) => x !== c);
-          d.members.delete(id);
-          return json(route, { deleted: id });
-        }
-      }
-      m = p.match(/^\/api\/collections\/(\d+)\/items$/);
-      const mem = m && d.members.get(Number(m[1]));
-      if (mem && req.method() === "POST") {
-        const add = body.ids.filter((k, i) => !mem.includes(k) && body.ids.indexOf(k) === i);
-        mem.push(...add);
-        return json(route, { added: add.length, already: body.ids.length - add.length });
-      }
-      if (mem && req.method() === "DELETE") {
-        const left = mem.filter((k) => !body.ids.includes(k));
-        d.members.set(Number(m[1]), left);
-        return json(route, { removed: mem.length - left.length });
-      }
-      return json(route, { detail: "not in the stand-in" }, 404);
-    });
-    await page.route(/\/api\/items(\?.*)?$/, async (route) => {
-      const u = new URL(route.request().url());
-      if (u.searchParams.has("ids")) return route.fallback();
-      const list = items;
-      const want = u.searchParams.get("collection") || "all";
-      const mem = want === "all" ? null : d.members.get(Number(want)) || [];
-      const out = list
-        .filter((it) => !mem || mem.includes(it.id))
-        .map((it) => ({
-          ...it,
-          collections: d.list.filter((c) => (d.members.get(c.id) || []).includes(it.id)).map((c) => c.id),
-          ...(mem ? { order: mem.indexOf(it.id) + 1 } : {}),
-        }));
-      return route.fulfill({ json: out });
-    });
-  };
-  return d;
-}
+const collectionsNow = () => api("/api/collections");
+const membersOf = (id) => api(`/api/items?collection=${id}`).then((d) => (Array.isArray(d) ? d : d.items).map((i) => i.id));
+// Every collection but "Collection" goes (memberships only): what a test made.
+const dropCollections = async () => {
+  for (const c of await collectionsNow().catch(() => [])) if (c.id !== 0) await api(`/api/collections/${c.id}`, { method: "DELETE" }).catch(() => {});
+};
 const optionTexts = (page, sel) => page.$$eval(`${sel} option`, (os) => os.map((o) => o.textContent));
 const shownKeys = (page) => page.$$eval("#collectionTable tbody tr[data-key]", (rs) => rs.map((r) => r.dataset.key));
+const shownName = (page) => page.$eval("#collectionSelect", (s) => s.selectedOptions[0].textContent);
 
-test("Collections (stand-in server): the dropdown (All first, counts), Create / Rename / Delete, Import to Collection and Remove from collection on the selection, the Collections chips in All, the choice kept and ?collection=", async () => {
-  const items = await serverItems();
-  const n = items.length;
-  const d = collectionsDouble(items);
+test("Collections: the dropdown (All first, counts), Create / Rename / Delete, Import to Collection and Remove from collection on the selection, the Collections chips in All, the choice kept and ?collection=", async () => {
+  await dropCollections();
+  const n = (await serverItems()).length;
+  const inCollection = (await collectionsNow()).find((c) => c.id === 0).count;
   const app = await context.newPage();
   await storageFirst(app, { remove: [...COLLECTION_STATE, "bc_app_collection", "bc_app_col_widths_v2_shown"] });
-  await d.install(app);
   const pick = async (value) => {
     await app.selectOption("#collectionSelect", String(value));
     await app.waitForFunction(() => !document.getElementById("loadingState"));
   };
   const rowsAre = (count) => app.waitForFunction((c) => document.querySelectorAll("#collectionTable tbody tr[data-key]").length === c, count, { timeout: 10000 });
   const status = () => app.textContent("#refreshStatus");
+  const statusIs = (re) => app.waitForFunction((src) => new RegExp(src).test(document.getElementById("refreshStatus").textContent), re.source, { timeout: 10000 });
   try {
     await app.goto(SERVER + "/");
     await app.waitForSelector("#collectionsBar:not([hidden])");
     assert.equal(await app.textContent("#navLink_collection"), "Collections");
-    assert.deepEqual(await optionTexts(app, "#collectionSelect"), [`All (${n})`, `Collection (${n})`]);
+    assert.deepEqual(await optionTexts(app, "#collectionSelect"), [`All (${n})`, `Collection (${inCollection})`]);
     assert.equal(await app.inputValue("#collectionSelect"), "all", "All by default");
     assert.equal(await app.isDisabled("#renameCollection"), true);
     assert.equal(await app.isDisabled("#deleteCollection"), true);
@@ -4855,11 +4797,12 @@ test("Collections (stand-in server): the dropdown (All first, counts), Create / 
 
     // "Collection": can be renamed, never deleted; no Collections column.
     await pick(0);
+    await rowsAre(inCollection);
     assert.equal(await app.isDisabled("#renameCollection"), false);
     assert.equal(await app.isDisabled("#deleteCollection"), true);
     assert.equal(await app.$("#collectionTable thead th.col-collections"), null);
 
-    // Create Collection: a name not taken; it's shown, empty.
+    // Create Collection: a name not taken (any case); it's shown, empty.
     await app.click("#createCollection");
     await app.waitForSelector("#createCollectionDialog");
     assert.equal(await app.isDisabled("#createCollectionDialog .dialog-confirm"), true, "no name yet");
@@ -4871,27 +4814,29 @@ test("Collections (stand-in server): the dropdown (All first, counts), Create / 
     await app.waitForFunction(() => document.getElementById("collectionSelect").selectedOptions[0].textContent === "Techno (0)");
     await rowsAre(0);
     assert.match(await status(), /^Created “Techno”: empty\./);
-    const techno = d.list.find((c) => c.name === "Techno").id;
-    assert.deepEqual(d.calls.find((c) => c.method === "POST").body, { name: "Techno" });
+    const techno = (await collectionsNow()).find((c) => c.name === "Techno");
+    assert.ok(techno, "made on the server");
+    assert.equal(await app.inputValue("#collectionSelect"), String(techno.id));
 
     // Import to Collection, on the selection (from All): a copy; again: what was there already is said.
     await pick("all");
     await rowsAre(n);
     for (const k of [k1, k2, k3]) await app.click(`tr[data-key="${k}"] .row-check`);
     assert.deepEqual(await optionTexts(app, "#importToCollection"), ["Import 3 to Collection…", "Collection", "Techno"]);
-    await app.selectOption("#importToCollection", String(techno));
-    await app.waitForFunction(() => /^Import to Collection “Techno”: 3 added\.$/.test(document.getElementById("refreshStatus").textContent));
-    await app.waitForFunction((k) => [...document.querySelectorAll(`tr[data-key="${k}"] .collection-chip`)].map((c) => c.textContent).join() === "Collection,Techno", k1);
+    await app.selectOption("#importToCollection", String(techno.id));
+    await statusIs(/^Import to Collection “Techno”: 3 added\.$/);
+    assert.deepEqual((await membersOf(techno.id)).sort(), [k1, k2, k3].sort());
+    await app.waitForFunction((k) => [...document.querySelectorAll(`tr[data-key="${k}"] .collection-chip`)].map((c) => c.textContent).join() === "Collection,Techno", k1, { timeout: 10000 });
     await app.click(`tr[data-key="${k4}"] .row-check`);
-    await app.selectOption("#importToCollection", String(techno));
-    await app.waitForFunction(() => /^Import to Collection “Techno”: 1 added, 3 already there\.$/.test(document.getElementById("refreshStatus").textContent));
+    await app.selectOption("#importToCollection", String(techno.id));
+    await statusIs(/^Import to Collection “Techno”: 1 added, 3 already there\.$/);
     assert.equal(await app.inputValue("#importToCollection"), "", "back to its label");
 
-    // In Techno: its 4; Import to Collection offers the others; Remove from collection (asks first).
-    await pick(techno);
+    // In Techno: its 4, in the order they joined; Import to Collection offers the others; Remove (asks first).
+    await pick(techno.id);
     await rowsAre(4);
-    assert.deepEqual((await shownKeys(app)).sort(), [k1, k2, k3, k4].sort());
-    assert.equal(await app.inputValue("#collectionSelect"), String(techno));
+    assert.deepEqual(await shownKeys(app), [k1, k2, k3, k4]);
+    await app.waitForFunction(() => document.getElementById("collectionSelect").selectedOptions[0].textContent === "Techno (4)", null, { timeout: 10000 });
     assert.deepEqual(await optionTexts(app, "#importToCollection"), ["Import 4 to Collection…", "Collection"]);
     await app.click("#clearSelection");
     await app.click(`tr[data-key="${k2}"] .row-check`);
@@ -4903,8 +4848,9 @@ test("Collections (stand-in server): the dropdown (All first, counts), Create / 
     await rowsAre(3);
     assert.equal(await status(), "Removed 1 from “Techno”.");
     assert.equal(await app.$(`tr[data-key="${k2}"]`), null);
-    assert.ok(d.calls.some((c) => c.method === "DELETE" && c.path === `/api/collections/${techno}/items` && c.body.ids.join() === k2));
-    await app.waitForFunction(() => document.getElementById("collectionSelect").selectedOptions[0].textContent === "Techno (3)");
+    assert.deepEqual((await membersOf(techno.id)).sort(), [k1, k3, k4].sort());
+    assert.ok((await membersOf(0)).includes(k2), "still in Collection");
+    await app.waitForFunction(() => document.getElementById("collectionSelect").selectedOptions[0].textContent === "Techno (3)", null, { timeout: 10000 });
 
     // Rename.
     await app.click("#renameCollection");
@@ -4912,20 +4858,20 @@ test("Collections (stand-in server): the dropdown (All first, counts), Create / 
     assert.equal(await app.inputValue("#renameCollectionDialogName"), "Techno");
     await app.fill("#renameCollectionDialogName", "Deep Techno");
     await app.click("#renameCollectionDialog .dialog-confirm");
-    await app.waitForFunction(() => document.getElementById("collectionSelect").selectedOptions[0].textContent === "Deep Techno (3)");
-    assert.deepEqual(d.calls.find((c) => c.method === "PATCH").body, { name: "Deep Techno" });
+    await app.waitForFunction(() => document.getElementById("collectionSelect").selectedOptions[0].textContent === "Deep Techno (3)", null, { timeout: 10000 });
+    assert.equal((await collectionsNow()).find((c) => c.id === techno.id).name, "Deep Techno");
 
     // Kept in this browser; ?collection= wins.
     await app.reload();
     await rowsAre(3);
-    assert.equal(await app.inputValue("#collectionSelect"), String(techno));
+    assert.equal(await app.inputValue("#collectionSelect"), String(techno.id));
     await app.goto(SERVER + "/?collection=all");
     await rowsAre(n);
     assert.equal(await app.inputValue("#collectionSelect"), "all");
-    await app.goto(`${SERVER}/?collection=${techno}`);
+    await app.goto(`${SERVER}/?collection=${techno.id}`);
     await rowsAre(3);
 
-    // Delete (asks first): back to All; the tracks stay there.
+    // Delete (asks first): back to All; the tracks stay there and in Collection.
     await app.click("#deleteCollection");
     await app.waitForSelector("#deleteCollectionConfirm");
     assert.match(await app.textContent("#deleteCollectionConfirm .dialog-body"), /^The 3 tracks in it stay in All and in your other collections, with their tags\./);
@@ -4933,60 +4879,69 @@ test("Collections (stand-in server): the dropdown (All first, counts), Create / 
     await app.click("#deleteCollectionConfirm .dialog-confirm");
     await rowsAre(n);
     assert.equal(await app.inputValue("#collectionSelect"), "all");
-    assert.deepEqual(await optionTexts(app, "#collectionSelect"), [`All (${n})`, `Collection (${n})`]);
+    assert.deepEqual(await optionTexts(app, "#collectionSelect"), [`All (${n})`, `Collection (${inCollection})`]);
     assert.equal(await status(), "Deleted the collection “Deep Techno”.");
     assert.match(app.url(), /\?collection=all$/, "the URL follows");
+    assert.deepEqual((await collectionsNow()).map((c) => c.id), [0]);
     if (process.env.E2E_SHOTS) await app.locator("#topBar").screenshot({ path: path.join(process.env.E2E_SHOTS, "collections-bar.png") });
   } finally {
     await app.evaluate(() => ["bc_app_selection", "bc_app_collection"].forEach((k) => localStorage.removeItem(k))).catch(() => {});
     await app.close();
+    await dropCollections();
   }
 });
 
-test("Collections: the import page's Import selected goes into the chosen collection (the last used, else Collection), and the collection page opens there (stubbed import, stand-in collections)", async () => {
-  const items = await serverItems();
-  const d = collectionsDouble(items);
-  const techno = d.add("Techno").id;
-  const stub = importStub(JSON.parse(fs.readFileSync(IMPORT_SAMPLE, "utf8")));
+test("Collections: Import selected goes into the collection picked next to it (the last used, else Collection), an open batch choosing at the commit; the collection page then opens there", async () => {
+  await dropCollections();
+  const techno = await post("/api/collections", { name: "E2E Techno" });
+  // A batch of two collection tracks (their own tags: the merge changes nothing), made before choosing.
+  const picked = (await serverItems()).filter((i) => i.tralbum_type === "t" && i.source !== "other" && (i.tags || []).length).slice(0, 2);
+  const items = picked.map((it, i) => ({ line: i + 1, raw: `${it.artist} - ${it.title}`, artist: it.artist, title: it.title, existing_id: it.id, tags: it.tags }));
+  const { batch_id: batchId } = await post("/api/import", { file: { format: "bc-tagger-import/1", source: "e2e-into.txt", items }, default_tags: [], name: "e2e-into" });
+  await waitFor(() => api(`/api/import/${batchId}`).then((b) => b.status === "ready"), { what: "the batch", timeout: 30000 });
   const page = await context.newPage();
   await storageFirst(page, { remove: [...COLLECTION_STATE, "bc_app_collection", "bc_import_collection"] });
-  await stub.install(page);
-  await d.install(page);
-  // The commit: as the server would, its items join the chosen collection, and the page opens them.
-  const imported = items.slice(0, 2).map((i) => i.id);
   const commits = [];
-  await page.route("**/api/import/e2e-b1/commit", (route) => {
-    const body = JSON.parse(route.request().postData() || "{}");
-    commits.push(body);
-    d.members.get(body.collection_id ?? 0).push(...imported.filter((k) => !d.members.get(body.collection_id ?? 0).includes(k)));
-    return route.fulfill({ json: { pending_adds: 0, tag_merges: 2, other_added: 0, skipped: 5, selected: imported } });
-  });
+  page.on("request", (r) => r.method() === "POST" && r.url().endsWith(`/api/import/${batchId}/commit`) && commits.push(JSON.parse(r.postData() || "{}")));
   const confirms = [];
   page.on("dialog", (dlg) => {
     confirms.push(dlg.message());
     dlg.accept();
   });
+  const pickerReady = () => page.waitForFunction(() => !document.querySelector(".import-collection-label").hidden);
   try {
-    await page.goto(SERVER + "/import/?batch=e2e-b1");
-    await page.waitForSelector("#importCollection");
-    await page.waitForFunction(() => !document.querySelector(".import-collection-label").hidden);
-    assert.deepEqual(await optionTexts(page, "#importCollection"), ["Collection", "Techno"]);
+    await page.goto(`${SERVER}/import/?batch=${batchId}`);
+    await pickerReady();
+    assert.deepEqual(await optionTexts(page, "#importCollection"), ["Collection", "E2E Techno"]);
     assert.equal(await page.inputValue("#importCollection"), "0", "Collection, with none used before");
-    await page.selectOption("#importCollection", String(techno));
+    await page.selectOption("#importCollection", String(techno.id));
     await page.reload();
-    await page.waitForFunction(() => !document.querySelector(".import-collection-label").hidden);
-    assert.equal(await page.inputValue("#importCollection"), String(techno), "the last used");
+    await pickerReady();
+    assert.equal(await page.inputValue("#importCollection"), String(techno.id), "the last used");
     if (process.env.E2E_SHOTS) await page.locator("#toolbar").screenshot({ path: path.join(process.env.E2E_SHOTS, "import-into-collection.png") });
     await page.click("#importSelected");
-    await page.waitForURL(`${SERVER}/`);
-    assert.deepEqual(commits, [{ collection_id: techno }]);
-    assert.match(confirms[0], /^Import 7 selected rows into “Techno”\?/);
-    // The collection page opens in Techno, with what was imported selected.
-    await page.waitForFunction((v) => document.getElementById("collectionSelect").value === v, String(techno));
-    await page.waitForFunction(() => document.querySelectorAll("#collectionTable tbody tr[data-key]").length === 2);
-    assert.deepEqual((await page.$$eval("#collectionTable .row-check:checked", (bs) => bs.map((b) => b.closest("tr").dataset.key))).sort(), imported.slice().sort());
+    await page.waitForURL(`${SERVER}/`, { timeout: 30000 });
+    assert.deepEqual(commits, [{ collection_id: techno.id }]);
+    assert.match(confirms[0], /^Import 2 selected rows into “E2E Techno”\?/);
+    const last = await api("/api/import/last-committed");
+    assert.equal(last.batch_id, batchId);
+    assert.equal(last.collection_id, techno.id);
+    assert.deepEqual((await membersOf(techno.id)).sort(), picked.map((i) => i.id).sort(), "they went into E2E Techno");
+    // The collection page opens in E2E Techno, with what was imported selected.
+    await page.waitForFunction((v) => document.getElementById("collectionSelect").value === v, String(techno.id));
+    await page.waitForFunction(() => document.querySelectorAll("#collectionTable tbody tr[data-key]").length === 2, null, { timeout: 10000 });
+    assert.equal(await shownName(page), "E2E Techno (2)");
+    assert.deepEqual((await page.$$eval("#collectionTable .row-check:checked", (bs) => bs.map((b) => b.closest("tr").dataset.key))).sort(), picked.map((i) => i.id).sort());
+    // Select last import, from All: back in E2E Techno.
+    await page.selectOption("#collectionSelect", "all");
+    await page.waitForFunction(() => document.querySelectorAll("#collectionTable tbody tr[data-key]").length > 2);
+    await page.click("#selectLastImport");
+    await page.waitForFunction((v) => document.getElementById("collectionSelect").value === v, String(techno.id), { timeout: 10000 });
+    await page.waitForFunction(() => /^Selected the 2 items of the last import/.test(document.getElementById("refreshStatus").textContent));
   } finally {
     await page.evaluate(() => ["bc_app_selection", "bc_app_collection", "bc_import_collection"].forEach((k) => localStorage.removeItem(k))).catch(() => {});
     await page.close();
+    await api(`/api/import/${batchId}`, { method: "DELETE" }).catch(() => {});
+    await dropCollections();
   }
 });
