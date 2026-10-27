@@ -1189,6 +1189,11 @@ def link_candidates(svc, payload: dict, limit: int = 5) -> list[dict]:
     return copy.deepcopy(results[key])
 
 
+def link_candidates_many(svc, payloads: list[dict], limit: int = 5) -> list[list[dict]]:
+    """``link_candidates`` for each payload, in order (a Bandcamp page's items in one request)."""
+    return [link_candidates(svc, p, limit) for p in payloads]
+
+
 def _link_candidates(svc, ready: list[dict], page, album_page, found: _PageItem, limit: int) -> list[dict]:
     out = []
     for b in ready:

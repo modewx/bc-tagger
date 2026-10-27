@@ -57,6 +57,7 @@ def norm_title(s: str | None) -> str:
     return " ".join(_GLUED_DIGITS.sub(" ", t).split())
 
 
+@_memo
 def strip_side(s: str | None) -> str:
     """'B1- Tiberis' -> 'Tiberis' (vinyl side prefixes on Bandcamp track titles)."""
     return _SIDE_PREFIX.sub("", s or "", count=1).strip()
@@ -73,6 +74,7 @@ def looks_like_label(artist: str | None) -> bool:
 _FEAT = re.compile(r"\s*[\(\[]?\s*\b(?:feat\.?|ft\.?|featuring)\s+[^\)\]]*[\)\]]?", re.I)
 
 
+@_memo
 def strip_feat(s: str | None) -> str:
     """'Song (feat. X)' / 'Artist ft. X' -> 'Song' / 'Artist' (featured artists move between
     title and artist fields from one source to another)."""
@@ -86,7 +88,8 @@ def unslug(s: str | None) -> str:
 _ROMAN = {"i": "1", "ii": "2", "iii": "3", "iv": "4", "v": "5", "vi": "6", "vii": "7", "viii": "8", "ix": "9", "x": "10"}
 
 
-def numbers(s: str | None) -> set[str]:
+@_memo
+def numbers(s: str | None) -> frozenset[str]:
     """Number tokens in a title ('Part 3', 'File #2', 'Vol. II') for the number-mismatch guard."""
     out = set()
     for tok in norm_title(s).split():
@@ -95,7 +98,7 @@ def numbers(s: str | None) -> set[str]:
         elif tok in _ROMAN and tok not in ("i", "v", "x"):
             # single letters are too ambiguous ("I like to watch", "V/A")
             out.add(_ROMAN[tok])
-    return out
+    return frozenset(out)
 
 
 # -- filename parsing ---------------------------------------------------------------------

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import copy
 import json
 import logging
 import re
@@ -114,6 +115,13 @@ class LinkBody(BaseModel):
     tralbum: Optional[dict] = None
     embed: Optional[dict] = None
     page_url: Optional[str] = None
+
+
+class LinkCandidatesBody(LinkBody):
+    """One Bandcamp page item (``item``, or ``tralbum`` + ``embed``; ``page_url``), or with ``items`` several, each
+    shaped like a single request: one request per page instead of one per item."""
+
+    items: Optional[list[LinkBody]] = Field(default=None, max_length=1000)
 
 
 class LookupResultsBody(BaseModel):
@@ -340,16 +348,60 @@ def create_app(service: Service | None = None) -> FastAPI:
         return _import_call(imp.link_row, svc, batch_id, n, payload)
 
     link_slots = asyncio.Semaphore(LINK_CANDIDATE_SLOTS)
+    link_running: dict[str, asyncio.Future] = {}
+
+    async def _link_candidates(request: Request, payload: dict) -> list[dict]:
+        """Identical requests in flight share one answer (the extension resends after its 4 s timeout)."""
+        key = json.dumps(payload, sort_keys=True, default=str)
+        running = link_running.get(key)
+        if running is not None:
+            try:
+                return copy.deepcopy(await asyncio.shield(running))
+            except asyncio.CancelledError:
+                if not running.cancelled():
+                    raise  # this request itself was cancelled
+                # the first asker left before its turn: compute it ourselves
+        future = asyncio.get_running_loop().create_future()
+        link_running[key] = future
+        try:
+            async with link_slots:  # waiting here holds no worker thread
+                if await request.is_disconnected():  # gave up while waiting its turn
+                    future.cancel()
+                    return []
+                result = await run_in_threadpool(_import_call, imp.link_candidates, svc, payload)
+            future.set_result(result)
+            return copy.deepcopy(result)
+        except BaseException as e:
+            if not future.done():
+                if isinstance(e, Exception):
+                    future.set_exception(e)
+                    future.exception()  # the waiting duplicates get it too; no "never retrieved" warning
+                else:
+                    future.cancel()
+            raise
+        finally:
+            if link_running.get(key) is future:
+                del link_running[key]
 
     @app.post("/api/import/link-candidates")
-    async def import_link_candidates(request: Request, body: LinkBody) -> list[dict]:
-        """At most ``LINK_CANDIDATE_SLOTS`` at a time: the extension asks for every item of a Bandcamp page at once,
+    async def import_link_candidates(request: Request, body: LinkCandidatesBody) -> Union[list[dict], dict[str, Any]]:
+        """Rows of open import batches that fit a Bandcamp page item: ``[candidate, …]``. With ``items``,
+        ``{"results": [[candidate, …], …]}`` in the order sent.
+
+        At most ``LINK_CANDIDATE_SLOTS`` run at once. The extension asks for every item of a Bandcamp page at once,
         which would otherwise take every CPU slice from the page loads. A request the extension already gave up on
-        (it waits 4 s) isn't computed."""
+        isn't computed, and identical requests in flight are answered once."""
+        payload = body.model_dump(exclude_unset=True, exclude={"items"})
+        if body.items is None:
+            return await _link_candidates(request, payload)
+        if payload:
+            raise HTTPException(400, "send items, or one item, not both")
+        payloads = [b.model_dump(exclude_unset=True) for b in body.items]
         async with link_slots:
             if await request.is_disconnected():
-                return []
-            return await run_in_threadpool(_import_call, imp.link_candidates, svc, body.model_dump(exclude_unset=True))
+                return {"results": []}
+            results = await run_in_threadpool(_import_call, imp.link_candidates_many, svc, payloads)
+        return {"results": results}
 
     @app.get("/api/import/{batch_id}/lookups")
     def import_lookups(batch_id: str, limit: int = 20) -> dict:

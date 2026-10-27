@@ -95,3 +95,90 @@ def test_open_streams_are_not_stalls(monkeypatch):
 def test_getfsstat_lists_what_mount_lists():
     out = subprocess.run(["/sbin/mount"], capture_output=True, text=True, timeout=10).stdout
     assert fsguard._getfsstat_mount_points() == fsguard.parse_mount_output(out)
+
+
+def _burst_service(make_service, tmp_path):
+    """An item list as big as the user's: 1,000 items, 4,500 owned ids, 1,000 locate results."""
+    from bc_tagger_server.store import now_iso
+
+    items = {f"t{i}": {"title": f"Song {i}", "artist": f"Artist {i}", "tags": ["pool"],
+                       "date_added": f"2026-10-{1 + i % 28:02d}T00:00:00Z"} for i in range(1000)}
+    svc = make_service(tmp_path / "lib", items=items)
+    svc.set_ownership([f"t{i}" for i in range(0, 1000, 2)] + [f"a{i}" for i in range(4000)], "extension", full=True)
+    with svc.store.tx() as c:
+        c.executemany("INSERT INTO locate_results(item_id, status, best, candidates, located_at) VALUES(?, ?, ?, ?, ?)",
+                      [(f"t{i}", "missing", None, "[]", now_iso()) for i in range(1000)])
+    return svc
+
+
+def _busy_link_candidates(svc, payload, limit=5):
+    """A fresh page item: about 40 ms of scoring in Python."""
+    end = time.perf_counter() + 0.04
+    while time.perf_counter() < end:
+        pass
+    return [{"n": 1, "title": (payload.get("item") or {}).get("title")}]
+
+
+def test_item_loads_stay_fast_during_a_link_candidates_burst(make_service, tmp_path, monkeypatch):
+    svc = _burst_service(make_service, tmp_path)
+    monkeypatch.setattr(importer, "link_candidates", _busy_link_candidates)
+    took, lock = [], threading.Lock()
+    with TestClient(create_app(svc)) as c:
+        assert len(c.get("/api/items").json()) == 1000
+
+        def load():
+            start = time.monotonic()
+            assert c.get("/api/items").status_code == 200
+            with lock:
+                took.append(time.monotonic() - start)
+
+        burst = [threading.Thread(target=c.post, args=("/api/import/link-candidates",),
+                                  kwargs={"json": {"item": {"title": f"Page item {i}"}}}) for i in range(40)]
+        for t in burst:
+            t.start()
+        time.sleep(0.1)  # the burst is running: 2 at a time, 40 ms each
+        tabs = [threading.Thread(target=load) for _ in range(5)]
+        for t in tabs:
+            t.start()
+        for t in tabs + burst:
+            t.join()
+    assert len(took) == 5 and max(took) < 0.5, took
+
+
+def test_link_candidates_batch_form_and_coalescing(make_service, tmp_path, monkeypatch):
+    svc = make_service(tmp_path / "lib")
+    calls, entered, gate = [], threading.Event(), threading.Event()
+
+    def counted(svc_, payload, limit=5):
+        calls.append(payload)
+        entered.set()
+        gate.wait(10)
+        return [{"n": len(calls), "title": (payload.get("item") or {}).get("title")}]
+
+    monkeypatch.setattr(importer, "link_candidates", counted)
+    with TestClient(create_app(svc)) as c:
+        # two identical requests in flight: computed once, both answered
+        same = {"item": {"title": "Resent"}, "page_url": "https://x.bandcamp.com/track/resent"}
+        answers = []
+
+        def ask():
+            answers.append(c.post("/api/import/link-candidates", json=same).json())
+
+        first = threading.Thread(target=ask)
+        first.start()
+        assert entered.wait(10)
+        second = threading.Thread(target=ask)
+        second.start()
+        time.sleep(0.3)
+        gate.set()
+        first.join()
+        second.join()
+        assert len(calls) == 1 and answers == [[{"n": 1, "title": "Resent"}]] * 2
+        # one request for a page's items: results in the order sent
+        calls.clear()
+        r = c.post("/api/import/link-candidates", json={"items": [{"item": {"title": "A"}}, {"item": {"title": "B"}},
+                                                                   {"item": {"title": "A"}}]})
+        assert r.status_code == 200
+        assert [[x["title"] for x in res] for res in r.json()["results"]] == [["A"], ["B"], ["A"]]
+        assert c.post("/api/import/link-candidates", json={"items": [], "item": {"title": "A"}}).status_code == 400
+        assert c.post("/api/import/link-candidates", json={"items": []}).json() == {"results": []}

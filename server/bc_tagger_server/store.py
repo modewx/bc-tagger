@@ -308,6 +308,16 @@ class Store:
             finally:
                 cur.close()  # ends the statement, so this connection's next read sees the newest data
 
+    def query_all(self, sql: str, columns: list[str], params: Iterable[Any] = ()) -> list[dict[str, Any]]:
+        """``sql``'s rows (as dicts of ``columns``) fetched as one JSON value, in no set order.
+
+        Python's sqlite3 lets go of the GIL for every row it steps through and has to take it back for the next.
+        While another thread is busy in Python (scoring, say), each take-back waits its turn, so reading a few
+        thousand rows can take seconds. One aggregated row takes it back once."""
+        cols = ", ".join(columns)
+        row = self.query_one(f"SELECT json_group_array(json_array({cols})) AS j FROM ({sql})", params)
+        return [dict(zip(columns, values)) for values in json.loads(row["j"])]
+
     def version(self, name: str) -> int:
         """How many writes ``name`` has had (kept by triggers; 0 before the first)."""
         row = self.query_one("SELECT n FROM data_versions WHERE name = ?", (name,))
@@ -387,7 +397,8 @@ class Store:
 
     def all_items(self) -> list[dict]:
         """All items, newest ``date_added`` first (undated last, then by id)."""
-        rows = self.query(
-            "SELECT data FROM items ORDER BY date_added IS NULL, date_added DESC, id"
-        )
-        return [json.loads(r["data"]) for r in rows]
+        items = [json.loads(r["data"]) for r in self.query_all("SELECT data FROM items", ["data"])]
+        items.sort(key=lambda it: it["id"])
+        dated = [it for it in items if isinstance(it.get("date_added"), str)]
+        dated.sort(key=lambda it: it["date_added"], reverse=True)  # stable: ties stay by id
+        return dated + [it for it in items if not isinstance(it.get("date_added"), str)]

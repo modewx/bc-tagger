@@ -245,7 +245,6 @@ target's playlist tree; `POST /api/rekordbox/resolve` says which names exist or 
   alone. Items that aren't located right now are left out of the selection, so an unmounted
   drive doesn't empty your playlists. If you delete a managed entry in rekordbox, the next
   export puts it back; untag the item to drop it.
-
 ### XML fallback
 
 `./bct xml …` (or `POST /api/rekordbox/xml`) writes
@@ -352,8 +351,10 @@ server's own cache only.
 Rows below the threshold keep up to three candidates to pick (`PUT …/rows/<n> {choose}`). A row the
 search misses can be linked from the extension to the Bandcamp page the user has open
 (`POST /api/import/<id>/rows/<n>/link {item}`; `POST /api/import/link-candidates {item}` says which
-rows fit that page; at most two run at once, a request the extension gave up on is skipped, and answers are
-cached until an import row changes). On commit, Bandcamp rows go to the extension's pending-adds queue and the rest
+rows fit that page). For a whole Bandcamp page, `POST /api/import/link-candidates {items: [{item, page_url?}, …]}`
+returns `{results: [[candidate, …], …]}` in the order sent (up to 1,000 items). At most two run at once, waiting
+ones hold no worker thread, identical requests in flight are answered once, a request the extension gave up on
+is skipped, and answers are cached until an import row changes. On commit, Bandcamp rows go to the extension's pending-adds queue and the rest
 to the server's `other` collection with Bandcamp/Discogs/YouTube links. Each committed row that is located gives
 its item that location right away (new items always; a merged item only if it wasn't located already, or the row
 confirms it), with SSE `item` events, so the collection shows it located without a Locate (`items_located`).

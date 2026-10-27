@@ -139,6 +139,26 @@ Tests never touch Bandcamp, the music drive or a real rekordbox library: Bandcam
     after 5 s dumps every thread's stack and the Store lock's owner. Event and audio streams have started
     their response, so they never count.
 
+- **Page loads during lookup bursts (coordinator: 40 `link-candidates` made `/api/items` take 3.2 s):**
+  - Cause: a GIL convoy, not worker threads. The `link-candidates` route already waited on its semaphore in
+    the event loop, holding no thread.
+    - Python's sqlite3 lets go of the GIL around every row it steps through. While two scoring threads were
+      busy, each row's take-back waited its turn, so `/api/items`, reading about 7,000 rows (4,751 owned ids),
+      finished only when the burst did.
+    - In isolation: 1,085 rows took 60 ms alone, 1.4 s next to one busy thread and 3.5 s next to two.
+    - A shorter switch interval didn't help the server.
+  - Fixes:
+    - `Store.query_all` reads many rows as one JSON value (one take-back). It's used by the item list's
+      bulk reads, the item mirror, `other` items and pending adds.
+    - Scoring memoizes the title and artist variants of rows and hits, plus `numbers`, `strip_feat` and
+      `strip_side`: 53 → 19 ms per new page item (128 ms two commits ago).
+    - Identical `link-candidates` requests in flight share one answer.
+    - New batch form, `{items: [...]}` → `{results: [...]}`, so the extension can ask once per page.
+  - On a copy of the live data, `/api/items` during a burst of 40 new page items: 2.8 s → 0.26–0.40 s; a
+    batch of 40 answers in about 1 s.
+  - A test checks five item loads stay under 0.5 s during a 40-call burst. With row-by-row reads the same
+    test takes 0.92–0.95 s and fails.
+
 ## App and extension (`app/`, `extension/`, `shared/`, branch `claude/local-collection-ui-e8f6f6`)
 
 *(Session B's notes go here.)*

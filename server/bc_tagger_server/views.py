@@ -26,13 +26,16 @@ class ViewData:
     (``/api/items`` shows them all, and every open tab reloads it)."""
 
     def __init__(self, store: Store, db_path: str):
-        self.locate = {r["item_id"]: r for r in store.query("SELECT * FROM locate_results")}
-        self.owned = {r["id"]: r for r in store.query("SELECT id, source, checked_at FROM owned_ids")}
+        # query_all: these run to thousands of rows (owned_ids), read in one piece
+        self.locate = {r["item_id"]: r for r in store.query_all(
+            "SELECT * FROM locate_results", ["item_id", "status", "best", "candidates", "located_at"])}
+        self.owned = {r["id"]: r for r in store.query_all("SELECT * FROM owned_ids", ["id", "source", "checked_at"])}
         self.last_full = store.get_meta("ownership_last_full")
-        self.content = {r["path"]: r["content_id"] for r in store.query(
-            "SELECT path, content_id FROM rb_content WHERE db_path = ?", (db_path,))}
+        self.content = {r["path"]: r["content_id"] for r in store.query_all(
+            "SELECT path, content_id FROM rb_content WHERE db_path = ?", ["path", "content_id"], (db_path,))}
         self.claims: dict[str, list[dict]] = defaultdict(list)
-        for r in store.query("SELECT DISTINCT item_id, tag, content_id FROM rb_claims WHERE db_path = ?", (db_path,)):
+        for r in store.query_all("SELECT DISTINCT item_id, tag, content_id FROM rb_claims WHERE db_path = ?",
+                                 ["item_id", "tag", "content_id"], (db_path,)):
             self.claims[r["item_id"]].append({"tag": r["tag"], "content_id": r["content_id"]})
 
 
@@ -134,7 +137,8 @@ def local_hints(local: dict, owned: dict) -> list[str]:
     return []
 
 
-def item_view(store: Store, item: dict, db_path: str, playlist_rule=None, data: ViewData | None = None) -> dict[str, Any]:
+def item_view(store: Store, item: dict, db_path: str, playlist_rule=None,
+              data: ViewData | None = None) -> dict[str, Any]:
     local = local_status(store, item["id"], data)
     owned = ownership_status(store, item, data)
     local["hints"] = local_hints(local, owned)
