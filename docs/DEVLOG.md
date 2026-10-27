@@ -177,6 +177,13 @@ npm run test:e2e                         # Playwright e2e: own profile, server :
 
 ### 2026-10-27
 
+- **Link to import: one request per Bandcamp page** (A's batch form, `3b72a62`): the content script sends the page's
+  items in one `POST /api/import/link-candidates {items}` (it used to send one per item, 20–40 at once on album
+  pages). Targets added within 300 ms go in the same request.
+- **Export dry run: same song as another file** (A's `entries_same_song`): the dialog lists, per playlist, tracks not
+  added because the playlist already has the same song as another file, with both paths. **Add them anyway** (off)
+  runs the dry run again with `add_same_song` and the write sends it too. A dry run with only such tracks still
+  shows the dialog (Export disabled until the box is ticked).
 - **Tag editors keep what's being typed** (user bug: after picking a tag, the next letters vanished and the wrong
   tag got picked, on the Collection and the import preview). Picking a tag set off a reload of the row (the
   extension's push → the server's item event; or the batch's import event), and the row's editor got

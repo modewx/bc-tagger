@@ -1300,6 +1300,36 @@ test("album page: the header widget is the album item; track rows never touch it
   await page.close();
 });
 
+test("Bandcamp page: one link-candidates request for all its items (recorded album page)", async () => {
+  const pageUrl = "https://infiniteexpanse.bandcamp.com/album/synergy-trilogy";
+  // An import row that fits one of the page's tracks, so the page gets a "Link to import" button.
+  const items = [{ line: 1, raw: "Synergy Trilogy - E2E stand-in track", artist: "Synergy Trilogy", title: "E2E stand-in track", tags: ["must"] }];
+  const file = { format: "bc-tagger-import/1", source: "e2e-link.txt", unknown_tags: {}, items };
+  const { batch_id: batchId } = await post("/api/import", { file, default_tags: [], name: "e2e-link" });
+  const asks = [];
+  const record = (route) => {
+    asks.push(route.request().postDataJSON());
+    return route.continue();
+  };
+  await context.route(SERVER + "/api/import/link-candidates", record); // the extension's own requests too
+  const page = await context.newPage();
+  try {
+    await waitFor(() => api(`/api/import/${batchId}`).then((b) => b.status === "ready"), { what: "the batch", timeout: 30000 });
+    await post(`/api/import/${batchId}/tags`, { map: {}, unmapped: "create" });
+    await page.goto(pageUrl);
+    await page.waitForSelector(".bct-link-btn", { timeout: 30000 });
+    await page.waitForTimeout(800); // anything else would have gone out by now
+    const widgets = await page.$$eval("select[id^='tagger_']", (s) => s.length);
+    assert.equal(asks.length, 1, "one request for the page");
+    assert.equal(asks[0].items.length, widgets, "with every item on it");
+    assert.ok(asks[0].items.every((e) => e.page_url === pageUrl && /^[at]\d+$/.test(e.item.id)));
+  } finally {
+    await context.unroute(SERVER + "/api/import/link-candidates", record);
+    await api(`/api/import/${batchId}`, { method: "DELETE" }).catch(() => {});
+    await page.close();
+  }
+});
+
 // --- Phase 2b: file index status, Rescan drive ----------------------------------
 
 const hasIndexStatus = () => fetch(`${SERVER}/api/index/status`).then((r) => r.ok).catch(() => false);
@@ -3355,7 +3385,10 @@ def write_flac(path, title, artist, album, track):
 
 for f in json.loads(sys.argv[3]):
     p = Path(f["path"])
-    (write_flac if p.suffix == ".flac" else write_aiff)(p, f.get("title"), f.get("artist"), f.get("album"), f.get("track"))
+    if p.suffix == ".flac":
+        write_flac(p, f.get("title"), f.get("artist"), f.get("album"), f.get("track"))
+    else:
+        write_aiff(p, f.get("title"), f.get("artist"), f.get("album"), f.get("track"), f.get("seconds", 0.1))
     t = time.time() - f["days"] * 86400
     os.utime(p, (t, t))
 `,
@@ -3630,6 +3663,122 @@ test("import preview: a tag editor keeps the text being typed (and picks what's 
   } finally {
     await api(`/api/import/${batchId}`, { method: "DELETE" }).catch(() => {});
     await page.close();
+  }
+});
+
+test("Transfer to rekordbox: a re-transfer adds nothing; another file of the same song is listed and not added, unless \"Add them anyway\" (sandbox test library)", async (t) => {
+  const template = process.env.E2E_TEMPLATE_DB || path.join(process.env.HOME, "Library/Pioneer/rekordbox_test/master.db");
+  if (!fs.existsSync(template)) {
+    t.skip(`no template DB at ${template}`);
+    return;
+  }
+  const base = path.join(E2E, "same-song");
+  fs.rmSync(base, { recursive: true, force: true });
+  const coll = path.join(base, "Collection");
+  const complete = path.join(base, "complete");
+  // 3 s: rekordbox keeps whole seconds, and an unknown (0) length never counts as the same song.
+  const song = { title: "Same Song", artist: "E2E Same Artist", track: 1, days: 1, seconds: 3 };
+  const fileA = path.join(coll, "E2E Same Artist - Same EP", "01 Same Song.aiff");
+  const fileB = path.join(complete, "E2E Same Artist - Same EP (copy)", "01 Same Song.aiff");
+  writeFixtureFiles([
+    { ...song, path: fileA, album: "Same EP" },
+    { ...song, path: fileB, album: "Same EP" },
+  ]);
+  // A writable test library of our own (a copy of the template, with the test marker).
+  const db = execFileSync(PYTHON, [path.join(ROOT, "server", "scripts", "make_sandbox_library.py"), path.join(base, "rekordbox"), "--test-marker"], {
+    env: { ...process.env, BCT_TEST_TEMPLATE_DB: template },
+  })
+    .toString()
+    .trim();
+  const PLAYLIST = "/E2E Same Song";
+  const before = await api("/api/settings").then((d) => d.settings || d);
+  await put({
+    owned_root: coll,
+    not_owned_roots: [{ path: complete, globs: [] }],
+    downloads_dir: "",
+    rekordbox_db_path: db,
+    rekordbox_target: "test",
+    tag_playlist_mode: "custom",
+    tag_playlist_map: { pool: [PLAYLIST] },
+  });
+  const inPlaylist = async () => ((await api("/api/rekordbox/playlists")).find((p) => p.path === PLAYLIST) || {}).count || 0;
+  const weekAgo = new Date(Date.now() - 7 * 86400e3).toISOString().slice(0, 10);
+  const filesBatch = async (folder, name) => {
+    const { batch_id } = await post("/api/import/files", { folders: [{ path: folder, since: weekAgo }], default_tags: ["pool"], default_tags_all: true, name });
+    await waitFor(() => api(`/api/import/${batch_id}`).then((b) => b.status === "ready" && b.rows.length === 1), { what: `the batch ${name}`, timeout: 30000 });
+    return batch_id;
+  };
+  const page = await context.newPage();
+  const batches = [];
+  const transfer = async () => {
+    await page.click("#transferToRekordbox");
+    await page.waitForFunction(
+      () => document.getElementById("exportConfirm") || /^Transfer to rekordbox: (done|failed)/.test(document.getElementById("refreshStatus").textContent),
+      null,
+      { timeout: 60000 }
+    );
+    return !!(await page.$("#exportConfirm"));
+  };
+  const transferred = () =>
+    page.waitForFunction(() => /^Transfer to rekordbox: (done|failed)/.test(document.getElementById("refreshStatus").textContent), null, { timeout: 60000 });
+  try {
+    // The song's first file goes in.
+    batches.push(await filesBatch(coll, "e2e-same-1"));
+    await page.goto(`${SERVER}/import/?batch=${batches[0]}`);
+    await page.waitForSelector("#collectionTable tbody tr[data-key]");
+    assert.equal(await transfer(), true, "a dry run to confirm");
+    assert.equal(await page.$("#exportConfirm .same-song"), null);
+    await page.click("#exportConfirm .dialog-confirm");
+    await transferred();
+    assert.match(await page.textContent("#refreshStatus"), /^Transfer to rekordbox: done/);
+    assert.equal(await inPlaylist(), 1);
+
+    // The same again: nothing to add.
+    assert.equal(await transfer(), false, "no dialog");
+    assert.match(await page.textContent("#refreshStatus"), /already up to date/);
+    assert.equal(await inPlaylist(), 1);
+
+    // Another file of the same song: listed (both files), and not added.
+    batches.push(await filesBatch(complete, "e2e-same-2"));
+    await page.goto(`${SERVER}/import/?batch=${batches[1]}`);
+    await page.waitForSelector("#collectionTable tbody tr[data-key]");
+    assert.equal(await transfer(), true, "the dialog lists it");
+    const listed = await page.textContent("#exportConfirm .same-song");
+    assert.match(listed, /Already in the playlist as another file \(1\)/);
+    assert.match(listed, /E2E Same Song[\s\S]*Same Song: already in playlist \(other file\)/);
+    assert.ok(listed.includes(`this file: ${fileB}`) && listed.includes(`in the playlist: ${fileA}`), listed);
+    assert.equal(await page.isDisabled("#exportConfirm .dialog-confirm"), true, "nothing to add");
+    assert.equal(await page.isChecked("#addSameSong"), false, "off by default");
+    const shot = (name) => process.env.E2E_SHOTS && page.locator("#exportConfirm").screenshot({ path: path.join(process.env.E2E_SHOTS, name) });
+    await shot("same-song-dialog.png");
+    // "Add them anyway": the dry run again, now adding it.
+    const dryRuns = [];
+    const onPost = (r) => r.method() === "POST" && new URL(r.url()).pathname === "/api/rekordbox/export" && dryRuns.push(r.postDataJSON());
+    page.on("request", onPost);
+    await page.check("#addSameSong");
+    await page.waitForFunction(() => !document.querySelector("#exportConfirm .dialog-confirm").disabled, null, { timeout: 60000 });
+    assert.equal(await page.$("#exportConfirm .same-song"), null, "nothing left out");
+    assert.match(await page.textContent("#exportConfirm"), /E2E Same Song: \+1/);
+    await shot("same-song-dialog-add-anyway.png");
+    await page.click("#exportConfirm .dialog-confirm");
+    await transferred();
+    page.off("request", onPost);
+    assert.deepEqual(dryRuns.map((b) => [!!b.dry_run, b.add_same_song]), [[true, true], [false, true]], "the dry run and the write both add it");
+    assert.match(await page.textContent("#refreshStatus"), /^Transfer to rekordbox: done/);
+    assert.equal(await inPlaylist(), 2);
+  } finally {
+    for (const b of batches) await api(`/api/import/${b}`, { method: "DELETE" }).catch(() => {});
+    await put({
+      owned_root: before.owned_root,
+      not_owned_roots: before.not_owned_roots,
+      downloads_dir: before.downloads_dir,
+      rekordbox_db_path: before.rekordbox_db_path,
+      rekordbox_target: "test",
+      tag_playlist_mode: "auto",
+      tag_playlist_map: {},
+    });
+    await page.close();
+    fs.rmSync(base, { recursive: true, force: true });
   }
 });
 

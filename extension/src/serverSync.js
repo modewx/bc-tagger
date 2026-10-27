@@ -297,12 +297,24 @@ export async function openImportRows() {
   return Array.isArray(rows) ? rows : [];
 }
 
-// Rows of open imports that fit an item of the Bandcamp page the user has open
-// (for the content script's "Link to import"), best first:
-// [{batch_id, batch_name, n, artist, title, album, score, hint_match, bandcamp_id, via}].
-export async function importLinkCandidates(item, pageUrl) {
-  const rows = await api("/api/import/link-candidates", { method: "POST", body: { item, page_url: pageUrl }, timeoutMs: 4000 });
-  return Array.isArray(rows) ? rows : [];
+// Rows of open imports that fit the items of the Bandcamp page the user has open
+// (for the content script's "Link to import"), one request for the whole page:
+// for each item, best first, [{batch_id, batch_name, n, artist, title, album, score, hint_match, bandcamp_id, via}].
+const LINK_CANDIDATES_MAX = 1000; // items per request (the server's limit)
+
+export async function importLinkCandidatesMany(items, pageUrl) {
+  const out = [];
+  for (let i = 0; i < items.length; i += LINK_CANDIDATES_MAX) {
+    const chunk = items.slice(i, i + LINK_CANDIDATES_MAX);
+    const res = await api("/api/import/link-candidates", {
+      method: "POST",
+      body: { items: chunk.map((item) => ({ item, page_url: pageUrl })) },
+      timeoutMs: 15000,
+    });
+    const results = (res && Array.isArray(res.results) ? res.results : []).map((rows) => (Array.isArray(rows) ? rows : []));
+    chunk.forEach((_, j) => out.push(results[j] || []));
+  }
+  return out;
 }
 
 // The page's item (as the content script saves it) becomes the row's Bandcamp item.

@@ -14,6 +14,7 @@
  * @param {boolean} [o.infoOnly]     no confirm button (just Close); resolves false
  * @param {boolean} [o.confirmDisabled] show the confirm button but keep it disabled
  * @param {boolean} [o.wide]         a wider dialog (tables)
+ * @param {function} [o.onOpen]      ({title, ok}) once shown: to change the title or the confirm button later
  * @returns {Promise<boolean>}
  */
 export function confirmDialog(o) {
@@ -73,5 +74,6 @@ export function confirmDialog(o) {
     });
     dlg.showModal();
     cancel.focus(); // the safe choice is the default
+    if (o.onOpen) o.onOpen({ title, ok });
   });
 }

@@ -45,3 +45,7 @@ dialog.confirm-dialog.danger { border-top: 5px solid #d92d20; }
 .dialog-actions button.secondary { background: #fff; color: #3875d7; }
 .dialog-actions button.danger { background: #d92d20; border-color: #d92d20; }
 .dialog-actions button:disabled { opacity: 0.45; cursor: default; }
+/* Export dry run: tracks whose playlist already has the same song as another file, and "Add them anyway". */
+.dialog-body .same-song { background: #fff8e1; border: 1px solid #ecd28b; border-radius: 6px; padding: 6px 10px; }
+.dialog-body .same-song-path { overflow-wrap: anywhere; }
+.dialog-body .add-same-song { display: flex; gap: 6px; align-items: baseline; margin: 6px 0 0; cursor: pointer; }

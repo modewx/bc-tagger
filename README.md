@@ -68,6 +68,8 @@ reachable, edits are queued on the server and applied by the extension on its ne
   **Transfer to rekordbox** sends the ticked rows' files to rekordbox (playlists from their tags, the usual dry run
   and confirm) without adding them to the collection. Its count, like Export Selected to RB's, is the located rows;
   the hint next to it says how many aren't located (skipped). The dialog shows where each tag goes.
+  - Export and Transfer don't add a track to a playlist that already has the same song as another file (same
+    artist and title, lengths within 2 s): the dry run lists them with both files, and **Add them anyway** adds them.
   - **New tags** (in the rows, not in the tag list yet) are highlighted in the rows' tag editors, chips and
     dropdown ("new: not in your tag list yet"). Tags that aren't in the list yet get **Create New Tags** at the top,
     then a link to map them in Settings → Rekordbox. Import selected creates them too.
@@ -126,7 +128,7 @@ Runs the extension, server and local app together in a Playwright Chromium with 
   real server (mapping, linking, browser lookups, downloads, re-locate, browse), settings, and rekordbox dry runs
   and a sandbox write.
 
-A full run (77 tests) takes about 2 minutes (2026-10-26: 110–147 s). For a quick check, run a subset by
+A full run (79 tests) takes about 2 minutes (2026-10-26: 110–147 s). For a quick check, run a subset by
 name. Include `Import \(replace\)`, which loads the test collection the others use:
 
 ```bash

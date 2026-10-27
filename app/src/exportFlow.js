@@ -27,6 +27,32 @@ function listBlock(title, entries, render, max = 40) {
   return d;
 }
 
+// Tracks not added because their playlist already holds the same song as another
+// file (the server's entries_same_song), by playlist, with both files.
+function sameSongBlock(entries) {
+  const block = el("details", null, "same-song");
+  block.open = true;
+  block.appendChild(el("summary", `Already in the playlist as another file (${entries.length})`));
+  const byPlaylist = new Map();
+  entries.forEach((e) => byPlaylist.set(e.playlist, [...(byPlaylist.get(e.playlist) || []), e]));
+  const ul = el("ul");
+  byPlaylist.forEach((list, playlist) => {
+    const li = el("li", playlist);
+    const songs = el("ul");
+    list.forEach((e) => {
+      const song = [e.artist, e.title].filter(Boolean).join(" – ") || base(e.path);
+      const x = el("li", `${song}: ${e.message || "already in playlist (other file)"}`);
+      x.appendChild(el("div", `this file: ${e.path}`, "muted same-song-path"));
+      x.appendChild(el("div", `in the playlist: ${(e.existing && e.existing.path) || "?"}`, "muted same-song-path"));
+      songs.appendChild(x);
+    });
+    li.appendChild(songs);
+    ul.appendChild(li);
+  });
+  block.appendChild(ul);
+  return block;
+}
+
 // Messages of everything that would make the write fail. `blockers` comes
 // from the server; `errors` (playlist mapping problems) predates it.
 function blockersOf(d) {
@@ -78,6 +104,7 @@ export function diffView(d, target) {
   if (count(d.skipped_items)) ul.appendChild(el("li", `${count(d.skipped_items)} items skipped (not located)`));
   if (count(d.failed_files)) ul.appendChild(el("li", `${count(d.failed_files)} files rekordbox can't take`));
   wrap.appendChild(ul);
+  if (count(d.entries_same_song)) wrap.appendChild(sameSongBlock(d.entries_same_song));
 
   // Where each tag goes (the tag → playlist mapping): new tags and tags that aren't exported pointed out,
   // with a link to map them.
@@ -116,7 +143,9 @@ export function diffView(d, target) {
       listBlock(
         "Entries per playlist",
         per,
-        (p) => `${p.playlist}: +${count(p.add)}${count(p.remove) ? ` / −${count(p.remove)}` : ""}${p.exists === false ? " (new)" : ""}`,
+        (p) =>
+          `${p.playlist}: +${count(p.add)}${count(p.remove) ? ` / −${count(p.remove)}` : ""}${p.exists === false ? " (new)" : ""}` +
+          (count(p.same_song) ? ` · ${count(p.same_song)} already there as another file` : ""),
         200
       )
     );
@@ -166,39 +195,82 @@ export async function runExport(jobs, selection, onProgress, { ask = false } = {
   const target = await exportTarget();
   if (target !== "main" && !ask) return jobs.run("/api/rekordbox/export", selection, onProgress);
 
+  // "Add them anyway": also add tracks whose playlist already has the same song as another file.
+  let addSameSong = false;
   // The preview is only the first step: never show it as "done".
-  const preview = await jobs.run("/api/rekordbox/export", { ...selection, dry_run: true }, (j) =>
-    onProgress({
-      ...j,
-      status: j.status === "done" ? "running" : j.status,
-      progress: { ...(j.progress || {}), message: `dry run · ${(j.progress || {}).message || ""}` },
-    })
-  );
+  const dryRun = () =>
+    jobs.run("/api/rekordbox/export", { ...selection, ...(addSameSong ? { add_same_song: true } : {}), dry_run: true }, (j) =>
+      onProgress({
+        ...j,
+        status: j.status === "done" ? "running" : j.status,
+        progress: { ...(j.progress || {}), message: `dry run · ${(j.progress || {}).message || ""}` },
+      })
+    );
+  const preview = await dryRun();
   if (preview.status !== "done") return preview;
-  const d = preview.result || {};
-  if (!d.changed) {
+  let d = preview.result || {};
+  if (!d.changed && !count(d.entries_same_song)) {
     const none = count(d.skipped_items) >= count(d.selected_items); // selected = all; skipped = not located
     return { status: "done", result: { message: none ? "none of these items are located" : "rekordbox is already up to date" } };
   }
-  // What's sent: the selection minus what's skipped (not located).
-  const n = count(d.selected_items) - count(d.skipped_items) || (selection.ids || selection.rows || []).length || selection.latest;
-  const blockers = blockersOf(d);
-  const ok = await confirmDialog({
-    id: "exportConfirm",
-    danger: target === "main",
+  const titleOf = (d) => {
+    // What's sent: the selection minus what's skipped (not located).
+    const n = count(d.selected_items) - count(d.skipped_items) || (selection.ids || selection.rows || []).length || selection.latest;
     // Import rows (Transfer to rekordbox) don't join the bc-tagger collection.
-    title: selection.rows
+    return selection.rows
       ? `Transfer ${n} rows to ${target === "main" ? "your MAIN rekordbox library" : "rekordbox"} (not added to your collection here)?`
       : target === "main"
       ? `Export ${n} items to your MAIN rekordbox library?`
-      : `Export ${n} items to rekordbox?`,
-    body: diffView(d, target),
+      : `Export ${n} items to rekordbox?`;
+  };
+  const canConfirm = (d) => !blockersOf(d).length && d.can_confirm !== false;
+  const body = el("div");
+  body.appendChild(diffView(d, target));
+  let shown = null; // the dialog's title and confirm button
+  if (count(d.entries_same_song)) {
+    // Ticking it runs the dry run again with them added, and shows that.
+    const box = el("input");
+    box.type = "checkbox";
+    box.id = "addSameSong";
+    const note = el("span", "", "muted");
+    const label = el("label", null, "add-same-song");
+    label.append(box, " Add them anyway (the playlist then has the song twice, as two files)", note);
+    box.addEventListener("change", async () => {
+      addSameSong = box.checked;
+      box.disabled = true;
+      if (shown) shown.ok.disabled = true;
+      note.textContent = " · updating the dry run…";
+      const again = await dryRun();
+      box.disabled = false;
+      note.textContent = "";
+      if (again.status === "done") {
+        d = again.result || {};
+        body.firstChild.replaceWith(diffView(d, target));
+      } else {
+        addSameSong = box.checked = !box.checked;
+        note.textContent = ` · dry run failed: ${again.error || "error"}`;
+      }
+      if (shown) {
+        shown.title.textContent = titleOf(d);
+        shown.ok.disabled = !canConfirm(d);
+      }
+    });
+    body.appendChild(label);
+  }
+  const ok = await confirmDialog({
+    id: "exportConfirm",
+    danger: target === "main",
+    title: titleOf(d),
+    body,
     confirmLabel: target === "main" ? "Write to my main library" : "Export",
-    confirmDisabled: blockers.length > 0 || d.can_confirm === false,
+    confirmDisabled: !canConfirm(d),
+    onOpen: (handles) => (shown = handles),
   });
+  const blockers = blockersOf(d);
   if (blockers.length) return { status: "error", error: blockers.join("; ") };
   if (!ok) return { status: "done", result: { message: "cancelled" } };
-  const body = { ...selection };
-  if (d.confirm_token) body.confirm_token = d.confirm_token;
-  return jobs.run("/api/rekordbox/export", body, onProgress);
+  const write = { ...selection };
+  if (addSameSong) write.add_same_song = true;
+  if (d.confirm_token) write.confirm_token = d.confirm_token;
+  return jobs.run("/api/rekordbox/export", write, onProgress);
 }

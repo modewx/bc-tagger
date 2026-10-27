@@ -5,7 +5,7 @@ import {
   probeServer,
   pullTagEdits,
   pullPendingAdds,
-  importLinkCandidates,
+  importLinkCandidatesMany,
   linkImportRow,
   openImportRows,
   bandcampLimits,
@@ -487,8 +487,8 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
     return true;
   }
   if (request.type === "importLinkCandidates") {
-    importLinkCandidates(request.item, request.page_url).then(
-      (rows) => sendResponse({ ok: true, rows }),
+    importLinkCandidatesMany(request.items || [], request.page_url).then(
+      (results) => sendResponse({ ok: true, results }),
       (e) => sendResponse({ ok: false, error: e.message })
     );
     return true;

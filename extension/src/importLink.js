@@ -1,7 +1,8 @@
-// "Link this page to an import row" (Phase 3). For each tagger widget on an
+// "Link this page to an import row" (Phase 3). For the tagger widgets on an
 // album or track page, the local server says which rows of open imports fit
-// the page's item (POST /api/import/link-candidates: the row's Bandcamp link
-// from the file is this page or its album, or artist + title agree). Items with
+// each item (POST /api/import/link-candidates, one request for the page's items:
+// the row's Bandcamp link from the file is this page or its album, or artist +
+// title agree). Items with
 // fitting rows get a "Link to import" button: pick the row, and the page's item
 // (the same data the ☆ saves) goes to the server (POST …/rows/<n>/link).
 // Linked as soon as the page opens: a row whose pasted URL is this page
@@ -58,24 +59,53 @@ function notice(text) {
   box.appendChild(line);
 }
 
+const pageUrl = location.href.split(/[?#]/)[0];
+const linked = new Set(); // rows linked from this page view
+const LINK_BATCH_MS = 300;
+let queued = [];
+let waiting = null; // {timer, done, resolve}: the targets waiting to be asked about
+let asking = Promise.resolve();
+let firstBatch = true;
+
 /**
- * @param {{container: HTMLElement, item: object}[]} targets  the page's tagger widgets and their items
+ * Asks the server about the targets in one request: these, and any added within
+ * LINK_BATCH_MS (e.g. items that show up later on the page).
+ * @param {{container: HTMLElement, item: object}[]} targets  tagger widgets and their items
  */
-export async function setupImportLinks(targets) {
-  const pageUrl = location.href.split(/[?#]/)[0];
+export function setupImportLinks(targets) {
+  queued.push(...targets);
+  if (!waiting) {
+    let resolve;
+    waiting = { done: new Promise((r) => (resolve = r)), resolve };
+  }
+  const w = waiting;
+  clearTimeout(w.timer);
+  w.timer = setTimeout(() => {
+    waiting = null;
+    const batch = queued.splice(0);
+    asking = asking.then(() => linkTargets(batch)).then(w.resolve, (e) => {
+      console.warn("[bc-tagger] import links", e);
+      w.resolve();
+    });
+  }, LINK_BATCH_MS);
+  return w.done;
+}
+
+async function linkTargets(targets) {
   const usable = targets.filter(({ container, item }) => container && item && /^[at]\d+$/.test(String(item.id || "")));
   if (!usable.length) return;
-  const open = await send({ type: "importOpenRows" });
-  const pasted = (open.ok && Array.isArray(open.rows) ? open.rows : []).filter((r) => r.match_url && pageKey(r.match_url) === pageKey(pageUrl));
-  const asked = await Promise.all(
-    usable.map(async (t) => {
-      const res = await send({ type: "importLinkCandidates", item: t.item, page_url: pageUrl });
-      return { ...t, rows: res.ok && Array.isArray(res.rows) ? res.rows : [] };
-    })
-  );
+  // Rows whose pasted URL is this page: once per page view.
+  let pasted = [];
+  if (firstBatch) {
+    firstBatch = false;
+    const open = await send({ type: "importOpenRows" });
+    pasted = (open.ok && Array.isArray(open.rows) ? open.rows : []).filter((r) => r.match_url && pageKey(r.match_url) === pageKey(pageUrl));
+  }
+  const res = await send({ type: "importLinkCandidates", items: usable.map((t) => t.item), page_url: pageUrl });
+  const results = res.ok && Array.isArray(res.results) ? res.results : [];
+  const asked = usable.map((t, i) => ({ ...t, rows: Array.isArray(results[i]) ? results[i] : [] }));
   const withRows = asked.filter((t) => t.rows.length);
   if (!withRows.length && !pasted.length) return;
-  const linked = new Set();
 
   async function link(row, item, button) {
     const r = await send({ type: "linkImportRow", batch_id: row.batch_id, n: row.n, item, page_url: pageUrl });
