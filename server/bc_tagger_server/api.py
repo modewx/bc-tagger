@@ -78,6 +78,9 @@ class ExportBody(SelectionBody):
     confirm_token: Optional[str] = None
     # import rows ("<batch_id>:<n>") instead of items: sent to rekordbox without adding them to the collection
     rows: Optional[list[str]] = None
+    # also add a track whose playlist already holds the same song as another file (default: skip, listed
+    # in the diff's entries_same_song)
+    add_same_song: bool = False
 
 
 class NamesBody(BaseModel):
@@ -517,7 +520,8 @@ def create_app(service: Service | None = None) -> FastAPI:
         if body.rows is not None and not body.rows:
             raise HTTPException(400, "no rows selected")
         job = svc.start_export(ids=body.ids, latest=body.latest, dry_run=body.dry_run,
-                               confirm_token=body.confirm_token, scan=body.scan, rows=body.rows)
+                               confirm_token=body.confirm_token, scan=body.scan, rows=body.rows,
+                               add_same_song=body.add_same_song)
         return {"job_id": job.id}
 
     @app.get("/api/rekordbox/playlists")

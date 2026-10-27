@@ -378,3 +378,89 @@ def test_new_tags_of_import_rows_can_be_created_then_mapped(svc, library, test_d
     diff = export(svc, rows=[f"{bid}:0"])
     assert sorted(e["tag"] for e in diff["entries_added"]) == [f"/{FOLDER}/Must", f"/{FOLDER}/Sets/Warmup"]
     assert diff["new_tags"] == []
+
+
+def _same_song_files(root: Path) -> tuple[str, str]:
+    """One song as two files: the release's AIFF, and a copy from elsewhere (tags spelled differently, 0.6 s
+    longer)."""
+    a = write_aiff(root / "Gamma - Single" / "01 - Gamma Song.aiff", "Gamma Song", "Gamma", "Single", 1, seconds=3.0)
+    b = write_aiff(root / "complete" / "Gamma - Gamma Song.aiff", "Gamma Song (Original Mix)", "GAMMA", "Single", 1,
+                   seconds=3.6)
+    return str(a), str(b)
+
+
+def _import_row(svc, path: str, tags: list[str]) -> str:
+    """A new import batch with one row located to ``path`` by hand; the row's ref for ``export(rows=…)``."""
+    from bc_tagger_server import importer
+
+    batch = importer.create_batch(svc, {"format": "bc-tagger-import/1", "source": "again", "items": [
+        {"line": 1, "artist": "Gamma", "title": "Gamma Song", "tags": tags}]}, [])
+    rows = importer.load_rows(svc.store, batch["batch_id"])
+    rows[0]["located"] = importer._manual_location(svc, path)
+    importer._save_rows(svc.store, batch["batch_id"], rows)
+    return f"{batch['batch_id']}:0"
+
+
+def _user_adds_song(test_db, playlist_name: str, path: str, title: str, artist: str, seconds: float) -> None:
+    """The user adds a file to a playlist in rekordbox, which reads its title, artist and length."""
+    from bc_tagger_server.rbexport import content_kwargs
+
+    with rbguard.database(test_db, for_write=True, **GUARD) as db:
+        content = find_content(db, path) or db.add_content(
+            path, **content_kwargs(db, {"title": title, "artist": artist, "duration": seconds}))
+        folder = next(p for p in db.get_playlist(Name=FOLDER))
+        pl = next(p for p in db.get_playlist(Name=playlist_name) if p.ParentID == folder.ID)
+        db.add_to_playlist(pl, content)
+        rbguard.guarded_commit(db, test_db, **GUARD)
+
+
+def test_reexports_from_two_imports_never_duplicate_entries(svc, library, test_db):
+    """The user's case: a track picked again in a later import and sent to rekordbox again."""
+    a, b = _same_song_files(library["root"])
+    temp = f"/{FOLDER}/temp"
+    assert [e["path"] for e in export(svc, rows=[_import_row(svc, a, ["temp"])])["entries_added"]] == [a]
+    again = export(svc, rows=[_import_row(svc, a, ["temp"])])  # the same file, from a second batch
+    assert again["entries_added"] == [] and not again["changed"]
+    assert read_back(test_db, FOLDER)["playlists"]["temp"] == [a]
+
+    # the song as another file, from a third batch: not added (nor added to the library), and listed
+    other = _import_row(svc, b, ["temp"])
+    a_id = svc.store.query_one("SELECT content_id FROM rb_content WHERE path = ?", (a,))["content_id"]
+    dry = export(svc, rows=[other], dry_run=True)
+    assert dry["entries_added"] == [] and dry["content_added"] == [] and not dry["changed"]
+    assert dry["entries_same_song"] == [{
+        "playlist": temp, "content_id": None, "path": b, "title": "Gamma Song (Original Mix)", "artist": "GAMMA",
+        "reason": "same_song_other_file", "message": "already in playlist (other file)",
+        "existing": {"content_id": a_id, "path": a, "title": "Gamma Song", "artist": "Gamma"}}]
+    assert {"code": "same_song_other_file", "message": "1 track not added: already in playlist (other file)"} \
+        in dry["warnings"]
+    assert {"playlist": temp, "exists": True, "add": 0, "remove": 0, "same_song": 1} in dry["per_playlist"]
+    before = read_back(test_db, FOLDER)
+    export(svc, rows=[other])
+    assert read_back(test_db, FOLDER) == before
+
+    # asked for: added anyway
+    forced = export(svc, rows=[other], add_same_song=True)
+    assert forced["content_added"] == [b] and [e["path"] for e in forced["entries_added"]] == [b]
+    assert read_back(test_db, FOLDER)["playlists"]["temp"] == [a, b]
+
+
+def test_the_users_own_copy_and_two_files_in_one_run(svc, library, test_db):
+    a, b = _same_song_files(library["root"])
+    export(svc, ids=["a100", "t200", "t300"])  # makes the playlists: must, closer, ritual, pool, electro
+    # the user put this very file in pool: kept, not added again
+    _user_adds_song(test_db, "pool", a, "Gamma Song", "Gamma", 3.0)
+    diff = export(svc, rows=[_import_row(svc, a, ["pool"])])
+    assert diff["entries_added"] == [] and diff["entries_kept_user"] == 1
+    # the user put their own copy (b) in electro: a is the same song, so it isn't added there
+    _user_adds_song(test_db, "electro", b, "Gamma Song (Original Mix)", "GAMMA", 3.6)
+    diff = export(svc, rows=[_import_row(svc, a, ["electro"])])
+    assert diff["entries_added"] == [] and [(e["playlist"], e["path"], e["existing"]["path"])
+                                           for e in diff["entries_same_song"]] == [(f"/{FOLDER}/electro", a, b)]
+    # both files picked in one run, for a playlist that has neither: one entry
+    diff = export(svc, rows=[_import_row(svc, a, ["closer"]), _import_row(svc, b, ["closer"])])
+    assert [e["path"] for e in diff["entries_added"]] == [a]
+    assert [(e["path"], e["existing"]["path"]) for e in diff["entries_same_song"]] == [(b, a)]
+    state = read_back(test_db, FOLDER)["playlists"]
+    assert state["pool"] == [library["beta"], a] and state["electro"] == [library["beta"], b]
+    assert state["closer"] == library["alpha"] + [a]

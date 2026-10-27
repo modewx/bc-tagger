@@ -158,6 +158,13 @@ Tests never touch Bandcamp, the music drive or a real rekordbox library: Bandcam
     batch of 40 answers in about 1 s.
   - A test checks five item loads stay under 0.5 s during a 40-call burst. With row-by-row reads the same
     test takes 0.92–0.95 s and fails.
+- **Re-export never duplicates playlist entries (user's request, queued in "Later"):**
+  - The same file was already found by its Content row. Tests now cover the user's case on the test library
+    and on a main-mode sandbox: the same track from two imports exported in separate runs, and a track the
+    user added to the playlist themselves.
+  - New: another file of the same song (same normalized artist and title, length within 2 s) isn't added.
+    It's listed in the diff as `entries_same_song`, "already in playlist (other file)".
+  - A file skipped for all its playlists isn't added to the library. `add_same_song: true` adds them anyway.
 
 ## App and extension (`app/`, `extension/`, `shared/`, branch `claude/local-collection-ui-e8f6f6`)
 

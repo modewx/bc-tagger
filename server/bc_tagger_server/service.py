@@ -641,9 +641,11 @@ class Service:
                 importer._row_event(self, batch_id, r["n"], len(rows))
 
     def export(self, ids=None, latest=None, dry_run=False, ctx=None, guard_kwargs=None,
-               confirm_token: str | None = None, scan: str | None = None, rows: list[str] | None = None) -> dict[str, Any]:
+               confirm_token: str | None = None, scan: str | None = None, rows: list[str] | None = None,
+               add_same_song: bool = False) -> dict[str, Any]:
         """Export to the configured target. The main collection needs ``confirm_token`` from a dry run.
-        ``rows``: import rows instead of collection items (nothing is added to the collection)."""
+        ``rows``: import rows instead of collection items (nothing is added to the collection).
+        ``add_same_song``: also add tracks whose playlist already holds the same song as another file."""
         from .rbexport import ExportError, build_selection, export
 
         target = self.target(guard_kwargs)
@@ -672,6 +674,7 @@ class Service:
             file_meta=self.file_meta(selection.tracks),
             progress=progress,
             expect=expect,
+            add_same_song=add_same_song,
         )
         diff["selected_items"] = [{"id": it["id"], "title": it.get("title"), "tags": it.get("tags")} for it in items]
         diff["scan"] = scan_stats
@@ -691,11 +694,12 @@ class Service:
                 ctx.item_updated(it["id"])
         return diff
 
-    def start_export(self, ids=None, latest=None, dry_run=False, confirm_token=None, scan=None, rows=None):
+    def start_export(self, ids=None, latest=None, dry_run=False, confirm_token=None, scan=None, rows=None,
+                     add_same_song=False):
         return self.jobs.submit(
             "export",
             lambda ctx: self.export(ids=ids, latest=latest, dry_run=dry_run, ctx=ctx,
-                                    confirm_token=confirm_token, scan=scan, rows=rows),
+                                    confirm_token=confirm_token, scan=scan, rows=rows, add_same_song=add_same_song),
         )
 
     def rekordbox_playlists(self, target: str | None = None) -> list[dict[str, Any]]:

@@ -245,6 +245,20 @@ target's playlist tree; `POST /api/rekordbox/resolve` says which names exist or 
   alone. Items that aren't located right now are left out of the selection, so an unmounted
   drive doesn't empty your playlists. If you delete a managed entry in rekordbox, the next
   export puts it back; untag the item to drop it.
+- **No duplicate entries:** a track is never added to a playlist twice. Exporting it again, from a second
+  import for example, finds its entry (or the one you added yourself).
+  - **Same song, another file:** a different file of the same song isn't added either. This covers a FLAC
+    when the AIFF is in, or your own copy. Same song means the same artist and title (case, punctuation and
+    "(Original Mix)" ignored) with lengths within 2 s; an unknown title, artist or length never matches.
+  - **In the diff:** these are listed under `entries_same_song` as
+    `{playlist, content_id, path, title, artist, reason: "same_song_other_file",
+    message: "already in playlist (other file)", existing: {content_id, path, title, artist}}`.
+    `per_playlist[].same_song` counts them, and a `same_song_other_file` warning gives the total.
+  - A file skipped this way for every playlist isn't added to the library either. `content_id` is then
+    `null`.
+  - `add_same_song: true` in `POST /api/rekordbox/export` (on both the dry run and the confirm) adds them
+    anyway.
+
 ### XML fallback
 
 `./bct xml …` (or `POST /api/rekordbox/xml`) writes
