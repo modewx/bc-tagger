@@ -294,9 +294,7 @@ def test_import_rows_go_to_rekordbox_without_joining_the_collection(svc, library
     assert state["playlists"]["pool"] == [beta] and state["playlists"]["electro"] == [beta]  # t200's, unchanged
     assert sorted(diff["content_added"]) == [alpha[0]]
     # nothing joined the collection
-    assert svc.store.count_items() == items_before and other_all(svc.store) == []
-    assert [a.get("tags") for a in pending_adds(svc.store)] == [["temp"]]  # only the new tag, no items
-    assert diff["created_tags"] == ["temp"] and "temp" in svc.store.get_tags()
+    assert svc.store.count_items() == items_before and pending_adds(svc.store) == [] and other_all(svc.store) == []
     claims = {r["item_id"] for r in svc.store.query("SELECT item_id FROM rb_claims")}
     assert claims == {"t200", f"{bid}:0", f"{bid}:1"}
     exported = {r["n"]: r.get("exported") for r in importer.load_rows(svc.store, bid)}
@@ -352,9 +350,8 @@ def test_new_tags_of_import_rows_can_be_created_then_mapped(svc, library, test_d
         assert c.get(f"/api/import/{bid}").json()["uncreated_tags"] == ["warmup"]
         dry = export(svc, rows=[f"{bid}:0"], dry_run=True)
         assert dry["new_tags"] == ["warmup"]
-        assert dry["tag_playlists"] == [{"tag": "must", "new": False, "playlists": [f"/{FOLDER}/Must"], "created": False},
-                                        {"tag": "warmup", "new": True, "playlists": [], "created": False}]  # not mapped yet
-        assert dry["created_tags"] == [] and "warmup" not in svc.store.get_tags()  # a dry run creates nothing
+        assert dry["tag_playlists"] == [{"tag": "must", "new": False, "playlists": [f"/{FOLDER}/Must"]},
+                                        {"tag": "warmup", "new": True, "playlists": []}]  # not mapped yet
         r = c.post("/api/tags/create", json={"tags": ["warmup", "must"]}).json()
         assert r["created"] == ["warmup"] and r["existing"] == ["must"] and "warmup" in svc.store.get_tags()
         assert [a["tags"] for a in pending_adds(svc.store) if "tags" in a] == [["warmup"]]  # for the extension
