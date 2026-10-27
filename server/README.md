@@ -178,6 +178,12 @@ Two separate settings in Settings → Rekordbox:
 
 `./bct settings --set allow_main_writes=true --set rekordbox_target='"main"'` sets both.
 
+`GET /api/rekordbox/playlists?target=test|main` and `POST /api/rekordbox/resolve` (`?target=` or `target` in the
+body) read that library whatever the saved target is, so Settings can show the one picked before Save; main is
+read through its snapshot copy, never written. For tests and e2e, `python scripts/make_sandbox_library.py <dir>
+[--playlist /A/B …] [--test-marker]` makes a throwaway copy of the test library with the playlists you name
+(refused inside `~/Library/Pioneer` or on the music drive).
+
 **Before your first export, make your own backup in rekordbox: *File → Library → Backup
 Library*.** bc-tagger also copies `master.db` and `masterPlaylists6.xml` to
 `~/Library/Application Support/bc-tagger/backups/main/<timestamp>/` before every write (last 5,

@@ -79,6 +79,7 @@ class ExportBody(SelectionBody):
 
 class NamesBody(BaseModel):
     names: list[str]
+    target: Optional[Literal["test", "main"]] = None  # also as ?target=: read that library, not the saved one
 
 
 class ImportBody(BaseModel):
@@ -458,16 +459,17 @@ def create_app(service: Service | None = None) -> FastAPI:
         return {"job_id": job.id}
 
     @app.get("/api/rekordbox/playlists")
-    def rb_playlists() -> list[dict]:
+    def rb_playlists(target: Optional[Literal["test", "main"]] = None) -> list[dict]:
+        """The playlist tree of the saved target, or of ``target`` (read only; main: a snapshot copy)."""
         try:
-            return svc.rekordbox_playlists()
+            return svc.rekordbox_playlists(target)
         except FileNotFoundError as e:
             raise HTTPException(409, f"rekordbox library not found: {e}") from e
 
     @app.post("/api/rekordbox/resolve")
-    def rb_resolve(body: NamesBody) -> list[dict]:
+    def rb_resolve(body: NamesBody, target: Optional[Literal["test", "main"]] = None) -> list[dict]:
         try:
-            return svc.resolve_playlist_names(body.names)
+            return svc.resolve_playlist_names(body.names, target or body.target)
         except FileNotFoundError as e:
             raise HTTPException(409, f"rekordbox library not found: {e}") from e
 
