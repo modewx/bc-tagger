@@ -115,6 +115,16 @@ npm run test:e2e                         # Playwright e2e: own profile, server :
 
 ### 2026-10-27
 
+- **Tag editors keep what's being typed** (user bug: after picking a tag, the next letters vanished and the wrong
+  tag got picked, on the Collection and the import preview). Picking a tag set off a reload of the row (the
+  extension's push → the server's item event; or the batch's import event), and the row's editor got
+  `chosen:updated` even when nothing had changed, which rebuilds it: the search text went, the chips jumped into
+  tag-list order (a pick is added at the end), and chosen, which picks by option index, could pick another tag. Now a chosen field is redrawn only when its options or selection
+  changed, and a field in use (focused or open) gets its update when it's left, so its chips keep the order shown
+  while typing; so does a whole-table re-render (items added or renumbered). Not a tag-fetching problem: the tag list loads once and events update it.
+- **Chips' x was invisible in the app:** the vendored `chosen.min.css` points its sprite into the extension. The app
+  build rewrites it to `/chosen-sprite.png` (the extension's copy is unchanged), and the pages link it with the
+  build stamp (`?v=`) so a cached copy isn't kept.
 - **Collection loads fast, nothing unasked** (user bug: Settings → Collection showed an empty table for a minute with
   the music drive spinning). Cause (the coordinator, from the server log): Chrome's 6 connections per host were held
   by event streams: Settings had 3, every page 1, hidden tabs included, so `/api/items` waited for a free one.

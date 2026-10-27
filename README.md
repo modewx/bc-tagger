@@ -126,7 +126,7 @@ Runs the extension, server and local app together in a Playwright Chromium with 
   real server (mapping, linking, browser lookups, downloads, re-locate, browse), settings, and rekordbox dry runs
   and a sandbox write.
 
-A full run (74 tests) takes about 2 minutes (2026-10-26: 110–147 s). For a quick check, run a subset by
+A full run (77 tests) takes about 2 minutes (2026-10-26: 110–147 s). For a quick check, run a subset by
 name. Include `Import \(replace\)`, which loads the test collection the others use:
 
 ```bash

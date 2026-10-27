@@ -50,7 +50,16 @@ module.exports = (env, argv) =>
       new CopyWebpackPlugin({
         patterns: [
           { from: '**/*', context: APP + '/public' },
-          { from: '**/*', context: VENDOR },
+          {
+            from: '**/*',
+            context: VENDOR,
+            // chosen.min.css points its sprite (chip x, arrow, search icon) into the
+            // extension; the app serves it at the root, for every page.
+            transform: (content, absoluteFrom) =>
+              absoluteFrom.endsWith('chosen.min.css')
+                ? Buffer.from(content.toString().split('chrome-extension://__MSG_@@extension_id__/').join('/'))
+                : content,
+          },
         ],
       }),
       new BuildStampPlugin(),

@@ -20,7 +20,7 @@ import {
 } from "./bandcamp";
 import { fmtDate, cmpDate, cmpModified, cmpTrack, cmpText, cmpTags, matchesSearch } from "./sorting";
 import { setupColumnResizing } from "./columnResize";
-import { buildTagEditorWrap, syncChosenOptions } from "./tagEditor";
+import { buildTagEditorWrap, syncChosenOptions, whenChosenFree, redrawChosen, chosenDrawn, chosenInUse } from "./tagEditor";
 
 const SHELL_HTML = `
   <div id="topBar">
@@ -448,7 +448,8 @@ export function createCollectionPage(opts) {
     if (!row) {
       // Playing track is filtered/searched out -> clear filters and re-render.
       document.getElementById("searchInput").value = "";
-      $("#tagFilterSelect").val([]).trigger("chosen:updated");
+      $("#tagFilterSelect").val([]);
+      redrawChosen(document.getElementById("tagFilterSelect"));
       if (opts.clearExtraFilters) opts.clearExtraFilters();
       computeView();
       row = document.querySelector(`#collectionTable tr[data-key="${playingKey}"]`);
@@ -717,7 +718,11 @@ export function createCollectionPage(opts) {
     sel.empty();
     (tags || []).forEach((tag) => sel.append(new Option(tag, tag)));
     sel.chosen({ no_results_text: "No matching tag", width: "420px" });
-    sel.on("change", computeView);
+    chosenDrawn(sel[0]);
+    sel.on("change", () => {
+      chosenDrawn(sel[0]);
+      computeView();
+    });
   }
 
   function openInNewTab(url) {
@@ -1491,15 +1496,19 @@ export function createCollectionPage(opts) {
   }
 
   // Point every live tag editor of `key` (in its row or docked in the top
-  // bar) at the item's current tags.
+  // bar) at the item's current tags: not while it's being typed in (then once
+  // it's left), and no redraw when it already shows them.
   function syncTagEditors(key) {
     const item = allItems[key];
     if (!item) return 0;
     const sels = document.querySelectorAll(`.tag-editor-wrap[data-key="${key}"] select.tag-editor`);
     sels.forEach((sel) => {
-      [...sel.options].forEach((o) => (o.selected = (item.tags || []).includes(o.value)));
-      $(sel).trigger("chosen:updated");
       sel.parentElement.classList.toggle("tags-pending", !!item._tagsPending);
+      whenChosenFree(sel, () => {
+        const tags = (allItems[key] || item).tags || [];
+        [...sel.options].forEach((o) => (o.selected = tags.includes(o.value)));
+        redrawChosen(sel);
+      });
     });
     return sels.length;
   }
@@ -1553,6 +1562,12 @@ export function createCollectionPage(opts) {
     const structural =
       keys.length !== Object.keys(allItems).length ||
       keys.some((k) => !(k in allItems) || (fresh[k] || {}).order !== allItems[k].order); // new "#" → re-sort
+    // Re-rendering the table would rebuild a tag editor being typed in: wait until it's left.
+    const typing = structural && [...document.querySelectorAll("select.tag-editor")].find(chosenInUse);
+    if (typing) {
+      whenChosenFree(typing, () => reload(), "reload");
+      return;
+    }
     const changed = [];
     keys.forEach((k) => {
       const old = allItems[k];

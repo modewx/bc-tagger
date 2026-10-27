@@ -1685,6 +1685,115 @@ test("local app: rows without stored art don't fetch their Bandcamp page on scro
   }
 });
 
+// Typing in a tag editor while its row is reloaded (the user's bug: the next letters vanished, the chips jumped
+// into tag-list order, and the wrong tag got picked). Picks `first` (it sorts before a chip the row has) by typing
+// it and Enter, types `second` at once, waits for the reload that the pick sets off (`reloaded`: its response):
+// the chips keep the order shown, the text is still there, and Enter picks `second`. After leaving the field, the
+// order is settled: a later reload doesn't move the chips.
+async function typeThroughReload(page, key, first, second, reloaded) {
+  const sel = `tr[data-key="${key}"]`;
+  const chips = () => page.$$eval(`${sel} .chosen-choices li.search-choice`, (lis) => lis.map((li) => li.textContent.trim()));
+  const before = await chips();
+  await page.click(`${sel} .chosen-choices .search-field input`);
+  await page.keyboard.type(first, { delay: 20 });
+  await page.keyboard.press("Enter");
+  const shown = [...before, first]; // chosen adds a pick at the end
+  assert.deepEqual(await chips(), shown);
+  const reload = page.waitForResponse(reloaded, { timeout: 20000 });
+  await page.keyboard.type(second, { delay: 20 });
+  await reload;
+  await page.waitForTimeout(700); // the reload applied (debounced)
+  assert.deepEqual(await chips(), shown, "the chips keep their order while typing");
+  assert.equal(await page.inputValue(`${sel} .chosen-choices .search-field input`), second, "the typed text survives the reload");
+  assert.equal((await page.textContent(`${sel} .chosen-results li.highlighted`)).trim(), second, "and its tag is highlighted");
+  const reload2 = page.waitForResponse(reloaded, { timeout: 20000 });
+  await page.keyboard.press("Enter");
+  const tags = await page.$eval(`${sel} select.tag-editor`, (s) => [...s.selectedOptions].map((o) => o.value));
+  assert.ok(tags.includes(first) && tags.includes(second), `both picked: ${tags}`);
+  // Leave the field: whatever waited runs once, then nothing moves.
+  await page.keyboard.press("Escape");
+  await page.click("#searchInput");
+  await page.waitForTimeout(400);
+  // (A re-render that waited for the field to be left builds the row's editor anew, when it's in view.)
+  await page.locator(sel).scrollIntoViewIfNeeded(); // it may have moved (a re-sort)
+  await page.waitForFunction(([s, n]) => document.querySelectorAll(`${s} .chosen-choices li.search-choice`).length === n, [sel, tags.length]);
+  const settled = await chips();
+  assert.deepEqual(settled.slice().sort(), tags.slice().sort(), "the chips are the tags");
+  await reload2;
+  await page.waitForTimeout(700);
+  assert.deepEqual(await chips(), settled, "settled: a later reload doesn't move the chips");
+  return tags;
+}
+
+// Tags typing can pick (each the only tag containing its name, so typing it highlights it).
+const typable = (vocab) => vocab.filter((t) => /^[a-z][a-z0-9-]*$/.test(t) && vocab.every((u) => u === t || !u.includes(t)));
+
+// Two typable tags the row doesn't have, the first before one of its tags in tag-list order; null if none.
+function twoTagsFor(vocab, has) {
+  const last = Math.max(-1, ...has.map((t) => vocab.indexOf(t)));
+  const free = typable(vocab).filter((t) => !has.includes(t));
+  const first = free.find((t) => vocab.indexOf(t) < last);
+  const second = free.find((t) => t !== first);
+  return first && second ? [first, second] : null;
+}
+
+test("collection: a tag editor keeps the text being typed (and picks what's typed) while its row is reloaded", async () => {
+  const app = await context.newPage();
+  let key = null;
+  let before = null;
+  try {
+    await app.goto(SERVER + "/");
+    await app.waitForFunction(() => /extension connected/.test(document.getElementById("navExt").textContent));
+    await app.waitForSelector("#collectionTable tbody tr[data-key] select.tag-editor", { state: "attached" });
+    // A row with a tag that a typable one sorts before.
+    const vocab = await api("/api/tags");
+    const rows = await app.$$eval("#collectionTable tbody tr[data-key] select.tag-editor", (sels) =>
+      sels.map((s) => [s.closest("tr").dataset.key, [...s.selectedOptions].map((o) => o.value)])
+    );
+    const found = rows.find(([, has]) => twoTagsFor(vocab, has));
+    assert.ok(found, "a row to type in");
+    key = found[0];
+    before = (await api(`/api/items/${key}`)).tags;
+    const [first, second] = twoTagsFor(vocab, found[1]);
+    // The pick goes to the extension, which pushes to the server; its item event reloads the items.
+    await typeThroughReload(app, key, first, second, (r) => r.url() === SERVER + "/api/items" && r.request().method() === "GET");
+    await waitFor(() => api(`/api/items/${key}`).then((it) => it.tags.includes(second)), { what: "both tags saved" });
+  } finally {
+    if (key && before) {
+      // Put the row's tags back (through the editor, like the user).
+      await app.keyboard.press("Escape").catch(() => {});
+      await app.click("#searchInput").catch(() => {});
+      await app.evaluate(([k, t]) => $(`tr[data-key="${k}"] select.tag-editor`).val(t).trigger("change"), [key, before]).catch(() => {});
+      await waitFor(() => api(`/api/items/${key}`).then((it) => JSON.stringify(it.tags) === JSON.stringify(before)), { what: "the tags restored" }).catch(() => {});
+    }
+    await app.close();
+  }
+});
+
+test("chosen's sprite (a chip's x, the arrow, the search icon) loads on every app page", async () => {
+  const page = await context.newPage();
+  try {
+    for (const url of ["/", "/settings/#rekordbox", "/import/"]) {
+      await page.goto(SERVER + url);
+      await page.waitForLoadState("load");
+      // A chip's close button, as chosen draws it.
+      const res = await page.evaluate(async () => {
+        const probe = document.createElement("div");
+        probe.className = "chosen-container chosen-container-multi";
+        probe.innerHTML = '<ul class="chosen-choices"><li class="search-choice"><span>x</span><a class="search-choice-close"></a></li></ul>';
+        document.body.appendChild(probe);
+        const bg = getComputedStyle(probe.querySelector(".search-choice-close")).backgroundImage;
+        probe.remove();
+        const m = bg.match(/url\("?([^")]+)"?\)/);
+        return { bg, status: m ? (await fetch(m[1])).status : null };
+      });
+      assert.equal(res.status, 200, `${url}: ${res.bg}`);
+    }
+  } finally {
+    await page.close();
+  }
+});
+
 test("rows: click / Shift / Cmd highlight; a tick on a highlighted row ticks them all, untick unticks them all; only the player column plays (collection, extension page, import preview)", async () => {
   const hl = (page) => page.$$eval("#collectionTable tr.row-highlight", (trs) => trs.map((t) => t.dataset.key));
   const ticked = (page) => page.$$eval("#collectionTable .row-check:checked", (b) => b.map((x) => x.closest("tr").dataset.key));
@@ -2724,11 +2833,11 @@ test("import: a reload during lookups follows the same job on to the mapping ste
   await stub.install(page);
   await page.goto(SERVER + "/settings/#import");
   // The open batch is still looking up: the tab follows it (nothing is started).
-  await page.waitForFunction(() => /Looking up rows on Bandcamp/.test(document.getElementById("importProgress").textContent));
+  await page.waitForFunction(() => /Looking up rows on Bandcamp/.test((document.getElementById("importProgress") || {}).textContent));
   assert.match(page.url(), /#import\/e2e-b1$/);
-  await page.waitForFunction(() => /^Import: /.test(document.getElementById("navImport").textContent));
+  await page.waitForFunction(() => /^Import: /.test((document.getElementById("navImport") || {}).textContent));
   await page.reload();
-  await page.waitForFunction(() => /Looking up rows on Bandcamp/.test(document.getElementById("importProgress").textContent));
+  await page.waitForFunction(() => /Looking up rows on Bandcamp/.test((document.getElementById("importProgress") || {}).textContent));
   // Followed again after the reload: now let the job finish.
   stub.finishJob();
   await page.waitForSelector("#importMapping:not([hidden])", { timeout: 30000 });
@@ -3302,7 +3411,7 @@ test("Import from Files: folders prefilled with their dates, rows by folder unde
     await page.click("#importFolderAdd");
     await page.fill('#importFolders .folder-row[data-i="2"] .folder-path', "/Volumes/E2E No Such Drive/Music");
     await page.click("#importFilesStart");
-    await page.waitForFunction(() => /Import failed: .*not mounted/.test(document.getElementById("importProgress").textContent));
+    await page.waitForFunction(() => /Import failed: .*not mounted/.test((document.getElementById("importProgress") || {}).textContent));
     await page.click('#importFolders .folder-row[data-i="2"] .folder-del');
     const shot = (name, el) => process.env.E2E_SHOTS && (el ? page.locator(el) : page).screenshot({ path: path.join(process.env.E2E_SHOTS, name) });
     await shot("files-section.png", "#sec_import_files");
@@ -3492,6 +3601,32 @@ test("import preview: a row's new tag is never dropped (edits, reloads), other r
     const other = (await api("/api/items?source=other").then((d) => (Array.isArray(d) ? d : d.items))).find((i) => i.title === "Lonely Thing");
     assert.ok(other && other.tags.includes(NEW), JSON.stringify(other && other.tags));
     await waitFor(async () => (await storage("tags")).tags.includes(NEW), { what: "the tag in the extension" });
+  } finally {
+    await api(`/api/import/${batchId}`, { method: "DELETE" }).catch(() => {});
+    await page.close();
+  }
+});
+
+test("import preview: a tag editor keeps the text being typed (and picks what's typed) while its row is reloaded", async () => {
+  // The row's tag is the last typable one, so the picks sort before it.
+  const vocab = await api("/api/tags");
+  const late = typable(vocab).at(-1);
+  const items = [{ line: 1, raw: "E2E Typist - Fast Fingers", artist: "E2E Typist", title: "Fast Fingers", tags: [late] }];
+  const file = { format: "bc-tagger-import/1", source: "e2e-typing.txt", unknown_tags: {}, items };
+  const { batch_id: batchId } = await post("/api/import", { file, default_tags: [], name: "e2e-typing" });
+  const page = await context.newPage();
+  try {
+    await waitFor(() => api(`/api/import/${batchId}`).then((b) => b.status === "ready"), { what: "the batch", timeout: 30000 });
+    await post(`/api/import/${batchId}/tags`, { map: {}, unmapped: "create" });
+    await page.goto(`${SERVER}/import/?batch=${batchId}`);
+    await page.waitForSelector("tr[data-key='r0'] select.tag-editor", { state: "attached" });
+    const [first, second] = twoTagsFor(vocab, [late]);
+    // The pick is saved to the batch; its import event reloads the rows.
+    await typeThroughReload(page, "r0", first, second, (r) => r.url().endsWith(`/api/import/${batchId}`) && r.request().method() === "GET");
+    await waitFor(
+      () => api(`/api/import/${batchId}`).then((b) => b.rows[0].tags.includes(first) && b.rows[0].tags.includes(second)),
+      { what: "both tags saved" }
+    );
   } finally {
     await api(`/api/import/${batchId}`, { method: "DELETE" }).catch(() => {});
     await page.close();
