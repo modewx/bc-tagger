@@ -433,6 +433,11 @@ releases, into `test-downloads/` only.
 recorded answers only (tests and e2e; `server/tests/fixtures/`); `BC_TAGGER_BANDCAMP_OFFLINE=1` uses the
 server's own cache only.
 
+Many rows at once (select all): `PUT /api/import/<id>/rows {ns: [n, …], changes: {checked?, tags?}}` →
+`{updated, rows: [{n, checked, tags}]}`. Every row or none (one transaction, with the batch's counts), one `import`
+event `{phase: "rows", ns, current, total}`; an unknown `n` is a 404 before anything changes. `tags` become those
+rows' own list, as for one row.
+
 Rows below the threshold keep up to three candidates to pick (`PUT …/rows/<n> {choose}`). A row the
 search misses can be linked from the extension to the Bandcamp page the user has open
 (`POST /api/import/<id>/rows/<n>/link {item}`; `POST /api/import/link-candidates {item}` says which

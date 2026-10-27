@@ -673,3 +673,56 @@ def test_browse_files_under_the_roots_only(svc, tmp_path):
         assert c.put("/api/settings", json={"last_browse_dir": None}).status_code == 200  # cleared
         assert c.get("/api/settings").json()["last_browse_dir"] == ""
         assert c.get("/api/nope").json() == {"detail": "Not Found"}  # unknown routes stay plain 404
+
+
+def _thousand_rows(svc) -> str:
+    items = [{"title": f"Song {i}", "artist": f"Artist {i}"} for i in range(1000)]
+    return importer.create_batch(svc, {"format": "bc-tagger-import/1", "items": items}, ["must"])["batch_id"]
+
+
+def test_select_all_saves_a_thousand_rows_in_one_call(svc):
+    bid = _thousand_rows(svc)
+    events = []
+    svc.jobs.bus.publish = lambda event, data: events.append((event, data))
+    with TestClient(create_app(svc)) as c:
+        started = time.monotonic()
+        r = c.put(f"/api/import/{bid}/rows", json={"ns": list(range(1000)),
+                                                  "changes": {"checked": False, "tags": ["pool", "build", "pool"]}})
+        assert r.status_code == 200 and time.monotonic() - started < 3
+        body = r.json()
+        assert body["updated"] == 1000 and body["rows"][0] == {"n": 0, "checked": False, "tags": ["pool", "build"]}
+        assert [d["phase"] for e, d in events if e == "import"] == ["rows"]  # one event
+        assert events[-1][1]["ns"] == list(range(1000)) and events[-1][1]["total"] == 1000
+        rows = importer.load_rows(svc.store, bid)
+        assert all(not r["checked"] and r["tags"] == ["pool", "build"] and r["default_added"] == [] for r in rows)
+        # a few: only what's sent changes; repeated ns count once
+        r = c.put(f"/api/import/{bid}/rows", json={"ns": [5, 7, 7], "changes": {"checked": True}}).json()
+        assert r == {"updated": 2, "rows": [{"n": 5, "checked": True, "tags": ["pool", "build"]},
+                                            {"n": 7, "checked": True, "tags": ["pool", "build"]}]}
+        assert c.get(f"/api/import/{bid}").json()["rows"][5]["checked"] is True
+
+
+def test_a_bulk_row_update_is_all_or_nothing(svc, monkeypatch):
+    bid = _thousand_rows(svc)
+    before = {r["n"]: r for r in importer.load_rows(svc.store, bid)}
+    assert all(r["checked"] for r in before.values())
+    with TestClient(create_app(svc)) as c:
+        r = c.put(f"/api/import/{bid}/rows", json={"ns": [1, 2, 5000], "changes": {"checked": False}})
+        assert r.status_code == 404  # checked before anything is written
+        assert c.put(f"/api/import/{bid}/rows", json={"ns": [1], "changes": {}}).status_code == 400
+        assert c.put(f"/api/import/{bid}/rows", json={"ns": [1], "changes": {"choose": None}}).status_code == 422
+        assert c.put(f"/api/import/{bid}/rows", json={"ns": [], "changes": {"checked": True}}).status_code == 422
+        assert c.put("/api/import/imp-nope/rows", json={"ns": [1], "changes": {"checked": True}}).status_code == 404
+    real = json.dumps
+
+    def fails_at_row_500(obj, *a, **k):  # half the rows are already written when this one fails
+        if isinstance(obj, dict) and obj.get("n") == 500 and obj.get("checked") is False:
+            raise OSError("disk full")
+        return real(obj, *a, **k)
+
+    monkeypatch.setattr(importer.json, "dumps", fails_at_row_500)
+    with pytest.raises(OSError):
+        importer.update_rows(svc, bid, list(range(1000)), {"checked": False})
+    monkeypatch.setattr(importer.json, "dumps", real)
+    after = {r["n"]: r for r in importer.load_rows(svc.store, bid)}
+    assert after == before  # none of the first 500 stayed changed

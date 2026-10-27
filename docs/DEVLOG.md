@@ -227,6 +227,10 @@ Tests never touch Bandcamp, the music drive or a real rekordbox library: Bandcam
   - On 20 local AIFFs (1.47 GB, 137 min; the SSD, not the HDD): 138 MB/s with 10 encoders, 83 with 4, 44 with 2.
     All 800 files (52.7 GB) would take 6.3 min if the drive kept up; from the HDD the drive sets the pace (about
     7 min at 120 MB/s).
+- **Select all in an import, saved in one call (coordinator: ticks were one PUT per row, so leaving the page lost
+  some):** `PUT /api/import/<id>/rows {ns, changes: {checked?, tags?}}` → `{updated, rows}`. All rows and the batch's
+  counts in one transaction, one `import` event. 1,000 rows in one call in a test; a failure at row 500 leaves all
+  1,000 as they were.
 
 ## App and extension (`app/`, `extension/`, `shared/`, branch `claude/local-collection-ui-e8f6f6`)
 

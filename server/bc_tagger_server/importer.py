@@ -186,23 +186,21 @@ def _lookup_rows(svc, batch: dict, rows: list[dict], todo, phase: str, ctx=None)
 # -- persistence -------------------------------------------------------------------------------
 
 
+_BATCH_UPSERT = ("INSERT INTO import_batches(id, data, created_at, updated_at) VALUES(?, ?, ?, ?) "
+                 "ON CONFLICT(id) DO UPDATE SET data = excluded.data, updated_at = excluded.updated_at")
+_ROW_UPSERT = ("INSERT INTO import_rows(batch_id, n, data) VALUES(?, ?, ?) "
+               "ON CONFLICT(batch_id, n) DO UPDATE SET data = excluded.data")
+
+
 def _save_batch(store, batch: dict) -> None:
     with store.tx() as c:
-        c.execute(
-            "INSERT INTO import_batches(id, data, created_at, updated_at) VALUES(?, ?, ?, ?) "
-            "ON CONFLICT(id) DO UPDATE SET data = excluded.data, updated_at = excluded.updated_at",
-            (batch["batch_id"], json.dumps(batch), batch["created_at"], now_iso()),
-        )
+        c.execute(_BATCH_UPSERT, (batch["batch_id"], json.dumps(batch), batch["created_at"], now_iso()))
 
 
 def _save_rows(store, batch_id: str, rows: list[dict]) -> None:
     with store.tx() as c:
         for row in rows:
-            c.execute(
-                "INSERT INTO import_rows(batch_id, n, data) VALUES(?, ?, ?) "
-                "ON CONFLICT(batch_id, n) DO UPDATE SET data = excluded.data",
-                (batch_id, row["n"], json.dumps(row)),
-            )
+            c.execute(_ROW_UPSERT, (batch_id, row["n"], json.dumps(row)))
 
 
 def load_batch(store, batch_id: str) -> dict:
@@ -242,13 +240,17 @@ def compute_stats(batch: dict, rows: list[dict]) -> dict[str, int]:
 
 
 def _refresh_stats(store, batch: dict, rows: list[dict] | None = None) -> dict:
-    rows = rows if rows is not None else load_rows(store, batch["batch_id"])
+    _update_stats(store, batch, rows if rows is not None else load_rows(store, batch["batch_id"]))
+    _save_batch(store, batch)
+    return batch
+
+
+def _update_stats(store, batch: dict, rows: list[dict]) -> None:
+    """The batch's counts (and a files batch's location updates) from ``rows``, not saved."""
     batch["stats"] = compute_stats(batch, rows)
     if batch.get("kind") == "files" and batch["status"] != "committed":
         batch["location_updates"] = location_updates(store, batch, rows)
         batch["stats"]["location_updates"] = len(batch["location_updates"])
-    _save_batch(store, batch)
-    return batch
 
 
 # -- location updates (files imports) ------------------------------------------------------------
@@ -1031,6 +1033,42 @@ def update_row(svc, batch_id: str, n: int, changes: dict) -> dict:
     _refresh_stats(store, batch, rows)
     _row_event(svc, batch_id, n, len(rows))
     return row
+
+
+def update_rows(svc, batch_id: str, ns: list[int], changes: dict) -> dict:
+    """Tick, untick or tag many rows at once (select-all over hundreds): every row or none, in one transaction
+    with the batch's counts, then one ``import`` event (``phase: "rows"``). ``changes``: ``checked`` and/or
+    ``tags`` (the rows' own list from then on, as for one row)."""
+    store = svc.store
+    batch = load_batch(store, batch_id)
+    if batch["status"] == "committed":
+        raise ImportError_("the batch was already imported")
+    if batch_id in svc.committing:
+        raise ImportError_("the batch is being imported")
+    changes = {k: v for k, v in changes.items() if k in ("checked", "tags") and v is not None}
+    if not changes:
+        raise ImportError_("nothing to change: send checked and/or tags")
+    rows = load_rows(store, batch_id)
+    by_n = {r["n"]: r for r in rows}
+    wanted = list(dict.fromkeys(ns))
+    missing = [n for n in wanted if n not in by_n]
+    if missing:  # before anything changes
+        raise KeyError(f"rows {missing[:10]}")
+    tags = _clean_tags(changes["tags"]) if "tags" in changes else None
+    for n in wanted:
+        row = by_n[n]
+        if tags is not None:
+            row["tags"], row["default_added"] = list(tags), []
+        if "checked" in changes:
+            row["checked"] = bool(changes["checked"])
+    _update_stats(store, batch, rows)
+    with store.tx() as c:  # all the rows and the counts, or nothing
+        c.executemany(_ROW_UPSERT, ((batch_id, n, json.dumps(by_n[n])) for n in wanted))
+        c.execute(_BATCH_UPSERT, (batch_id, json.dumps(batch), batch["created_at"], now_iso()))
+    svc.jobs.bus.publish("import", {"batch_id": batch_id, "phase": "rows", "ns": wanted, "current": len(wanted),
+                                    "total": len(rows)})
+    return {"updated": len(wanted),
+            "rows": [{"n": n, "checked": bool(by_n[n].get("checked")), "tags": by_n[n]["tags"]} for n in wanted]}
 
 
 def _clean_page_url(value: str | None, key: str = "bandcamp_url") -> str:

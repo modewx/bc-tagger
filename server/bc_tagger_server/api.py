@@ -14,7 +14,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, JSONResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.concurrency import run_in_threadpool
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 from .config import PRESETS, SettingsError
 from .service import Service
@@ -100,6 +100,17 @@ class ImportBody(BaseModel):
     default_tags_all: bool = False  # add the default tags to every row, not only untagged ones
     lookup: Literal["server", "browser"] = "server"  # browser: the extension runs the Bandcamp lookups
     name: Optional[str] = None
+
+
+class BulkRowChanges(BaseModel):
+    model_config = ConfigDict(extra="forbid")  # only these two apply to many rows at once
+    checked: Optional[bool] = None
+    tags: Optional[list[str]] = None
+
+
+class RowsBody(BaseModel):
+    ns: list[int] = Field(min_length=1, max_length=20000)
+    changes: BulkRowChanges
 
 
 class RowChanges(BaseModel):
@@ -344,6 +355,11 @@ def create_app(service: Service | None = None) -> FastAPI:
     @app.get("/api/import/{batch_id}")
     def import_get(batch_id: str) -> dict:
         return _import_call(imp.get_batch, svc, batch_id)
+
+    @app.put("/api/import/{batch_id}/rows")
+    def import_rows(batch_id: str, body: RowsBody) -> dict:
+        """``{ns, changes: {checked?, tags?}}`` → ``{updated, rows: [{n, checked, tags}]}``: all or none."""
+        return _import_call(imp.update_rows, svc, batch_id, body.ns, body.changes.model_dump(exclude_unset=True))
 
     @app.put("/api/import/{batch_id}/rows/{n}")
     def import_row(batch_id: str, n: int, body: RowChanges) -> dict:
