@@ -120,6 +120,10 @@ defaultsAll.addEventListener("change", async () => {
 });
 const unavailable = el("div", "import-unavailable");
 unavailable.id = "lookupUnavailable";
+// Import from Files: collection items that aren't located yet get their file on commit.
+const locations = el("details", "import-locations");
+locations.id = "locationUpdates";
+locations.hidden = true;
 const proc = el("div", "import-process");
 
 // Show: narrow the rows to what needs a look.
@@ -137,12 +141,38 @@ showSel.id = "importShow";
 SHOW.forEach(([v, label]) => showSel.appendChild(new Option(label, v)));
 const showLabel = el("label", "import-show-label", "Show ");
 showLabel.appendChild(showSel);
-info.append(title, stats, showLabel, defaults, unavailable, pending, proc);
+info.append(title, stats, showLabel, defaults, unavailable, locations, pending, proc);
 const showFilter = (item) => (SHOW.find(([v]) => v === showSel.value) || SHOW[0])[2](rowNow(item));
+
+function renderLocations() {
+  const list = batch.locationUpdates || [];
+  locations.hidden = !list.length;
+  if (!list.length) return;
+  const wasOpen = locations.open;
+  locations.innerHTML = "";
+  const summary = el(
+    "summary",
+    "",
+    batch.committed
+      ? `Locations updated (${list.length}): collection items that weren't located, now located to these files.`
+      : `Locations to update (${list.length}): collection items that aren't located yet get these files on Import ` +
+          "selected, whether or not their rows are ticked."
+  );
+  const ul = el("ul", "location-list");
+  list.forEach((u) => {
+    const li = el("li", "");
+    li.dataset.item = u.id || "";
+    li.append(el("span", "loc-name", [u.artist, u.title].filter(Boolean).join(" – ") || u.id || "?"), " → ", el("code", "loc-path", u.path));
+    ul.appendChild(li);
+  });
+  locations.append(summary, ul);
+  locations.open = wasOpen;
+}
 
 function renderInfo() {
   if (!batch) return;
   title.textContent = `Import preview · ${batch.source || batch.id}`;
+  renderLocations();
   defaultsText.textContent = `Default tags: ${batch.defaultTags.join(", ") || "none"} · `;
   defaults.hidden = !batch.defaultTags.length || batch.committed;
   if (!defaultsAll.disabled) defaultsAll.checked = batch.defaultTagsAll;

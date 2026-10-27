@@ -121,6 +121,15 @@ export function normBatch(b) {
     pendingReleases: Array.isArray(b.pending_releases) ? b.pending_releases : [],
     lookups: b.bandcamp_lookups || null, // {state: "on" | "off" | "stopped" | "paused", reason, error, at}
     fromFiles: [b.kind, b.type, b.import_type, b.origin].includes("files"), // Import from Files (Phase 7)
+    // Import from Files: collection items not located yet, and the file each gets on commit (ticked or not).
+    locationUpdates: (Array.isArray(b.location_updates) ? b.location_updates : []).map((u) => ({
+      id: u.item_id || u.id || null,
+      artist: u.artist || "",
+      title: u.title || "",
+      path: u.path || u.file || (u.located && u.located.path) || "",
+      n: u.n ?? u.row ?? null,
+      applied: !!(u.applied || u.done),
+    })),
     lookupVia: b.lookup === "browser" ? "browser" : "server", // who makes the Bandcamp requests
     estimate: b.estimate || null, // {lookups, cached, requests, seconds, interval_s, text}
     logs: Array.isArray(b.logs) ? b.logs : [], // its import logs (JSON file names), oldest first

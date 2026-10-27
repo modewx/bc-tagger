@@ -215,3 +215,8 @@ button.chip:hover { filter: brightness(0.95); border-color: #bbb; }
 .notes-pop .note-flags li { margin: 2px 0; }
 .notes-pop .note-flags li.flag-confirm { color: #9a4a00; font-weight: 600; }
 .notes-pop .note-line { font-family: ui-monospace, Menlo, monospace; font-size: 11px; }
+/* Import from Files: collection items located on commit (ticked or not). */
+.import-locations { margin: 6px 0; padding: 6px 10px; background: #eef6ee; border: 1px solid #b7d8b9; border-radius: 6px; font-size: 13px; }
+.import-locations summary { cursor: pointer; font-weight: 600; }
+.import-locations .location-list { margin: 6px 0 2px; padding-left: 18px; max-height: 200px; overflow-y: auto; font-size: 12px; }
+.import-locations .loc-path { font-size: 11px; color: #555; overflow-wrap: anywhere; }
