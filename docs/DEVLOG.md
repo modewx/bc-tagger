@@ -134,11 +134,11 @@ npm run test:e2e                         # Playwright e2e: own profile, server :
     rows, not added to the collection). Transfer doesn't wait for tags to be created or mapped.
     - The dialog lists `tag_playlists` (new tags and tags that won't be exported are pointed out) with a link to map
       them.
-    - New tags (`uncreated_tags` / `new_tags`) are offered in every row's tag editor (`opts.newTags` in the shared
-      table) and highlighted in the chips and the dropdown. Import selected creates them, as before. Per the user's
-      scope change ("just add highlight"), Transfer doesn't create them. The top bar lists them, with "Create New
-      Tags" (`POST /api/tags/create`) and "Map them to rekordbox playlists →". `#rekordbox/tags=a,b` opens Settings
-      with those tags pointed out in the mapping editor.
+    - New tags (`uncreated_tags` / `new_tags`) are highlighted in the rows' tag editors, in the chips and the
+      dropdown (`opts.newTags` in the shared table; they're offered in every row's dropdown). This is the user's
+      scope: "just add highlight". Tag creation is unchanged: "Create New Tags" (`POST /api/tags/create`), then
+      "Map them to rekordbox playlists →", and Import selected creates them. `#rekordbox/tags=a,b` opens Settings with
+      those tags pointed out in the mapping editor.
     - The reported "lost" tags: neither the editor (a row's own tags are always options), nor the row save, nor a
       reload or the commit dropped them. What was missing: other rows couldn't add a row's new tag, and nothing
       showed which tags were new.

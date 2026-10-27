@@ -119,14 +119,14 @@ defaultsAll.addEventListener("change", async () => {
   await page.reload();
   renderInfo();
 });
-// At the top: the rows' tags that aren't in the tag list yet. They're offered in
-// every row's tag editor (highlighted); Import selected creates them, or Create New
-// Tags now. Then a link to map them to playlists.
+// At the top: the rows' tags that aren't in the tag list yet, and Create New Tags;
+// then a link to map them to playlists. Transfer doesn't wait for either. The
+// rows' tag editors highlight them (opts.newTags).
 const newTags = el("div", "import-new-tags");
 newTags.id = "newTagsBar";
 newTags.hidden = true;
-let createdTags = null; // what "Create now" made, for the link afterwards
-let offeredNew = "[]"; // the new tags the editors offer (refreshed when they change)
+let createdTags = null; // what Create New Tags made, for the link afterwards
+let offeredNew = "[]"; // the new tags the editors highlight (refreshed when they change)
 function renderNewTags() {
   const pending = batch.committed ? [] : batch.uncreatedTags;
   if (page && JSON.stringify(pending) !== offeredNew) {
@@ -135,16 +135,9 @@ function renderNewTags() {
   }
   newTags.innerHTML = "";
   newTags.hidden = !pending.length && !createdTags;
-  const mapLink = (tags) => {
-    const link = el("a", "", "Map them to rekordbox playlists →");
-    link.id = "mapNewTags";
-    link.href = mapTagsUrl(tags);
-    return link;
-  };
   if (pending.length) {
     const btn = el("button", "mini-btn", "Create New Tags");
     btn.id = "createNewTags";
-    btn.title = "Add them to your tag list now (Import selected creates them anyway; Transfer to rekordbox doesn't)";
     btn.addEventListener("click", async () => {
       btn.disabled = true;
       try {
@@ -156,17 +149,12 @@ function renderNewTags() {
       }
       renderNewTags();
     });
-    const n = pending.length;
-    newTags.append(
-      el("span", "new-tags-text", `${n} new tag${n > 1 ? "s" : ""}, not in your tag list yet (highlighted in the rows; Import selected creates them): `),
-      ...pending.map((t, i) => [i ? ", " : "", el("span", "new-tag-name", t)]).flat(),
-      ". ",
-      mapLink(pending),
-      " ",
-      btn
-    );
+    newTags.append(`${pending.length} tag${pending.length > 1 ? "s" : ""} in these rows ${pending.length > 1 ? "aren't" : "isn't"} in your tag list yet: ${pending.join(", ")}. `, btn);
   } else if (createdTags) {
-    newTags.append(`Created: ${createdTags.join(", ")}. `, mapLink(createdTags));
+    const link = el("a", "", "Map them to rekordbox playlists →");
+    link.id = "mapNewTags";
+    link.href = mapTagsUrl(createdTags);
+    newTags.append(`Created: ${createdTags.join(", ")}. `, link);
   }
 }
 const unavailable = el("div", "import-unavailable");
@@ -1110,7 +1098,7 @@ async function discard(statusEl) {
     colWidthKey: "bc_import_col_widths_v2",
     baseToolbar: false,
     hideColumns: ["date", "modified", "thumb"], // nothing is added or changed yet; no art is fetched here
-    newTags: () => (batch && !batch.committed ? batch.uncreatedTags : []), // offered in every row, highlighted
+    newTags: () => (batch && !batch.committed ? batch.uncreatedTags : []), // highlighted (and offered) in every row
     // Import from Files: the rows folder by folder, under the folder's path.
     groupBy: (item) => (batch && batch.fromFiles ? rowNow(item).folder || null : null),
     extraColumns: [selectColumn(), { ...sourceColumn(), after: "index" }, releaseColumn(), matchColumn(), locatedColumn(), notesColumn()],

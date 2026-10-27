@@ -52,9 +52,9 @@ reachable, edits are queued on the server and applied by the extension on its ne
   **Transfer to rekordbox** sends the ticked rows' files to rekordbox (playlists from their tags, the usual dry run
   and confirm) without adding them to the collection. Its count, like Export Selected to RB's, is the located rows;
   the hint next to it says how many aren't located (skipped). The dialog shows where each tag goes.
-  - **New tags** (in the rows, not in the tag list yet) are offered in every row's tag editor and highlighted.
-    Import selected creates them; Transfer to rekordbox sends rows with their tags as they are. The bar at the top
-    lists them, links to mapping them in Settings → Rekordbox, and has **Create New Tags** to create them now.
+  - **New tags** (in the rows, not in the tag list yet) are highlighted in the rows' tag editors, chips and
+    dropdown ("new: not in your tag list yet"). Tags that aren't in the list yet get **Create New Tags** at the top,
+    then a link to map them in Settings → Rekordbox. Import selected creates them too.
   - An open import survives leaving the page; the header shows where it is.
 - **Settings → General:** music folders, matching, downloads (folder and format), Bandcamp request pacing, the
   lookup source (Bandcamp / MusicBrainz / both), the import log folder (not inside a music folder or on the music

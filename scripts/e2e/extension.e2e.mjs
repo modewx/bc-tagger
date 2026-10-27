@@ -2899,7 +2899,7 @@ test("Import from Files: folders prefilled with their dates, rows by folder unde
     await page.reload();
     await page.waitForSelector("#newTagsBar:not([hidden]) #createNewTags");
     await shot("files-new-tags.png", ".import-info");
-    assert.match(await page.textContent("#newTagsBar"), new RegExp(`^1 new tag, not in your tag list yet \\(highlighted in the rows; Import selected creates them\\): ${NEW_TAG}\\.`));
+    assert.match(await page.textContent("#newTagsBar"), new RegExp(`isn't in your tag list yet: ${NEW_TAG}\\.`));
     assert.equal(await page.evaluate(() => document.querySelector(".import-info").firstElementChild.nextElementSibling.id), "newTagsBar", "at the top");
     // Transfer to rekordbox: the ticked rows, a dry run first (cancelled here: nothing written, nothing added).
     // It doesn't wait for the new tag: the dialog says where each tag goes, the new one pointed out.
@@ -3006,9 +3006,12 @@ test("import preview: a row's new tag is never dropped (edits, reloads), other r
     await page.waitForFunction((t) => [...document.querySelectorAll("tr[data-key='r0'] li.search-choice.new-tag")].some((li) => li.textContent.trim() === t), NEW);
     assert.equal(await page.$eval(`tr[data-key='r0'] select.tag-editor option[value="${NEW}"]`, (o) => o.classList.contains("new-tag")), true);
     assert.equal(await page.$eval("tr[data-key='r0'] select.tag-editor option[value='pool']", (o) => o.classList.contains("new-tag")), false);
-    // The top bar says it'll be created, and links to mapping it.
-    assert.match(await page.textContent("#newTagsBar"), new RegExp(`^1 new tag, not in your tag list yet \\(highlighted in the rows; Import selected creates them\\): ${NEW}\\.`));
-    assert.match(await page.getAttribute("#mapNewTags", "href"), new RegExp(`tags%3D${NEW}$`));
+    assert.equal(
+      await page.$eval("tr[data-key='r0'] li.search-choice.new-tag", (li) => li.title),
+      "new: not in your tag list yet"
+    );
+    // The bar above is as before (Create New Tags).
+    assert.match(await page.textContent("#newTagsBar"), new RegExp(`isn't in your tag list yet: ${NEW}\\.`));
     // Another row can add it like any tag.
     await editorReady("r1");
     assert.equal(await page.$eval(`tr[data-key='r1'] select.tag-editor option[value="${NEW}"]`, (o) => o.classList.contains("new-tag")), true, "offered");

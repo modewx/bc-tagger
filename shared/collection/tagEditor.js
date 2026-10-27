@@ -3,7 +3,7 @@
 
 // Tags not in the vocabulary yet (e.g. an import's): offered like the others,
 // highlighted in the dropdown and in the chosen chips, created later.
-const NEW_TAG_TITLE = "New tag: created when you import or transfer";
+const NEW_TAG_TITLE = "new: not in your tag list yet";
 function markNewOption(o, isNew) {
   o.classList.toggle("new-tag", isNew);
   o.title = isNew ? NEW_TAG_TITLE : "";
