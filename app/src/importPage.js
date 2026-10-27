@@ -9,7 +9,7 @@ import { createCollectionPage } from "../../shared/collection/collectionPage";
 import { HttpDataSource, apiJson } from "../../shared/datasource/HttpDataSource";
 import { ExtensionBridge } from "../../shared/datasource/extensionBridge";
 import { ServerEvents } from "../../shared/datasource/serverEvents";
-import { Jobs, progressText } from "./jobs";
+import { Jobs, progressText, resultText } from "./jobs";
 import { buildNav } from "./nav";
 import { sourceColumn, localPlayUrl } from "./columns";
 import { openPopover, closePopover } from "./popover";
@@ -19,6 +19,7 @@ import { rememberImport } from "./openImport";
 import { downloadFileTitle, downloadFlow, fullReleaseOf, fullReleasesToggle, stateLabel, trackDownloads } from "./downloads";
 import { playableItem } from "./statusFilter";
 import { logNote } from "./importLogs";
+import { runExport } from "./exportFlow";
 
 const batchId = new URLSearchParams(location.search).get("batch");
 document.body.classList.add("import-page");
@@ -228,6 +229,11 @@ function renderInfo() {
   if (btn) {
     btn.textContent = `Import selected (${checked})`;
     btn.disabled = !checked || batch.committed;
+  }
+  const transfer = document.getElementById("transferToRekordbox");
+  if (transfer) {
+    transfer.textContent = `Transfer to rekordbox (${checked})…`;
+    transfer.disabled = !checked;
   }
   proc.textContent = batch.committed
     ? `Imported${batch.committed_at ? " " + new Date(batch.committed_at).toLocaleString() : ""}.`
@@ -918,6 +924,31 @@ function showLogNote(r) {
   if (note) info.appendChild(note);
 }
 
+// Select all / Select new only (everything but the rows already in the collection).
+async function selectRows(newOnly) {
+  const tick = batch.rows.filter((r) => !r.checked && !(newOnly && r.duplicate));
+  const untick = newOnly ? batch.rows.filter((r) => r.checked && r.duplicate) : [];
+  await Promise.all([tick.length && setChecked(tick, true), untick.length && setChecked(untick, false)]);
+}
+
+// The selected rows straight to rekordbox (their located files, playlists from
+// their tags), without adding them to the collection: the same dry run and
+// confirmation as the collection's export.
+async function transferToRekordbox(statusEl, button) {
+  const rows = batch.rows.filter((r) => r.checked).map((r) => `${batchId}:${r.n}`);
+  if (!rows.length) return (statusEl.textContent = "Transfer to rekordbox: no rows selected.");
+  button.disabled = true;
+  statusEl.textContent = "Transfer to rekordbox: checking…";
+  let job;
+  try {
+    job = await runExport(jobs, { rows }, (j) => (statusEl.textContent = `Transfer to rekordbox: ${progressText(j)}`), { ask: true });
+  } catch (e) {
+    job = { status: "error", error: e.message };
+  }
+  statusEl.textContent = `Transfer to rekordbox: ${resultText(job)}`;
+  button.disabled = false;
+}
+
 async function importSelected(statusEl, button) {
   const n = batch.rows.filter((r) => r.checked).length;
   if (!confirm(`Import ${n} selected rows? Rows found on Bandcamp go to the tagger (the extension adds them), the rest to Other. Duplicates merge tags.`)) return;
@@ -1027,6 +1058,22 @@ async function discard(statusEl) {
     clearExtraFilters: () => (showSel.value = "all"),
     extraToolbarButtons: [
       { id: "importSelected", label: "Import selected", className: "job-btn", run: importSelected },
+      { id: "selectAllRows", label: "Select all", title: "Tick every row", run: () => selectRows(false) },
+      {
+        id: "selectNewOnly",
+        label: "Select new only",
+        title: "Tick the rows that aren't in your collection yet; untick the ones that are",
+        run: () => selectRows(true),
+      },
+      {
+        id: "transferToRekordbox",
+        label: "Transfer to rekordbox…",
+        className: "job-btn",
+        title:
+          "Add the selected rows' files to rekordbox (playlists from their tags) without adding them to your collection. " +
+          "Only located rows; shows the changes first.",
+        run: transferToRekordbox,
+      },
       { id: "locateAgain", label: "Locate again", run: locateAgain },
       {
         id: "downloadOwnedMissing",
