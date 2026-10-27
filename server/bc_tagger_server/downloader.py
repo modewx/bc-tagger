@@ -1,7 +1,8 @@
 """Wrapper around bandcamp-collection-downloader (the user's Kotlin tool).
 
-* Exact releases (Phase 4, ``run_release``): ``--item-id a<id>|t<id>`` downloads exactly that
-  collection item, respecting the tool's cache unless ``force``, into ``downloads_dir`` (default:
+* Exact releases (Phase 4, ``run_releases``): ``--item-id a<id>|t<id>`` for each release downloads exactly
+  those collection items in one run, ``download_parallel`` at a time (``--jobs``), with ``download_timeout_s``
+  as the tool's ``--timeout``, respecting the tool's cache unless ``force``, into ``downloads_dir`` (default:
   the owned root; refused unless inside an owned root). Only on the user's click; agents and
   tests use ``test-downloads/`` or a stub (``BC_TAGGER_DOWNLOADER_STUB=<script>``).
 * Filtered sets (A7, CLI, agents): a non-wildcard ``--string-filter``, at most ``MAX_ITEMS``
@@ -112,22 +113,29 @@ def _launcher(settings) -> list[str]:
     return ["java", "-jar", str(find_jar(settings))]
 
 
-def release_command(settings, release_id: str, audio_format: str = "aiff-lossless", force: bool = False) -> list[str]:
-    if not re.fullmatch(r"[at]\d+", release_id or ""):
-        raise DownloadRefused(f"not a release id: {release_id!r}")
+def release_command(settings, release_ids: str | list[str], audio_format: str = "aiff-lossless",
+                    force: bool = False, jobs: int | None = None) -> list[str]:
+    """One downloader run for exact releases: ``--item-id`` for each, ``--jobs`` parallel downloads
+    (``download_parallel``, at most one per release) and ``--timeout`` (``download_timeout_s``)."""
+    ids = [release_ids] if isinstance(release_ids, str) else list(release_ids)
+    if not ids or not all(re.fullmatch(r"[at]\d+", i or "") for i in ids):
+        raise DownloadRefused(f"not release ids: {ids!r}")
     if audio_format not in FORMATS:
         raise DownloadRefused(f"unknown audio format {audio_format}")
     folder = downloads_dir(settings)
     cookies = Path(settings.get("cookies_file")).expanduser()
     if not cookies.is_file():
         raise DownloadRefused(f"cookies file not found: {cookies}")
+    jobs = max(1, min(int(jobs or settings.get("download_parallel")), len(ids)))
+    timeout_ms = int(float(settings.get("download_timeout_s")) * 1000)
     return [
         *_launcher(settings),
         f"--download-folder={folder}",
         f"--audio-format={audio_format}",
-        f"--item-id={release_id}",
+        *(f"--item-id={i}" for i in ids),
         "--skip-hidden",
-        "--jobs=1",
+        f"--jobs={jobs}",
+        f"--timeout={timeout_ms}",
         f"--user-agent={USER_AGENT}",
         *(["--force"] if force else []),
         f"--cookies-file={cookies}",
@@ -135,86 +143,170 @@ def release_command(settings, release_id: str, audio_format: str = "aiff-lossles
     ]
 
 
-_PROGRESS = re.compile(r"Progress(?:es)?:\s*(?:\[[^\]]*\]\s*)?([\d.,]+)\s*%")
+_THREAD = re.compile(r"^\[([^\]]+)\]\s+(.*)$")  # parallel runs: "[pool-1-thread-2] <message>"
+_PROGRESSES = re.compile(r"^Progress(?:es)?:\s*(.*)$")
+_ONE_PROGRESS = re.compile(r"(?:\[([^\]]+)\]\s*)?([\d.,]+)\s*%")
 _TRY_ERROR = re.compile(r'Error while trying: "(.*)"\.?\s*$')
 _RETRY = re.compile(r"Retrying \((\d+)/(\d+)\)")
+_FOUND = re.compile(r'Found release "(.*)" \((\d{4})\) by (.*) \(Bandcamp ID: [^)]*\)\.?\s*$')
+_NOT_IN = re.compile(r"Not in the collection: (.*)$")
 
 
 def _short_error(error: str | None) -> str:
-    """"java.net.SocketTimeoutException: Read timed out" → "SocketTimeoutException: Read timed out"."""
-    return re.sub(r"^(?:[a-z_][a-z0-9_]*\.)+", "", (error or "an error").strip())[:160]
+    """The retry reason in plain words: "read timed out", "HTTP 503", else the exception without its package."""
+    text = (error or "an error").strip()
+    if m := re.search(r"HTTP (?:code|error)[^\d]*(\d{3})|Status=(\d{3})", text):
+        return f"HTTP {m.group(1) or m.group(2)}"
+    if re.search(r"SocketTimeoutException", text):
+        return (re.sub(r"^.*?SocketTimeoutException:?\s*", "", text) or "timed out").lower()
+    if re.search(r"UnknownHostException|ConnectException|NoRouteToHost", text):
+        return "no connection: " + re.sub(r"^(?:[a-z_][a-z0-9_]*\.)+", "", text)[:120]
+    return re.sub(r"^(?:[a-z_][a-z0-9_]*\.)+", "", text)[:160]
 
 
-def run_release(settings, release_id: str, audio_format: str = "aiff-lossless", force: bool = False,
-                on_line: Callable[..., None] | None = None) -> dict[str, Any]:
-    """Download one release; ``outcome``: downloaded | on_disk | cached | not_in_collection |
-    challenged | rate_limited | failed. ``on_line(message, percent)`` gets the tool's output in plain
-    words: the download's percentage (the tool prints it without line breaks), and on a retry the
-    error that caused it."""
-    cmd = release_command(settings, release_id, audio_format, force)
+def _norm(s: str | None) -> str:
+    return re.sub(r"[^0-9a-z]+", " ", (s or "").lower()).strip()
+
+
+def _match_release(title: str, artist: str, releases: list[dict], taken: set[str]) -> str | None:
+    """Which of our releases the tool's "Found release" line is about (by title, then artist)."""
+    free = [r for r in releases if r["release"] not in taken]
+    same = [r for r in free if _norm(r.get("title")) == _norm(title)]
+    if len(same) > 1:
+        same = [r for r in same if _norm(r.get("artist")) == _norm(artist)] or same
+    if same:
+        return same[0]["release"]
+    return free[0]["release"] if len(free) == 1 else None
+
+
+def run_releases(settings, releases: list[dict], audio_format: str = "aiff-lossless", force: bool = False,
+                 on_line: Callable[..., None] | None = None, jobs: int | None = None) -> dict[str, Any]:
+    """Download several releases in one downloader run, ``download_parallel`` at a time. ``releases``:
+    ``[{release, title, artist}]`` (the title tells the tool's output lines apart). Returns ``{"releases":
+    {release: {outcome, ok, folder, files, errors, retries}}, "exit_code", "log_tail"}``; ``outcome``:
+    downloaded | on_disk | cached | not_in_collection | challenged | rate_limited | failed, or unmatched
+    (the output named a release we couldn't tie to this one; ``folders`` lists every release folder written).
+    ``on_line(release, message, percent)`` gets each release's progress in plain words (``release`` is None
+    for lines about the whole run): its percentage, and on a retry the reason."""
+    ids = [r["release"] for r in releases]
+    cmd = release_command(settings, ids, audio_format, force, jobs)
     target, root = _downloads_root(settings)  # again: the drive may have gone since the job started
     try:
         ensure_dir_under(target, root)  # the tool creates artist/release folders below it
     except NotMounted as e:
         raise DownloadRefused(str(e)) from None
+    say = on_line or (lambda release, message, percent=None: None)
+    state = {i: {"outcome": None, "folder": None, "errors": [], "retries": [], "percent": None, "last_error": None}
+             for i in ids}
+    thread_release: dict[str, str | None] = {}
+    taken: set[str] = set()
+    unmatched = 0  # "Found release" lines we couldn't tie to one of ours
+    folders: list[str] = []
+    stray_errors: list[str] = []  # errors on those releases' lines
     lines: list[str] = []
-    retries: list[str] = []
-    folder: str | None = None
-    percent: float | None = None
-    last_error: str | None = None
-    say = on_line or (lambda message, percent=None: None)
     proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
     assert proc.stdout is not None
     for raw in proc.stdout:  # text mode: the tool's "\r" progress updates arrive as lines too
         line = redact(raw.strip())
         if not line:
             continue
-        progress = _PROGRESS.search(line)
-        if progress:  # thousands of these: report whole percents, don't keep them
-            p = float(progress.group(1).replace(",", "."))
-            if percent is None or int(p) > int(percent):
-                percent = p
-                say(f"downloading {int(p)} %", p)
+        progress = _PROGRESSES.match(line)
+        if progress:  # thousands of these: report whole percents per release, don't keep them
+            for part in progress.group(1).split("||"):
+                m = _ONE_PROGRESS.search(part)
+                rel = thread_release.get(m.group(1) or "main") if m else None
+                if m and rel:
+                    p, st = float(m.group(2).replace(",", ".")), state[rel]
+                    if st["percent"] is None or int(p) > int(st["percent"]):
+                        st["percent"] = p
+                        say(rel, f"downloading {int(p)} %", p)
             continue
         lines.append(line)
-        if "Release folder: " in line:
-            folder = line.split("Release folder: ", 1)[1].strip()
-        if (m := _TRY_ERROR.search(line)) is not None:
-            last_error = m.group(1)
-            retries.append(_short_error(last_error))
-            say(f"Bandcamp error: {_short_error(last_error)}", percent)
-        elif (m := _RETRY.search(line)) is not None:
-            percent = None
-            say(f"retrying {m.group(1)}/{m.group(2)} after: {_short_error(last_error)}", None)
-        elif "Starting the download of" in line:
-            say("downloading…", None)
-        elif "successfully downloaded" in line:
-            say("downloaded; unpacking done", 100.0)
+        m = _THREAD.match(line)
+        thread, msg = (m.group(1), m.group(2)) if m else ("main", line)
+        if (found := _FOUND.search(msg)) is not None:
+            rel = _match_release(found.group(1), found.group(3), releases, taken)
+            thread_release[thread] = rel
+            if rel:
+                taken.add(rel)
+            else:
+                unmatched += 1
+            continue
+        if "Release folder: " in msg:
+            folders.append(msg.split("Release folder: ", 1)[1].strip())
+        if msg.startswith("Managing item"):
+            thread_release[thread] = None  # the next "Found release" says which
+            continue
+        if (gone := _NOT_IN.search(msg)) is not None:
+            for i in re.split(r"[,\s]+", gone.group(1)):
+                if i in state:
+                    state[i]["outcome"] = "not_in_collection"
+            continue
+        rel = thread_release.get(thread)
+        st = state.get(rel) if rel else None
+        if st is None:
+            if msg.startswith("Could not download item") or _TRY_ERROR.search(msg):
+                stray_errors.append(msg)
+            say(None, msg[-200:], None)
+            continue
+        if "Release folder: " in msg:
+            st["folder"] = msg.split("Release folder: ", 1)[1].strip()
+        if (e := _TRY_ERROR.search(msg)) is not None:
+            st["last_error"] = e.group(1)
+            st["retries"].append(_short_error(e.group(1)))
+            say(rel, f"Bandcamp error: {_short_error(e.group(1))}", st["percent"])
+        elif (r := _RETRY.search(msg)) is not None:
+            st["percent"] = None
+            say(rel, f"retry {r.group(1)}/{r.group(2)}: {_short_error(st['last_error'])}", None)
+        elif "Starting the download of" in msg:
+            say(rel, "downloading…", None)
+        elif "successfully downloaded" in msg:
+            st["outcome"] = "downloaded"
+            say(rel, "downloaded; unpacking done", 100.0)
+        elif "already exists on disk" in msg:
+            st["outcome"] = "on_disk"
+        elif msg.startswith("Could not download item") or "is a preorder; skipping" in msg:
+            st["outcome"] = "failed"
+            st["errors"].append(msg)
+            say(rel, msg[-200:], st["percent"])
         else:
-            say(line[-200:], percent)
+            say(rel, msg[-200:], st["percent"])
     code = proc.wait()
     text = "\n".join(lines)
-    errors = [ln for ln in lines if "ERROR" in ln or "Could not download item" in ln]
+    run_outcome = None
     if is_challenge(text) or "Client Challenge" in text:
-        outcome = "challenged"
+        run_outcome = "challenged"
     elif re.search(r"Status=429|HTTP 429|Too Many Requests", text):
-        outcome = "rate_limited"
+        run_outcome = "rate_limited"
     elif "None of the requested items are in the collection" in text:
-        outcome = "not_in_collection"
-    elif "successfully downloaded" in text:
-        outcome = "downloaded"
-    elif "already exists on disk" in text:
-        outcome = "on_disk"
-    elif re.search(r"Ignoring \d+ already downloaded items", text) and "Found release" not in text:
-        outcome = "cached"
-    else:
-        outcome = "failed"
-    new_files = []
-    if folder and Path(folder).is_dir():
-        new_files = sorted(str(p) for p in Path(folder).rglob("*") if p.is_file() and not p.name.startswith("."))
-    return {"release": release_id, "outcome": outcome, "ok": outcome in ("downloaded", "on_disk", "cached"),
-            "exit_code": code, "folder": folder, "files": new_files, "errors": errors[-5:], "retries": retries,
+        run_outcome = "not_in_collection"
+    ignored = re.search(r"Ignoring \d+ already downloaded items", text) is not None
+    out: dict[str, dict[str, Any]] = {}
+    for i in ids:
+        st = state[i]
+        outcome = st["outcome"]
+        if outcome is None and i not in taken and not run_outcome and unmatched:
+            outcome = "unmatched"  # some release we couldn't tell apart: the caller checks its files
+        if outcome is None:
+            outcome = run_outcome or ("cached" if ignored and i not in taken else "failed")
+        if outcome == "failed" and not st["errors"]:
+            st["errors"] = [ln for ln in lines if "ERROR" in ln][-3:]
+        folder = st["folder"]
+        files = sorted(str(p) for p in Path(folder).rglob("*") if p.is_file() and not p.name.startswith(".")) \
+            if folder and Path(folder).is_dir() else []
+        out[i] = {"release": i, "outcome": outcome, "ok": outcome in ("downloaded", "on_disk", "cached"),
+                  "folder": folder, "files": files, "errors": st["errors"][-5:], "retries": st["retries"]}
+    return {"releases": out, "folders": folders, "stray_errors": stray_errors[-5:], "exit_code": code,
             "log_tail": lines[-20:]}
+
+
+def run_release(settings, release_id: str, audio_format: str = "aiff-lossless", force: bool = False,
+                on_line: Callable[..., None] | None = None, title: str | None = None) -> dict[str, Any]:
+    """One release (see ``run_releases``); ``on_line(message, percent)``."""
+    say = on_line or (lambda message, percent=None: None)
+    run = run_releases(settings, [{"release": release_id, "title": title}], audio_format, force,
+                       lambda release, message, percent=None: say(message, percent), jobs=1)
+    return {**run["releases"][release_id], "exit_code": run["exit_code"], "log_tail": run["log_tail"]}
 
 
 def redact(line: str) -> str:

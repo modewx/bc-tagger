@@ -103,15 +103,96 @@ def test_command_is_honest_and_keeps_cookies_out_of_output(svc):
         downloader.release_command(svc.settings, "a10; rm -rf /")
 
 
+def _more_owned(svc, *ids):
+    """Owned tracks bought alone (t601…), each its own release."""
+    svc.store.upsert_items({i: {"title": f"Song {i}", "artist": "Artist F", "album_title": f"Song {i}", "track_num": 1}
+                            for i in ids})
+    with svc.store.tx() as c:
+        for i in ids:
+            c.execute("INSERT INTO owned_ids(id, source, checked_at) VALUES(?, 'test', '2026-10-26')", (i,))
+
+
 def test_bot_check_stops_the_remaining_releases(svc, tmp_path, monkeypatch):
+    # download_parallel 1 → three releases per downloader run: the bot check in the first run stops the second
+    svc.settings.update({"download_parallel": 1})
+    _more_owned(svc, "t601")
     rel = tmp_path / "releases.json"
     rel.write_text(json.dumps({**RELEASES, "a10": {**RELEASES["a10"], "fail": "challenge"}}))
-    result = downloads.run(svc, ["t100", "t200"])
+    args = tmp_path / "args.jsonl"
+    monkeypatch.setenv("BC_TAGGER_STUB_ARGS", str(args))
+    result = downloads.run(svc, ["t100", "t200", "a70", "t601"])
     items = by_ref(result)
     assert result["stopped"] and "bot check" in result["stopped"]
-    assert items["t100"]["state"] == "failed" and "bot check" in items["t100"]["message"]
-    assert items["t200"]["state"] == "failed" and len(result["releases"]) == 1  # never started
+    for ref in ("t100", "t200", "a70"):  # the same run
+        assert items[ref]["state"] == "failed" and "bot check" in items[ref]["message"]
+    assert items["t601"]["state"] == "failed" and len(result["releases"]) == 3  # never started
+    assert len(args.read_text().splitlines()) == 1
     assert not (tmp_path / "owned" / "Artist B").exists()
+
+
+def test_releases_download_in_parallel_in_one_run(svc, tmp_path, monkeypatch):
+    rel = tmp_path / "releases.json"
+    rel.write_text(json.dumps({**RELEASES, "a70": {"artist": "Artist G", "title": "Look At Yourself", "year": 2020,
+                                                   "tracks": ["Look"]},
+                               "t200": {**RELEASES["t200"], "retry_error": "java.lang.Exception: No file to download. "
+                                                                           "Server replied HTTP code: 503"}}))
+    args = tmp_path / "args.jsonl"
+    monkeypatch.setenv("BC_TAGGER_STUB_ARGS", str(args))
+    svc.settings.update({"download_timeout_s": 240})
+    events, progress = [], []
+    monkeypatch.setattr(svc.jobs.bus, "publish", lambda kind, data: events.append((kind, data)))
+
+    class Ctx:
+        job = type("Job", (), {"id": "download-test"})()
+
+        def progress(self, cur, total, message):
+            progress.append(message)
+
+    result = downloads.run(svc, ["t100", "t200", "a70"], ctx=Ctx())
+    runs = [json.loads(line) for line in args.read_text().splitlines()]
+    assert len(runs) == 1  # one downloader run for all three
+    assert [a for a in runs[0] if a.startswith("--item-id=")] == ["--item-id=a10", "--item-id=t200", "--item-id=a70"]
+    assert "--jobs=3" in runs[0] and "--timeout=240000" in runs[0]  # at most one per release (setting: 4)
+    assert [r["outcome"] for r in result["releases"]] == ["downloaded"] * 3 and result["stopped"] is None
+    assert all(e["state"] == "done" and e["located"] for e in result["items"])
+    # each release's own percent, read from the shared "Progresses: [thread] x % || …" line
+    pct = {}
+    for kind, d in events:
+        if kind == "download" and d.get("percent") is not None and d["message"].startswith("downloading "):
+            pct.setdefault(d["ref"], []).append(d["percent"])
+    assert pct["t100"][:3] == [0.0, 12.5, 50.0] and pct["t200"][:3] == [1.0, 13.5, 51.0]
+    assert pct["a70"][:3] == [2.0, 14.5, 52.0]
+    # the retry reason, for that release only
+    retry = [(d["ref"], d["message"]) for k, d in events if k == "download" and d["message"].startswith("retry")]
+    assert retry == [("t200", "retry 1/3: HTTP 503")]
+    assert any("Single: retry 1/3: HTTP 503" in m for m in progress)
+    assert any(" · " in m and "Album A: downloading" in m for m in progress)  # several at once in the job's line
+    assert by_ref(result)["t200"]["message"] == "downloaded (after 1 retry: HTTP 503)"
+
+
+def test_parallel_output_with_titles_we_cant_tell_apart(svc, tmp_path, monkeypatch):
+    """Release names in the output that match none of ours: every folder written is indexed and each item is
+    checked by locating it (one left over is matched by elimination)."""
+    rel = tmp_path / "releases.json"
+    rel.write_text(json.dumps({**RELEASES,
+                               "t200": {**RELEASES["t200"], "title": "Single (Edit)"},
+                               "a10": {**RELEASES["a10"], "title": "Album A (Remastered)", "fail": "error"}}))
+    result = downloads.run(svc, ["t200", "t100"])
+    outcomes = {r["release"]: r["outcome"] for r in result["releases"]}
+    assert outcomes == {"t200": "downloaded", "a10": "failed"}
+    assert by_ref(result)["t200"]["located"]
+    assert by_ref(result)["t100"]["message"] == ("the download failed: couldn't tell which release failed: "
+                                                 "Could not download item: No URL found for item")
+
+
+def test_download_settings_are_checked(svc):
+    from bc_tagger_server.config import SettingsError
+
+    for bad in ({"download_parallel": 0}, {"download_parallel": 9}, {"download_parallel": 2.5},
+                {"download_timeout_s": 10}, {"download_timeout_s": "slow"}):
+        with pytest.raises(SettingsError):
+            svc.settings.update(bad)
+    assert svc.settings.get("download_parallel") == 4 and svc.settings.get("download_timeout_s") == 180
 
 
 def test_import_row_download(svc):
@@ -149,10 +230,9 @@ def test_progress_and_retry_reasons_in_plain_words(svc, monkeypatch):
     monkeypatch.setenv("BC_TAGGER_STUB_RETRY", "1")
     said = []
     res = downloader.run_release(svc.settings, "t200", on_line=lambda message, percent=None: said.append((message, percent)))
-    assert res["outcome"] == "downloaded" and res["retries"] == ["SocketTimeoutException: Read timed out"]
+    assert res["outcome"] == "downloaded" and res["retries"] == ["read timed out"]
     messages = [m for m, _ in said]
-    assert "Bandcamp error: SocketTimeoutException: Read timed out" in messages
-    assert "retrying 1/3 after: SocketTimeoutException: Read timed out" in messages
+    assert "Bandcamp error: read timed out" in messages and "retry 1/3: read timed out" in messages
     percents = [p for m, p in said if m.startswith("downloading ") and m.endswith("%")]
     assert percents == [0.0, 12.5, 50.0, 99.99]  # whole percents only: 12.9 is still 12 %
     assert not any("Progress:" in line for line in res["log_tail"])  # not kept in the log

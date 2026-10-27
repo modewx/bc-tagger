@@ -2,9 +2,9 @@
 
 Each ref is an item id (``t123``/``a456``) or an import row (``<batch_id>:<n>``). Tracks map to their
 album when the album is owned (else the track itself if it was bought alone); releases are
-deduped and downloaded one at a time (one download job at a time, too). After each release its
-folder is indexed and the affected items and rows are located again. Bandcamp's bot check or a
-rate limit stops the remaining releases.
+deduped and given to the downloader together, ``download_parallel`` at a time (one download job at a time,
+though). After each run its folders are indexed and the affected items and rows are located again.
+Bandcamp's bot check or a rate limit stops the remaining releases.
 """
 
 from __future__ import annotations
@@ -20,6 +20,7 @@ from .store import now_iso
 from .tagread import AUDIO_EXTS
 
 _one_at_a_time = threading.Lock()
+CHUNK_FACTOR = 3  # releases per downloader run: this many times download_parallel
 
 MESSAGES = {
     "downloaded": "downloaded",
@@ -198,60 +199,106 @@ def downloads_for(store, item_ids: list[str], refs: list[str], since: str) -> li
         (*ids, since, *refs))]
 
 
-def _run_releases(svc, p: dict, by_ref: dict, force: bool, ctx, job_id, publish, results: list[dict]) -> str | None:
-    stop = None
-    with _one_at_a_time:
-        for i, rel in enumerate(p["releases"], 1):
-            entries = [by_ref[r] for r in rel["refs"]]
-            if stop:
-                for e in entries:
-                    e.update(state="failed", message=stop)
-                    publish(e)
-                continue
-            for e in entries:
-                e.update(state="downloading", message=f"downloading {rel['title'] or rel['release']}")
-                publish(e)
-            if ctx:
-                ctx.progress(i - 1, len(p["releases"]), f"downloading {i}/{len(p['releases'])}: {rel['title']}")
-            def report(message, percent=None, i=i, rel=rel, entries=entries):
-                name = rel["title"] or rel["release"]
-                if ctx:
-                    ctx.progress(i - 1, len(p["releases"]), f"{name}: {message}")
-                for e in entries:  # per-row progress for the UI
-                    svc.jobs.bus.publish("download", {"job_id": job_id, "ref": e["ref"], "item_id": e["item_id"],
-                                                      "release": rel["release"], "state": "downloading",
-                                                      "message": message, "percent": percent, "located": None})
+def _failed(release: str, err: Exception) -> dict[str, Any]:
+    return {"release": release, "outcome": "failed", "ok": False, "folder": None, "files": [], "errors": [str(err)],
+            "retries": []}
 
-            try:
-                res = downloader.run_release(svc.settings, rel["release"], p["format"], force, on_line=report)
-            except (DownloadRefused, OSError) as err:
-                res = {"release": rel["release"], "outcome": "failed", "ok": False, "folder": None, "files": [],
-                       "errors": [str(err)]}
-                if "not mounted" in str(err):
-                    stop = str(err)  # the drive went away: don't try the rest
-            if res["outcome"] == "cached" and not force and not all(_locate_refs(svc, entries).values()):
-                # The tool's cache says "downloaded", but the files aren't in the index (moved, renamed or
-                # deleted): the user asked for them, so fetch it again, ignoring that cache once.
-                report("the downloader's cache lists it, but its files weren't found: downloading again")
-                try:
-                    again = downloader.run_release(svc.settings, rel["release"], p["format"], True, on_line=report)
-                except (DownloadRefused, OSError) as err:
-                    again = {"outcome": "failed", "ok": False, "folder": None, "files": [], "errors": [str(err)]}
-                if again["outcome"] == "downloaded":
-                    again["outcome"] = "redownloaded"
-                res = {**again, "release": rel["release"], "retries": res.get("retries", []) + again.get("retries", [])}
-            if res["outcome"] in ("challenged", "rate_limited"):
-                stop = MESSAGES[res["outcome"]]
-            indexed = _index_folder(svc, res.get("folder")) if res["ok"] else 0
-            located = _locate_refs(svc, entries) if res["ok"] else {}
-            for e in entries:
-                message = MESSAGES[res["outcome"]]
-                if res["outcome"] == "failed" and stop and "not mounted" in stop:
-                    message = stop
-                elif res["outcome"] == "failed" and res.get("errors"):
-                    message = f"{message}: {res['errors'][-1]}"
-                e.update(state="done" if res["ok"] else "failed", message=message, located=located.get(e["ref"]))
-                publish(e)
-            results.append({**{k: v for k, v in res.items() if k != "log_tail"}, "indexed": indexed,
-                            "refs": rel["refs"]})
+
+def _run_releases(svc, p: dict, by_ref: dict, force: bool, ctx, job_id, publish, results: list[dict]) -> str | None:
+    """The plan's releases, ``download_parallel`` at a time in one downloader run per chunk (a few times the
+    parallel count, so items get located as chunks finish). Returns why the rest stopped, if they did."""
+    stop = None
+    rels = p["releases"]
+    total, done = len(rels), 0
+    chunk_size = max(1, int(svc.settings.get("download_parallel")) * CHUNK_FACTOR)
+    entries_of = {rel["release"]: [by_ref[r] for r in rel["refs"]] for rel in rels}
+    names = {rel["release"]: rel["title"] or rel["release"] for rel in rels}
+    active: dict[str, str] = {}  # release → its latest message, for the job's progress line
+
+    def report(release, message, percent=None):
+        if release is None:  # a line about the whole run
+            if ctx:
+                ctx.progress(done, total, message)
+            return
+        active[release] = message
+        if ctx:  # e.g. "MSP01: retry 1/3: read timed out · Atacama EP: downloading 42 %"
+            ctx.progress(done, total, " · ".join(f"{names[r]}: {m}" for r, m in active.items()))
+        for e in entries_of[release]:  # per-row progress for the UI
+            svc.jobs.bus.publish("download", {"job_id": job_id, "ref": e["ref"], "item_id": e["item_id"],
+                                              "release": release, "state": "downloading",
+                                              "message": message, "percent": percent, "located": None})
+
+    def download(chunk: list[dict], forced: bool) -> dict[str, dict]:
+        try:
+            run = downloader.run_releases(svc.settings, [{k: r[k] for k in ("release", "title", "artist")} for r in chunk],
+                                          p["format"], forced, on_line=report)
+        except (DownloadRefused, OSError) as err:
+            return {r["release"]: _failed(r["release"], err) for r in chunk}
+        res_by = run["releases"]
+        unmatched = [r for r in chunk if res_by[r["release"]]["outcome"] == "unmatched"]
+        if unmatched:  # the output didn't say which release a folder is: index them all, then look for ours
+            for folder in run["folders"]:
+                _index_folder(svc, folder)
+            for rel in unmatched:
+                located = _locate_refs(svc, entries_of[rel["release"]])
+                ok = bool(located) and all(located.values())
+                why = "; ".join(run["stray_errors"]) or "nothing about it in the downloader's output"
+                res_by[rel["release"]].update(outcome="downloaded" if ok else "failed", ok=ok,
+                                              errors=[] if ok else [f"couldn't tell which release failed: {why}"])
+        return res_by
+
+    with _one_at_a_time:
+        for start in range(0, total, chunk_size):
+            chunk = rels[start:start + chunk_size]
+            if stop:
+                for rel in chunk:
+                    for e in entries_of[rel["release"]]:
+                        e.update(state="failed", message=stop)
+                        publish(e)
+                continue
+            for rel in chunk:
+                for e in entries_of[rel["release"]]:
+                    e.update(state="downloading", message=f"waiting to download {names[rel['release']]}")
+                    publish(e)
+            if ctx:
+                ctx.progress(done, total, f"downloading {done + 1}–{done + len(chunk)} of {total}")
+            res_by = download(chunk, force)
+            failed = next((r for r in res_by.values() if r["outcome"] == "failed"
+                           and any("not mounted" in e for e in r["errors"])), None)
+            if failed:
+                stop = failed["errors"][-1]  # the drive went away: don't try the rest
+            # The tool's cache says "downloaded", but the files aren't in the index (moved, renamed or
+            # deleted): the user asked for them, so fetch those again, ignoring that cache once.
+            again = [rel for rel in chunk if res_by[rel["release"]]["outcome"] == "cached" and not force
+                     and not all(_locate_refs(svc, entries_of[rel["release"]]).values())]
+            if again and not stop:
+                for rel in again:
+                    report(rel["release"], "the downloader's cache lists it, but its files weren't found: downloading again")
+                for release, res in download(again, True).items():
+                    if res["outcome"] == "downloaded":
+                        res["outcome"] = "redownloaded"
+                    res_by[release] = {**res, "retries": res_by[release].get("retries", []) + res.get("retries", [])}
+            for res in res_by.values():
+                if res["outcome"] in ("challenged", "rate_limited"):
+                    stop = MESSAGES[res["outcome"]]
+            for rel in chunk:
+                release = rel["release"]
+                res, entries = res_by[release], entries_of[release]
+                active.pop(release, None)
+                indexed = _index_folder(svc, res.get("folder")) if res["ok"] else 0
+                located = _locate_refs(svc, entries) if res["ok"] else {}
+                for e in entries:
+                    message = MESSAGES[res["outcome"]]
+                    if res["outcome"] == "failed" and stop and "not mounted" in stop:
+                        message = stop
+                    elif res["outcome"] == "failed" and res.get("errors"):
+                        message = f"{message}: {res['errors'][-1]}"
+                    elif res.get("retries"):
+                        message = f"{message} (after {len(res['retries'])} retr{'y' if len(res['retries']) == 1 else 'ies'}: " \
+                                  f"{res['retries'][-1]})"
+                    e.update(state="done" if res["ok"] else "failed", message=message, located=located.get(e["ref"]))
+                    publish(e)
+                results.append({**{k: v for k, v in res.items() if k != "log_tail"}, "indexed": indexed,
+                                "refs": rel["refs"]})
+            done += len(chunk)
     return stop

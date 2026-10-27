@@ -99,6 +99,7 @@ for `export` and `xml`.
 | `format_preference` | `aiff, flac, wav, alac, m4a, mp3-320, other` |
 | `cookies_file`, `bandcamp_username` | the fresh cookies file, `herrasti` |
 | `downloads_dir` / `download_format` | `""` (= the owned root; must be inside an owned root) / `aiff-lossless` |
+| `download_parallel` / `download_timeout_s` | `4` (1–8 parallel downloads per tool run) / `180` (≥ 30; the tool's `--timeout`) |
 | `lookup_source` | `bandcamp` (`musicbrainz`: hints only, no Bandcamp requests; `both`) |
 | `import_log_dir` | `""` (= `<data dir>/import-logs`; never inside a root or on the music drive) |
 | `bandcamp_request_interval_s` | `1.0` (≥ 0.1; the server's pace for Bandcamp lookups) |
@@ -275,16 +276,24 @@ Item views carry hints like `owned_but_only_in_not_owned_root`.
 For an owned item (or import row) that isn't located, `POST /api/download {ids: ["t123", "<batch>:<n>"]}`
 runs the user's `bandcamp-collection-downloader` (branch `bc-tagger-item-id`, `./gradlew fatJar`, JDK 11) with
 `--item-id a<id>|t<id>`: exactly that collection item, respecting the tool's cache unless `force`. Tracks map
-to their album when the album is owned, releases are deduped and downloaded one at a time (`--skip-hidden
---jobs=1`, the app's User-Agent, the cookies file), into `downloads_dir` (empty: the owned root; refused
-unless inside an owned root), in `download_format` (default `aiff-lossless`). After each release its folder is
-indexed and the affected items and rows are located. Bandcamp's bot check or a rate limit stops the rest.
+to their album when the album is owned. Releases are deduped and given to one tool run together: several
+`--item-id`, `--jobs=<download_parallel>` (default 4, like the tool's own default; at most one per release),
+`--timeout=<download_timeout_s × 1000>` (default 180 s; the tool's own 50 s restarted whole zips on slow
+stretches), `--skip-hidden`, the app's User-Agent and the cookies file. Long lists go in runs of 3 ×
+`download_parallel`, and there's still one download job at a time. Files go into `downloads_dir` (empty: the
+owned root; refused unless inside an owned root), in `download_format` (default `aiff-lossless`). After each run
+its folders are indexed and the affected items and rows are located. Bandcamp's bot check or a rate limit stops
+the rest. The tool's parallel output ("[pool-1-thread-N] …", "Progresses: [thread] x % || …") is tied to our
+releases by the "Found release" title. If a title matches none of ours, every folder that run wrote is indexed
+and the item is checked by locating it.
 `full_release: true` ("Download Full Release") fetches the whole album/EP of each track, when that release is
 owned; without it ("Download File") a track bought alone is fetched by itself. Item views say what's possible
 (`owned.track_owned`, `owned.album_owned`, `owned.full_release`). If the tool's cache says a release was
 downloaded before but its files aren't in the index (moved or deleted), it is fetched again once
-(`--force`). Progress reads "downloading 42 %" (SSE `download` events carry `percent`), and a retry names
-the error behind it.
+(`--force`). Progress is per release, "downloading 42 %" (SSE `download` events carry `percent`); the job's
+line lists every release in flight ("Album A: downloading 42 % · MSP01: retry 1/3: read timed out"). A retry
+names its reason in plain words ("read timed out", "HTTP 503", else the exception), and a release that needed
+retries ends "downloaded (after 1 retry: read timed out)".
 `dry_run: true` answers the plan (destination, releases, per-item state) without downloading.
 Only the user's clicks download into the real Collection; tests and e2e use the stub
 (`BC_TAGGER_DOWNLOADER_STUB=server/tests/fixtures/stub_downloader.py`).
