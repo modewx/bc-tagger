@@ -137,6 +137,8 @@ npm run test:e2e                         # Playwright e2e: own profile, server :
     - **Create New Tags** at the top of the preview (`uncreated_tags`, `POST /api/tags/create`) is followed by "Map
       them to rekordbox playlists →". `#rekordbox/tags=a,b` opens Settings with those tags pointed out in the mapping
       editor.
+  - Popup: **Checkout / PayPal automation** (`checkoutAutomation`, on unless false). Off, `checkout.js` returns
+    before doing anything: no listeners, no DOM changes, no clicks. e2e on a stand-in PayPal page.
   - **New tags reach open pages again:** an update or a dev reload cuts off the content script in tabs already
     open. The background now injects a fresh one into Bandcamp and local-app tabs (the `scripting` permission). It
     drops the old copy's widgets, and a cut-off app bridge stays quiet. The Bandcamp tagger also follows storage

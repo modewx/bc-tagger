@@ -171,6 +171,13 @@ $(function () {
     });
   }
 
+  // Checkout / PayPal automation (checkout.js): on unless turned off here.
+  const checkoutBox = document.getElementById("checkoutAutomation");
+  chrome.storage.local.get("checkoutAutomation", ({ checkoutAutomation }) => {
+    checkoutBox.checked = checkoutAutomation !== false;
+  });
+  checkoutBox.addEventListener("change", () => chrome.storage.local.set({ checkoutAutomation: checkoutBox.checked }));
+
   document.getElementById("importLink").addEventListener("click", (e) => {
     e.preventDefault();
     openTabIfNotExists("import.html");

@@ -75,6 +75,8 @@ server/bct serve     # local server + app on http://127.0.0.1:8765
 - `npm run watch:dev` / `npm run watch:app` rebuild on change. The dev extension reloads itself after a
   rebuild (within ~30 s, or popup → "Reload (dev)"); open app pages reload when the server reports a
   new build.
+- The popup's **Checkout / PayPal automation** box (on by default) turns off the automatic steps on Bandcamp
+  checkout and PayPal pages: with it off, `checkout.js` does nothing on those pages from their next load.
 - The popup shows the local server's status; "edit" changes its URL (default `http://127.0.0.1:8765`),
   "sync" pushes everything now. **See Collection** opens the local app when the server answers, else the
   built-in page (Shift-click: always the built-in page).
@@ -100,7 +102,7 @@ Runs the extension, server and local app together in a Playwright Chromium with 
   real server (mapping, linking, browser lookups, downloads, re-locate, browse), settings, and rekordbox dry runs
   and a sandbox write.
 
-A full run (64 tests) takes about 115 s (2026-10-26: 110–114 s). For a quick check, run a subset by
+A full run (65 tests) takes about 112 s (2026-10-26: 110–114 s). For a quick check, run a subset by
 name. Include `Import \(replace\)`, which loads the test collection the others use:
 
 ```bash

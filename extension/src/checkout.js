@@ -1,3 +1,16 @@
+// Automatic steps on Bandcamp checkout and PayPal pages. The popup's
+// "Checkout / PayPal automation" (checkoutAutomation in chrome.storage.local,
+// on unless set to false) turns it off: then nothing here runs on the page,
+// no listeners, no changes, no clicks. A change applies when the page next loads.
+chrome.storage.local.get("checkoutAutomation", ({ checkoutAutomation }) => {
+  if (checkoutAutomation === false) {
+    console.log("[bc-tagger] checkout automation is off");
+    return;
+  }
+  automateCheckout();
+});
+
+function automateCheckout() {
 console.log("------- running")
 
 let payButtonClicked = false;
@@ -150,4 +163,5 @@ if (!m || !m.length) {
         }, 300);
         setTimeout(() => clearInterval(pollInterval), 8000);
     }, 1000);
+}
 }

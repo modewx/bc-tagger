@@ -1074,6 +1074,43 @@ test("after the extension reloads (a dev rebuild, an update), open pages get a f
   }
 });
 
+test("popup: Checkout / PayPal automation is on by default; off, the checkout script does nothing (fixture page)", async () => {
+  // A stand-in PayPal page with the buttons checkout.js clicks; each click is recorded.
+  const FIXTURE = `<!doctype html><html><body>
+    <script>window.__clicked = [];</script>
+    <div class="footer-button"><button onclick="window.__clicked.push('footer')">Continue</button></div>
+    <button id="one-time-cta" onclick="window.__clicked.push('pay')">Pay</button>
+  </body></html>`;
+  const URL = "https://www.paypal.com/checkoutnow?token=e2e";
+  const popup = await context.newPage();
+  const shop = await context.newPage();
+  await shop.route("**/*", (route) => route.fulfill({ status: 200, contentType: "text/html", body: FIXTURE })); // nothing leaves the browser
+  const logs = [];
+  shop.on("console", (m) => logs.push(m.text()));
+  try {
+    // On by default: the script clicks through.
+    await popup.goto(extPage("popup.html"));
+    await popup.waitForFunction(() => document.getElementById("checkoutAutomation"));
+    assert.equal(await popup.isChecked("#checkoutAutomation"), true);
+    await shop.goto(URL);
+    await shop.waitForFunction(() => window.__clicked.includes("footer") && window.__clicked.includes("pay"), null, { timeout: 10000 });
+
+    // Off (remembered): the next load does nothing at all.
+    await popup.uncheck("#checkoutAutomation");
+    await waitFor(async () => (await storage("checkoutAutomation")).checkoutAutomation === false, { what: "the setting stored" });
+    await popup.reload();
+    await popup.waitForFunction(() => document.getElementById("checkoutAutomation"));
+    await waitFor(async () => !(await popup.isChecked("#checkoutAutomation")), { what: "the box unticked after a reload" });
+    logs.length = 0;
+    await shop.reload();
+    await waitFor(async () => logs.some((t) => /checkout automation is off/.test(t)), { what: "the script saying it's off" });
+    assert.deepEqual(await shop.evaluate(() => window.__clicked), [], "no clicks");
+  } finally {
+    await probe.evaluate(() => chrome.storage.local.remove("checkoutAutomation"));
+    await Promise.all([popup.close(), shop.close()]);
+  }
+});
+
 // Album pages: the header widget is the album (a<id>), each row its own track
 // (t<id>), paired by position with the page's data. If Bandcamp's markup ever
 // shifts that pairing, album items would be saved/removed under track ids.

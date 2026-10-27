@@ -143,6 +143,17 @@
       margin-bottom: 6px;
     }
     /* Local app / server status */
+    .option-line {
+      display: flex;
+      align-items: flex-start;
+      gap: 6px;
+      margin-top: 8px;
+      font-size: 12px;
+      color: #555;
+      cursor: pointer;
+    }
+    .option-line input { margin: 2px 0 0; }
+    .option-line small { display: block; color: #888; font-size: 11px; }
     .server-line {
       display: flex;
       align-items: center;
@@ -232,6 +243,11 @@
     <input type="text" id="serverUrl" placeholder="http://127.0.0.1:8765" spellcheck="false" />
     <button id="serverSave">Save</button>
   </div>
+
+  <label class="option-line" title="Off: checkout and PayPal pages are left alone (takes effect when they next load).">
+    <input type="checkbox" id="checkoutAutomation" checked />
+    <span>Checkout / PayPal automation<small>Automatic steps on Bandcamp checkout and PayPal pages</small></span>
+  </label>
 
   <div id="seeTagsPanel" class="panel">
     <div class="tag-count" id="tagCount"></div>
