@@ -4,8 +4,9 @@ Run by the server instead of the jar when ``BC_TAGGER_DOWNLOADER_STUB=<this file
 jar's lines and writes ``<folder>/<artist>/<year> - <title>/NN <track>.aiff`` with tags.
 
 ``BC_TAGGER_STUB_RELEASES=<json file>``: ``{"a123": {"artist", "title", "year", "tracks": [..],
-"fail": "not_in_collection"|"challenge"|"rate_limit"|"error", "retry_error": "<exception text>"}}``; unknown
-ids get a generic release. ``retry_error``: that release's first attempt fails with it and is retried.
+"fail": "not_in_collection"|"challenge"|"rate_limit"|"error", "retry_error": "<exception text>", "retry_wait": s}}``;
+unknown ids get a generic release. ``retry_error``: that release's first attempt fails with it part way and is
+retried; ``retry_wait``: seconds to wait after "Retrying (1/3)." (the other releases have started by then).
 ``BC_TAGGER_STUB_DELAY=<seconds>``: wait that long before writing (to see progress in a UI).
 ``BC_TAGGER_STUB_RETRY=1``: every release's first attempt fails ("Read timed out") and is retried.
 ``BC_TAGGER_STUB_ARGS=<file>``: append each run's arguments there (one JSON list per line).
@@ -108,12 +109,17 @@ def main() -> int:
             folders[i] = folder / rels[i]["artist"] / f'{rels[i]["year"]} - {rels[i]["title"]}'
             log(f"Starting the download of {names[i]}.", thread[i])
             log(f"Release folder: {folders[i]}", thread[i])
-            error = rels[i].get("retry_error") or (
-                "java.net.SocketTimeoutException: Read timed out" if os.environ.get("BC_TAGGER_STUB_RETRY") else None)
-            if error:
-                log(f'Error while trying: "{error}".', thread[i])
-                log("Retrying (1/3).", thread[i])
         for pct in (0, 12.5, 12.9, 50, 99.99):
+            if pct == 50:  # part way: a release's first attempt fails and is retried
+                waits = []
+                for i in group:
+                    error = rels[i].get("retry_error") or (
+                        "java.net.SocketTimeoutException: Read timed out" if os.environ.get("BC_TAGGER_STUB_RETRY") else None)
+                    if error:
+                        log(f'Error while trying: "{error}".', thread[i])
+                        log("Retrying (1/3).", thread[i])
+                        waits.append(float(rels[i].get("retry_wait") or 0))
+                time.sleep(max(waits, default=0))
             if jobs > 1:  # the tool's threads share one line
                 line = "Progresses: " + " || ".join(f"[{thread[i]}] {pct + k:.2f} %" for k, i in enumerate(group))
             else:

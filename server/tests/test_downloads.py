@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import time
 from pathlib import Path
 
 import pytest
@@ -348,3 +349,21 @@ def test_an_import_rows_download_locates_the_collection_items_too(svc):
     assert result["releases"][0]["release"] == "a10" and by_ref(result)[f"{bid}:0"]["located"]
     for item_id in ("t100", "t101", "t102"):  # the row's item and the rest of the album
         assert svc.get_item_view(item_id)["local"]["status"] == "located", item_id
+
+
+def test_stub_retry_wait_keeps_the_retry_in_the_jobs_line(svc, tmp_path, monkeypatch):
+    rel = tmp_path / "releases.json"
+    rel.write_text(json.dumps({**RELEASES, "t200": {**RELEASES["t200"], "retry_wait": 0.3,
+                                                    "retry_error": "java.net.SocketTimeoutException: Read timed out"}}))
+    seen = []
+
+    class Ctx:
+        job = type("Job", (), {"id": "download-test"})()
+
+        def progress(self, cur, total, message):
+            seen.append((time.monotonic(), message))
+
+    downloads.run(svc, ["t100", "t200"], ctx=Ctx())
+    retry_at = next(t for t, m in seen if "Single: retry 1/3: read timed out" in m and "Album A: downloading" in m)
+    after = next(t for t, m in seen if t > retry_at and "Single: downloading" in m)
+    assert after - retry_at >= 0.25  # the retry stays on the job's line while the other release downloads
