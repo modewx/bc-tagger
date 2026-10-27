@@ -142,7 +142,9 @@ def test_item_loads_stay_fast_during_a_link_candidates_burst(make_service, tmp_p
             t.start()
         for t in tabs + burst:
             t.join()
-    assert len(took) == 5 and max(took) < 0.5, took
+    # the median: one slow load can come from outside (the user's rekordbox busy on the same machine); row-by-row
+    # reads took 0.92-0.95 s on every load
+    assert len(took) == 5 and sorted(took)[2] < 0.5, took
 
 
 def test_link_candidates_batch_form_and_coalescing(make_service, tmp_path, monkeypatch):

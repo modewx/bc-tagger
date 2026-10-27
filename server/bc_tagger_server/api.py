@@ -623,10 +623,13 @@ def create_app(service: Service | None = None) -> FastAPI:
     # -- files & dev -------------------------------------------------------------------
 
     @app.get("/api/files/stream")
-    def stream_file(request: Request, path: str, preview: bool = True) -> Response:
-        """``preview=0``: always the original (WAV for AIFF, FLAC for ALAC, else the file), and no preview is
-        made or used. ``X-Bc-Source``: preview | wav | flac | native."""
-        return svc.stream_file(request, path, use_preview=preview)
+    def stream_file(request: Request, path: str, src: Optional[Literal["auto", "preview", "original"]] = None,
+                    preview: bool = True) -> Response:
+        """``src=preview``: only the preview (404 without one); ``src=original``: only the original (WAV for AIFF,
+        FLAC for ALAC, else the file), even once a preview exists, and its first play queues a preview. No ``src``:
+        the preview when there is one. ``preview=0``: ``src=original`` that makes no preview (comparing the two).
+        ``X-Bc-Source``: preview | wav | flac | native; ``ETag`` per representation, ``If-Range`` honoured."""
+        return svc.stream_file(request, path, src or ("auto" if preview else "original"), queue=preview)
 
     # -- previews (previews.py) --------------------------------------------------------
 

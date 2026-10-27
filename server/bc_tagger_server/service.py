@@ -797,12 +797,13 @@ class Service:
         return self.jobs.submit("download-items",
                                 lambda ctx: downloads.run(self, refs, force, ctx, full_release=full_release))
 
-    def stream_file(self, request, path: str, use_preview: bool = True):
-        """``use_preview=False``: the original file, and no preview is made or used for this request."""
+    def stream_file(self, request, path: str, src: str = "auto", queue: bool = True):
+        """``src``: "preview" (only the preview, 404 without one), "original" (never the preview) or "auto".
+        ``queue=False``: playing the original doesn't make a preview (comparing the two)."""
         from .stream import stream_response
 
-        return stream_response(self.store, path, request.headers.get("range"),
-                               self.previews if use_preview else None)
+        return stream_response(self.store, path, request.headers.get("range"), self.previews, src, queue,
+                               request.headers.get("if-range"))
 
     # -- previews ---------------------------------------------------------------------------
 

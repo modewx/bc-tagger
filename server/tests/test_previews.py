@@ -69,7 +69,7 @@ def test_a_preview_is_made_served_and_seeks(lib, tmp_path):
                                        "-of", "json", str(files[0])], capture_output=True, text=True).stdout)
     assert probe["streams"][0]["codec_name"] == "opus" and float(probe["format"]["duration"]) == pytest.approx(4, abs=0.05)
     status = svc.previews.status()
-    assert (status["count"], status["bytes"], status["cap_bytes"]) == (1, len(data), 3 * 1024**3)
+    assert (status["count"], status["bytes"], status["cap_bytes"]) == (1, len(data), int(3.5 * 1024**3))
     with TestClient(create_app(svc)) as c:
         r = get(c, src)
         assert r.status_code == 200 and r.headers["content-type"] == "audio/webm"
@@ -255,3 +255,106 @@ def test_cancel_stops_a_running_encode(lib, tmp_path, monkeypatch):
     assert list(previews.previews_dir().iterdir()) == [] and svc.previews.status()["building"] == 0
     svc.previews.close()
     assert Path(src).is_file()
+
+
+def test_src_original_keeps_its_bytes_while_a_preview_appears(lib):
+    """The freeze the user hit: a first play's preview was ready mid-play and the same URL changed to it. A URL's
+    bytes must never change under a player."""
+    svc, _, add = lib
+    src = add("song", seconds=2.0)
+    with TestClient(create_app(svc)) as c:
+        first = get(c, src, "bytes=0-", src="original")
+        assert first.headers["x-bc-source"] == "wav" and first.headers["cache-control"] == "no-cache"
+        total, etag = int(first.headers["content-range"].rsplit("/", 1)[1]), first.headers["etag"]
+        assert svc.previews.queued() == [src]  # a first play queues its preview
+        assert [r["status"] for r in svc.previews.run_pending()] == ["built"]
+        preview_size = int(get(c, src, src="preview").headers["content-length"])
+        svc.previews._plays.clear()  # what a restart forgets: src alone must keep the bytes
+        for start in (total // 2, total - 1000, 0):  # seeks, the first two far past the preview's size
+            assert start > preview_size or start == 0
+            r = get(c, src, f"bytes={start}-", src="original")
+            assert r.status_code == 206 and r.headers["content-range"] == f"bytes {start}-{total - 1}/{total}"
+            assert r.headers["etag"] == etag and r.content == first.content[start:]
+        assert get(c, src, "bytes=0-", src="preview").headers["x-bc-source"] == "preview"  # the next player's
+
+
+def test_src_preview_never_falls_back_to_the_original(lib):
+    svc, _, add = lib
+    src = add("song")
+    with TestClient(create_app(svc)) as c:
+        r = get(c, src, "bytes=0-", src="preview")
+        assert r.status_code == 404 and r.json()["detail"] == "no preview of this file"
+        assert svc.previews.queued() == []  # asking for a preview doesn't make one
+        svc.previews.build(src)
+        assert get(c, src, "bytes=0-", src="preview").status_code == 206
+        c.delete("/api/previews")
+        assert get(c, src, "bytes=100-", src="preview").status_code == 404  # gone: 404, never the WAV
+        assert get(c, src, "bytes=100-", src="original").headers["x-bc-source"] == "wav"
+        assert c.get("/api/files/stream", params={"path": src, "src": "both"}).status_code == 422
+        # preview=0 is src=original that makes no preview (comparing the two)
+        assert get(c, src, "bytes=0-", preview=0).headers["x-bc-source"] == "wav" and svc.previews.queued() == [src]
+        svc.previews.run_pending()
+        assert get(c, src, "bytes=0-", preview=0).headers["x-bc-source"] == "wav"
+
+
+def test_if_range_for_another_representation_gets_the_whole_current_one(lib):
+    svc, root, add = lib
+    src = add("song")
+    svc.previews.build(src)
+    flac = root / "native.flac"
+    subprocess.run([FFMPEG, "-nostdin", "-loglevel", "error", "-f", "lavfi", "-i", "sine=d=0.5", str(flac)], check=True)
+    indexer.index_file(svc.store, flac, svc.settings.roots())
+    with TestClient(create_app(svc)) as c:
+        reps = {"original": get(c, src, src="original"), "preview": get(c, src, src="preview"),
+                "native": get(c, str(flac))}
+        etags = {k: r.headers["etag"] for k, r in reps.items()}
+        assert len(set(etags.values())) == 3 and all(e.startswith('"') for e in etags.values())
+        assert {k: r.headers["x-bc-source"] for k, r in reps.items()} == {"original": "wav", "preview": "preview",
+                                                                          "native": "native"}
+        for kind, whole in reps.items():
+            params = {"path": str(flac) if kind == "native" else src} | ({} if kind == "native" else {"src": kind})
+            other = etags["preview" if kind != "preview" else "original"]
+            r = c.get("/api/files/stream", params=params, headers={"Range": "bytes=100-", "If-Range": other})
+            assert r.status_code == 200 and r.content == whole.content, kind  # the whole, never a slice
+            r = c.get("/api/files/stream", params=params, headers={"Range": "bytes=100-", "If-Range": etags[kind]})
+            assert r.status_code == 206 and r.content == whole.content[100:], kind
+            assert r.headers["cache-control"] == "no-cache"
+
+
+def test_a_preview_being_sent_is_never_dropped(lib, monkeypatch):
+    svc, _, add = lib
+    a, b = add("a"), add("b")
+    svc.previews.build(a)
+    time.sleep(0.01)
+    svc.previews.build(b)  # a is the least recently played
+    calls = []
+    for name in ("stream_opened", "stream_closed"):
+        real = getattr(svc.previews, name)
+        monkeypatch.setattr(svc.previews, name, lambda p, real=real, name=name: (calls.append((name, p)), real(p)))
+    with TestClient(create_app(svc)) as c:
+        played = []
+        for _ in range(2):  # every request bumps it
+            get(c, b, "bytes=0-", src="preview")
+            played.append(svc.store.query_one("SELECT played_at FROM previews WHERE path = ?", (b,))["played_at"])
+            time.sleep(0.01)
+    assert played[1] > played[0] and calls == [("stream_opened", b), ("stream_closed", b)] * 2
+    svc.previews.stream_opened(a)  # a player is reading a
+    svc.settings.update({"preview_cache_gb": 1e-9})
+    assert svc.previews.prune() == [b]  # not a, though it's the least recently played
+    svc.previews.stream_closed(a)
+    assert svc.previews.prune() == [a]
+
+
+def test_preview_defaults_and_the_old_default_moving_to_3_5(tmp_path):
+    from bc_tagger_server.config import Settings, SettingsError
+
+    fresh = Settings(path=tmp_path / "a" / "settings.json")
+    assert (fresh.get("preview_cache_gb"), fresh.get("preview_bitrate_kbps")) == (3.5, 96)
+    old = tmp_path / "b" / "settings.json"
+    old.parent.mkdir()
+    old.write_text(json.dumps({"preview_cache_gb": 3, "settings_version": 2}))  # the old default, written out
+    assert Settings(path=old).get("preview_cache_gb") == 3.5
+    old.write_text(json.dumps({"preview_cache_gb": 3, "settings_version": 3}))  # chosen since: kept
+    assert Settings(path=old).get("preview_cache_gb") == 3
+    with pytest.raises(SettingsError):
+        fresh.update({"preview_bitrate_kbps": 8})

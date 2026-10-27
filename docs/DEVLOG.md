@@ -205,6 +205,18 @@ Tests never touch Bandcamp, the music drive or a real rekordbox library: Bandcam
   - Live: a preview's first 64 KB of audio in 2–25 ms with nothing read from the drive, against 0.26 s for WAV
     from the awake drive. Encodes take 0.6–3.3 s per track (0.7–5.4 MB). The sleeping-drive case wasn't
     captured: the drive never stayed idle for 11 minutes.
+- **Playback froze after a first play (user, import `imp-45e20d7a`):** a seek after the first play's preview was
+  ready asked for an offset of the 50 MB WAV and got the 4 MB preview, or a 416; the audio stayed dead. The
+  per-play memory of `f780ca2` covered one server process; the rule now holds per URL:
+  - `src=preview` serves only the preview (404 without one), `src=original` only the original, even once a
+    preview exists. Players choose when they're created and fall back to `src=original` on a 404.
+  - Strong `ETag` per representation, `If-Range` honoured (a mismatch gets the whole current representation),
+    `Cache-Control: no-cache`.
+  - A preview being sent is never dropped by the cap, and each request bumps its last-played time.
+- **Preview defaults (user: "Raise the preview cap to 3.5 GB and keep 96 kbps"):** `preview_cache_gb` 3.5 and
+  `preview_bitrate_kbps` 96. A stored 3 (the old default) becomes 3.5 (settings version 3).
+- The sleeping-drive measurement was dropped: the drive never idled while the user played, and it's unplugged
+  now. Nothing here was measured from a sleeping drive.
 
 ## App and extension (`app/`, `extension/`, `shared/`, branch `claude/local-collection-ui-e8f6f6`)
 

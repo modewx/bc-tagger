@@ -51,15 +51,21 @@ cd server
 
 ## Playback
 
-`GET /api/files/stream?path=` serves an indexed file with Range support (`Accept-Ranges: bytes`, 206, 416 with
-`Content-Range: bytes */N`). `X-Bc-Source` says what was served: `preview`, `wav`, `flac` or `native`.
+`GET /api/files/stream?path=…&src=preview|original` serves an indexed file with Range support (`Accept-Ranges:
+bytes`, 206, 416 with `Content-Range: bytes */N`). **A URL's bytes never change under a player:**
 
-An AIFF or ALAC file with a preview (below) plays the preview: it starts at once and needs no music drive, even
-unplugged. `preview=0` always plays the original and makes or uses no preview (for comparing the two). A play
-stays on what it started on: `bytes=0-` starts a play (the preview if there is one), and its later ranges get the
-same source even if a preview is made meanwhile (a first play makes one). A request without a Range is a
-whole-file fetch, not a player: it gets the preview and doesn't change what a play uses. Without a preview,
-Chrome can't play AIFF or ALAC, so:
+- `src=preview`: only the preview (below), which starts at once and needs no music drive, even unplugged. No
+  preview (never made, or dropped): 404, never the original. Players fall back to `src=original` themselves.
+- `src=original`: only the original (WAV for AIFF, FLAC for ALAC, else the file), even once a preview exists. Its
+  first play queues a preview for the next player. `preview=0` is `src=original` that makes no preview (for
+  comparing the two).
+- No `src`: the preview when there is one; a play (`bytes=0-` and the ranges after it) stays on what it started on.
+- `X-Bc-Source` says what was served: `preview`, `wav`, `flac` or `native`. Each representation has its own strong
+  `ETag` (`"opus-…"`, `"wav-<size>-<mtime>"`, `"flac-…"`, `"orig-…"`); a Range whose `If-Range` doesn't match gets
+  the whole current representation (200), not a slice of it. `Cache-Control: no-cache`.
+- A preview being sent is never dropped by the cap, and every request for it counts as a play.
+
+Without a preview, Chrome can't play AIFF or ALAC, so:
 
 1. Uncompressed AIFF (big-endian PCM; AIFF-C `sowt`, `fl32`, `fl64`; 1–32 bits, mono or stereo) is served as a
    WAV made on the fly (`audio/wav`). Its 44-byte header comes from the layout the index keeps
@@ -80,15 +86,15 @@ file is (re)indexed, or for AIFF when first played.
 ### Previews
 
 Opus 96 kbps in WebM (cues at the front, so it seeks) under `<data dir>/previews/`, one per AIFF/ALAC file, for
-the version (size, mtime) it was made from. About 4 MB for 5 minutes, so 3 GB holds about 750 tracks.
+the version (size, mtime) it was made from. About 4 MB for 5 minutes, so 3.5 GB holds about 850 tracks.
 
 - **Made only by work you started**, which is also the only time they read the drive: an import commit (the
   files its rows are located to), a finished download, a first play (in the background, 3 s after the stream
   starts, not with `preview=0`), and `POST /api/previews/build {ids}`. Page loads and timers only read the
   `previews` table. At most two encodes run at a time, under `nice`, on their own workers (other jobs don't
   wait for them).
-- **Kept to `preview_cache_gb`** (default 3; 0 turns them off): the least recently played go first, at once
-  when the setting is lowered. **Never written when the internal disk would drop below 2 GB free**: that
+- **Kept to `preview_cache_gb`** (default 3.5; 0 turns them off), at `preview_bitrate_kbps` (default 96; new
+  previews only): the least recently played go first, at once when the setting is lowered. **Never written when the internal disk would drop below 2 GB free**: that
   preview is skipped and the status counts it.
 - `GET /api/previews/status` → `{count, bytes, cap_bytes, free_bytes, min_free_bytes, building, queued, jobs,
   skipped_low_space, last_skip}`.

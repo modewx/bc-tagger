@@ -35,11 +35,10 @@ from .store import Store, now_iso
 log = logging.getLogger(__name__)
 
 PREVIEW_FORMATS = {"aiff", "alac"}
-BITRATE = 96_000
 MIN_FREE_BYTES = 2 * 1024**3
 ENCODERS = 2
 PLAY_DELAY_S = 3.0  # a play's preview waits this long, so the player's first reads have the drive to themselves
-TOUCH_EVERY_S = 60.0  # how often a played preview's last-played time is written (each seek is a request)
+TOUCH_EVERY_S = 0.0  # a played preview's last-played time is written on every request (each seek is one)
 ENCODE_TIMEOUT_S = 900
 UNKNOWN_LENGTH_S = 600.0  # the free-space estimate for a file whose length the index doesn't know
 PLAYS_KEPT = 512  # how many paths remember what their current play started on
@@ -97,6 +96,7 @@ class Previews:
         self._closed = False
         self._cancelled_owners: set[str] = set()
         self._plays: OrderedDict[str, str] = OrderedDict()  # path -> "preview" | "original", by the stream
+        self._open: dict[str, int] = {}  # previews being sent right now, by source path: never dropped meanwhile
         self.skipped_low_space = 0
         self.last_skip: dict | None = None
 
@@ -104,6 +104,21 @@ class Previews:
 
     def cap_bytes(self) -> int:
         return int(float(self.settings.get("preview_cache_gb")) * 1024**3)
+
+    def bitrate(self) -> int:
+        """Bits per second of new previews (``preview_bitrate_kbps``); existing ones keep theirs."""
+        return int(self.settings.get("preview_bitrate_kbps")) * 1000
+
+    def stream_opened(self, path: str) -> None:
+        with self._cv:
+            self._open[path] = self._open.get(path, 0) + 1
+
+    def stream_closed(self, path: str) -> None:
+        with self._cv:
+            if self._open.get(path, 0) <= 1:
+                self._open.pop(path, None)
+            else:
+                self._open[path] -= 1
 
     def lookup(self, row) -> Path | None:
         """The preview of this version of the file (``row``: path, size, mtime), if there is one."""
@@ -121,7 +136,7 @@ class Previews:
     def touch(self, path: str) -> None:
         """Played now (the least recently played go first when the store is full)."""
         now = time.time()
-        if self.store.query_one("SELECT 1 FROM previews WHERE path = ? AND played_at < ?",
+        if self.store.query_one("SELECT 1 FROM previews WHERE path = ? AND played_at <= ?",
                                 (path, now - TOUCH_EVERY_S)):
             with self.store.tx() as c:
                 c.execute("UPDATE previews SET played_at = ? WHERE path = ?", (now, path))
@@ -325,7 +340,8 @@ class Previews:
             return {"path": path, "status": "skipped", "reason": "previews are off (preview_cache_gb is 0)"}
         if not is_mounted(path):
             return {"path": path, "status": "skipped", "reason": "music drive not mounted"}
-        estimate = int((row["duration"] or UNKNOWN_LENGTH_S) * BITRATE / 8 * 1.1) + 65_536
+        bitrate = self.bitrate()
+        estimate = int((row["duration"] or UNKNOWN_LENGTH_S) * bitrate / 8 * 1.1) + 65_536
         free = self._free_bytes()
         if free - estimate < MIN_FREE_BYTES:
             self.skipped_low_space += 1
@@ -338,7 +354,7 @@ class Previews:
         out_dir.mkdir(parents=True, exist_ok=True)
         out, tmp = out_dir / f"{key}.webm", out_dir / f"{key}.part.webm"
         cmd = ["nice", "-n", "10", ffmpeg_bin(), "-nostdin", "-loglevel", "error", "-y", "-i", path,
-               "-map", "0:a:0", "-map_metadata", "-1", "-c:a", "libopus", "-b:a", str(BITRATE),
+               "-map", "0:a:0", "-map_metadata", "-1", "-c:a", "libopus", "-b:a", str(bitrate),
                "-cues_to_front", "1", "-f", "webm", str(tmp)]
         with self._cv:
             if task is not None and task.cancelled or self._closed:
@@ -380,9 +396,16 @@ class Previews:
         return {"path": path, "status": "built", "bytes": nbytes}
 
     def prune(self) -> list[str]:
-        """Drop the least recently played until the store fits ``preview_cache_gb``; returns their paths."""
-        cap, total, dropped = self.cap_bytes(), 0, []
-        for r in self.store.query("SELECT path, file, bytes FROM previews ORDER BY played_at DESC, created_at DESC"):
+        """Drop the least recently played until the store fits ``preview_cache_gb``; returns their paths. A preview
+        being sent right now is never dropped (it counts towards the cap, first)."""
+        cap, dropped = self.cap_bytes(), []
+        with self._cv:
+            sending = set(self._open)
+        rows = self.store.query("SELECT path, file, bytes FROM previews ORDER BY played_at DESC, created_at DESC")
+        total = sum(r["bytes"] for r in rows if r["path"] in sending)
+        for r in rows:
+            if r["path"] in sending:
+                continue
             total += r["bytes"]
             if total > cap:
                 dropped.append(r)

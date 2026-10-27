@@ -92,7 +92,7 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     # Imports: seconds between the server's Bandcamp requests (one at a time; read before each one).
     "bandcamp_request_interval_s": 1.0,
     # Which migrations this file has had (set by the server, not by clients).
-    "settings_version": 2,
+    "settings_version": 3,
     # The folder of the last file picked by hand for an import row (the file browser opens there).
     "last_browse_dir": "",
     # The browser side (extension / app shared code) reads these for its own Bandcamp fetches.
@@ -114,8 +114,9 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     # music drive or inside a root.
     "import_log_dir": "",
     # Opus previews of AIFF/ALAC files on the internal disk (previews.py): at most this many GB, least recently
-    # played dropped first; 0 turns them off.
-    "preview_cache_gb": 3,
+    # played dropped first; 0 turns them off. The user chose 3.5 GB at 96 kbps (about 850 tracks).
+    "preview_cache_gb": 3.5,
+    "preview_bitrate_kbps": 96,
     # Opt-in file watcher (docs/fsevents-watcher.md): keeps the index current while the server runs.
     "watch_roots": False,
     "watch_debounce_seconds": 3,
@@ -131,7 +132,8 @@ DEFAULT_SETTINGS: dict[str, Any] = {
 READ_ONLY_KEYS: set[str] = set()
 # Bumped when a stored default changes meaning; files from before are migrated on load.
 # 2: bandcamp_request_interval_s default 2.5 → 1.0.
-SETTINGS_VERSION = 2
+# 3: preview_cache_gb default 3 → 3.5.
+SETTINGS_VERSION = 3
 
 
 def data_dir() -> Path:
@@ -228,6 +230,9 @@ def _validate(merged: dict[str, Any]) -> dict[str, Any]:
     cap = out.get("preview_cache_gb")
     if isinstance(cap, bool) or not isinstance(cap, (int, float)) or not 0 <= cap <= 1000:
         raise SettingsError("preview_cache_gb must be a number of GB from 0 to 1000")
+    kbps = out.get("preview_bitrate_kbps")
+    if isinstance(kbps, bool) or not isinstance(kbps, int) or not 32 <= kbps <= 256:
+        raise SettingsError("preview_bitrate_kbps must be a whole number from 32 to 256")
     out["import_log_dir"] = out.get("import_log_dir") or ""
     if not isinstance(out["import_log_dir"], str):
         raise SettingsError("import_log_dir must be a string path")
@@ -366,6 +371,8 @@ class Settings:
                 data.update({k: v for k, v in stored.items() if k in DEFAULT_SETTINGS})
                 if stored.get("settings_version", 1) < 2 and stored.get("bandcamp_request_interval_s") == 2.5:
                     data["bandcamp_request_interval_s"] = 1.0  # 2.5 was only the old default
+                if stored.get("settings_version", 1) < 3 and stored.get("preview_cache_gb") == 3:
+                    data["preview_cache_gb"] = 3.5  # 3 was only the old default
             except (OSError, json.JSONDecodeError):
                 pass
         return _validate(data)
