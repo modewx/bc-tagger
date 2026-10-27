@@ -91,18 +91,42 @@ def make_service(tmp_path):
         svc.store.close()
 
 
+@pytest.fixture
+def new_store(tmp_path):
+    """Make ``Store`` objects for a test (``new_store("t.db")`` or ``new_store(path=…)``); closed afterwards."""
+    from bc_tagger_server.store import Store
+
+    made = []
+
+    def make(name: str = "s.db", path: Path | None = None) -> Store:
+        made.append(Store(path=path or tmp_path / name))
+        return made[-1]
+
+    yield make
+    for store in made:
+        store.close()
+
+
+def pytest_collection_finish(session):
+    """Freeze what's alive after collection (the imported modules): the full collections the rekordbox code runs
+    (``rbguard.close_database``) and the leak check then only look at objects the tests make."""
+    import gc
+
+    gc.collect()
+    gc.freeze()
+
+
 @pytest.fixture(autouse=True)
 def _no_open_databases_left(monkeypatch):
-    """Every ``Store`` a test makes is closed afterwards, and no rekordbox (SQLCipher) connection may be left open.
+    """No test may leave a ``Store`` or a rekordbox database (SQLCipher) open.
 
-    An open sqlite connection left to the garbage collector, with its statements in the same cycle, is freed in
-    no fixed order; that corrupted memory and crashed later tests at random (a segfault mid-query while the
-    collector ran). Closing explicitly avoids it; the check catches code that forgets to close a ``MasterDatabase``.
+    An open sqlite connection left to the garbage collector is freed in no fixed order. Garbage collection in the
+    middle of a SQLCipher query crashed later tests at random, which ``rbguard`` now prevents. These checks keep
+    the tests from hiding leaks. The object scan runs only after a test opened a rekordbox database.
     """
     import gc
 
-    from sqlcipher3 import dbapi2 as sqlcipher
-
+    from bc_tagger_server import rbguard
     from bc_tagger_server import store as store_module
 
     made = []
@@ -113,19 +137,24 @@ def _no_open_databases_left(monkeypatch):
         made.append(self)
 
     monkeypatch.setattr(store_module.Store, "__init__", init)
+    opened_before = rbguard.databases_opened()
     yield
+    still_open = [s.path for s in made if _is_open(s._conn)]
     for store in made:
         store.close()
-    gc.collect()
-    left = []
-    for obj in gc.get_objects():
-        if type(obj) is sqlcipher.Connection:
-            try:
-                obj.total_changes
-                left.append(obj)
-            except sqlcipher.ProgrammingError:  # closed
-                pass
-    assert not left, f"{len(left)} rekordbox database connection(s) left open"
-    from bc_tagger_server import rbguard
-
+    assert not still_open, f"Store(s) left open: {still_open}"
     assert rbguard.open_databases() == 0, "a rekordbox database was opened and not closed (close_database)"
+    if rbguard.databases_opened() != opened_before:
+        from sqlcipher3 import dbapi2 as sqlcipher
+
+        gc.collect()
+        left = [o for o in gc.get_objects() if type(o) is sqlcipher.Connection and _is_open(o)]
+        assert not left, f"{len(left)} rekordbox database connection(s) left open"
+
+
+def _is_open(conn) -> bool:
+    try:
+        conn.total_changes
+        return True
+    except Exception:  # sqlite3/sqlcipher3 ProgrammingError: closed
+        return False

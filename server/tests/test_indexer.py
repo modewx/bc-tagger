@@ -15,17 +15,17 @@ def _paths(store):
     return sorted(r["path"] for r in store.query("SELECT path FROM files"))
 
 
-def _setup(tmp_path):
+def _setup(new_store, tmp_path):
     root = tmp_path / "music"
     a = write_aiff(root / "A - Album" / "01 - One.aiff", "One", "A", "Album", 1)
     b = write_aiff(root / "B - Other" / "01 - Two.aiff", "Two", "B", "Other", 1)
-    store = Store(path=tmp_path / "s.db")
+    store = new_store()
     roots = [{"path": str(root), "globs": [], "kind": "not_owned"}]
     return root, a, b, store, roots
 
 
-def test_incremental_and_deletion(tmp_path):
-    root, a, b, store, roots = _setup(tmp_path)
+def test_incremental_and_deletion(new_store, tmp_path):
+    root, a, b, store, roots = _setup(new_store, tmp_path)
     first = indexer.scan(store, roots)
     assert (first["read"], first["unchanged"]) == (2, 0)
     again = indexer.scan(store, roots)
@@ -35,8 +35,8 @@ def test_incremental_and_deletion(tmp_path):
     assert third["removed"] == 1 and _paths(store) == [str(a)]
 
 
-def test_interrupted_walk_keeps_rows(tmp_path, monkeypatch):
-    root, a, b, store, roots = _setup(tmp_path)
+def test_interrupted_walk_keeps_rows(new_store, tmp_path, monkeypatch):
+    root, a, b, store, roots = _setup(new_store, tmp_path)
     indexer.scan(store, roots)
     real_walk = os.walk
 
@@ -53,8 +53,8 @@ def test_interrupted_walk_keeps_rows(tmp_path, monkeypatch):
     assert _paths(store) == sorted([str(a), str(b)])
 
 
-def test_missing_root_keeps_rows(tmp_path):
-    root, a, b, store, roots = _setup(tmp_path)
+def test_missing_root_keeps_rows(new_store, tmp_path):
+    root, a, b, store, roots = _setup(new_store, tmp_path)
     indexer.scan(store, roots)
     shutil.move(str(root), str(tmp_path / "unmounted"))
     stats = indexer.scan(store, roots)

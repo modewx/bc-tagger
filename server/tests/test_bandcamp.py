@@ -167,14 +167,14 @@ def test_pages():
     assert bandcamp.minimal_item(cand)["partial"] is True and bandcamp.fetch_item(f, cand) is None
 
 
-def test_fetcher_rate_limit_cache_and_user_agent(tmp_path):
+def test_fetcher_rate_limit_cache_and_user_agent(new_store, tmp_path):
     calls = []
 
     def handler(request):
         calls.append((time.monotonic(), request.headers["user-agent"]))
         return httpx.Response(200, text=f"ok {request.url}")
 
-    store = Store(path=tmp_path / "s.db")
+    store = new_store()
     f = bandcamp.make_fetcher(store, min_interval=0.2, transport=httpx.MockTransport(handler))
     for i in range(3):
         assert f.request("GET", f"https://bandcamp.com/x{i}")[0] == 200
@@ -188,7 +188,7 @@ def test_fetcher_rate_limit_cache_and_user_agent(tmp_path):
         offline.request("GET", "https://bandcamp.com/never-recorded")
 
 
-def test_fetcher_redirects_are_rate_limited_and_loops_cached(tmp_path):
+def test_fetcher_redirects_are_rate_limited_and_loops_cached(new_store, tmp_path):
     calls = []
 
     def handler(request):
@@ -199,7 +199,7 @@ def test_fetcher_redirects_are_rate_limited_and_loops_cached(tmp_path):
             return httpx.Response(303, headers={"location": str(request.url)})
         return httpx.Response(200, text="page")
 
-    store = Store(path=tmp_path / "s.db")
+    store = new_store()
     f = Fetcher(store, "test", min_interval=0.1, transport=httpx.MockTransport(handler))
     assert f.request("GET", "https://x.bandcamp.com/moved") == (200, "page")
     assert [u for _, u in calls] == ["https://x.bandcamp.com/moved", "https://x.bandcamp.com/track/x"]
@@ -226,8 +226,8 @@ def test_link_helpers():
 
 
 @pytest.mark.skipif(os.environ.get("BCT_LIVE_BANDCAMP") != "1", reason="live Bandcamp smoke test (set BCT_LIVE_BANDCAMP=1)")
-def test_live_smoke(tmp_path):
-    f = bandcamp.make_fetcher(Store(path=tmp_path / "s.db"))
+def test_live_smoke(new_store, tmp_path):
+    f = bandcamp.make_fetcher(new_store())
     r = bandcamp.resolve(f, {"kind": "track", "artist": "Gil.Barte", "title": "Elhwah", "flags": []})
     assert r["status"] == "accepted" and r["chosen"]["id"] == "t3244411361"
     item = bandcamp.fetch_item(f, r["chosen"])
@@ -251,7 +251,7 @@ def test_ownership_refresh_stops_on_the_bot_check(tmp_path):
     assert calls == [bandcamp.USER_AGENT] and "Mozilla" not in ownership.USER_AGENT  # one honest request
 
 
-def test_fetcher_backs_off_politely_on_429(tmp_path):
+def test_fetcher_backs_off_politely_on_429(new_store, tmp_path):
     from bc_tagger_server.fetcher import RateLimited
 
     calls, sleeps, waits = [], [], []
@@ -262,14 +262,14 @@ def test_fetcher_backs_off_politely_on_429(tmp_path):
             return httpx.Response(429, headers={"Retry-After": "5"} if len(calls) == 1 else {})
         return httpx.Response(200, text="ok")
 
-    f = Fetcher(Store(path=tmp_path / "s.db"), "test", min_interval=2.5, transport=httpx.MockTransport(handler))
+    f = Fetcher(new_store(), "test", min_interval=2.5, transport=httpx.MockTransport(handler))
     f.sleep = sleeps.append
     f.on_wait = lambda s, msg: waits.append((s, msg))
     assert f.request("GET", "https://bandcamp.com/a") == (200, "ok")
     assert [round(w) for w, _ in waits] == [5, 30] and "rate-limiting" in waits[0][1]
     assert [round(s) for s in sleeps if s > 3] == [5, 30]  # the pacing carries the wait: no double sleep
     # still limited after 30/60/120 s: give up for now (not cached)
-    always = Fetcher(Store(path=tmp_path / "t.db"), "test", min_interval=1,
+    always = Fetcher(new_store("t.db"), "test", min_interval=1,
                      transport=httpx.MockTransport(lambda r: httpx.Response(429)))
     always.sleep = lambda s: None
     with pytest.raises(RateLimited):
@@ -304,7 +304,7 @@ def test_interval_default_and_migration(tmp_path):
     assert Settings(path=old).get("bandcamp_request_interval_s") == 3
 
 
-def test_pacing_is_start_to_start(tmp_path):
+def test_pacing_is_start_to_start(new_store, tmp_path):
     starts = []
 
     def slow(request):
@@ -312,7 +312,7 @@ def test_pacing_is_start_to_start(tmp_path):
         time.sleep(0.2)  # the answer takes a while
         return httpx.Response(200, text="ok")
 
-    f = Fetcher(Store(path=tmp_path / "s.db"), "test", min_interval=0.25, transport=httpx.MockTransport(slow))
+    f = Fetcher(new_store(), "test", min_interval=0.25, transport=httpx.MockTransport(slow))
     for i in range(3):
         f.request("GET", f"https://pace.example/{i}")
     gaps = [b - a for a, b in zip(starts, starts[1:])]

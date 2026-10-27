@@ -46,8 +46,8 @@ def _paths(store):
     return sorted(r["path"] for r in store.query("SELECT path FROM files"))
 
 
-def test_quick_scan_indexes_only_files_since_the_cutoff(drive, tmp_path):
-    store = Store(path=tmp_path / "s.db")
+def test_quick_scan_indexes_only_files_since_the_cutoff(new_store, drive, tmp_path):
+    store = new_store()
     roots = [{"path": str(drive["root"]), "globs": [], "kind": "owned"}]
     stats = indexer.quick_scan(store, roots, NOW - timedelta(days=2))
     assert _paths(store) == [drive["new"]]
@@ -56,10 +56,10 @@ def test_quick_scan_indexes_only_files_since_the_cutoff(drive, tmp_path):
     assert (again["read"], again["unchanged"]) == (0, 1)
 
 
-def test_spotlight_results_are_merged_in(drive, tmp_path, monkeypatch):
+def test_spotlight_results_are_merged_in(new_store, drive, tmp_path, monkeypatch):
     """Spotlight finds files deep inside unchanged folders that the shallow walk can't reach."""
     monkeypatch.setattr(indexer, "spotlight_recent", lambda root, cutoff: [drive["old"], str(root / "notes.txt")])
-    store = Store(path=tmp_path / "s.db")
+    store = new_store()
     stats = indexer.quick_scan(store, [{"path": str(drive["root"]), "globs": [], "kind": "owned"}], NOW - timedelta(days=2))
     assert stats["roots"][0]["method"] == "spotlight+walk"
     assert _paths(store) == sorted([drive["old"], drive["new"]])
@@ -86,8 +86,8 @@ def test_spotlight_unavailable_falls_back(monkeypatch, tmp_path):
     assert indexer.spotlight_recent(tmp_path, NOW) is None
 
 
-def test_unmounted_root_is_skipped(tmp_path):
-    store = Store(path=tmp_path / "s.db")
+def test_unmounted_root_is_skipped(new_store, tmp_path):
+    store = new_store()
     stats = indexer.quick_scan(store, [{"path": str(tmp_path / "gone"), "globs": [], "kind": "owned"}], NOW)
     assert stats["roots"][0]["method"] == "skipped (not mounted)" and stats["checked"] == 0
 

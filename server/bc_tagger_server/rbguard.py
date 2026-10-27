@@ -392,16 +392,18 @@ def _quiet_pyrekordbox() -> None:
 # ``close_database``.
 _open_lock = threading.RLock()
 _open_count = 0
+_opened_total = 0  # ever opened (tests check the leak scan only after a test opened one)
 _gc_was_enabled = True
 
 
 def _db_opened() -> None:
-    global _open_count, _gc_was_enabled
+    global _open_count, _opened_total, _gc_was_enabled
     with _open_lock:
         if _open_count == 0:
             _gc_was_enabled = gc.isenabled()
             gc.disable()
         _open_count += 1
+        _opened_total += 1
 
 
 def _db_closed() -> None:
@@ -417,6 +419,11 @@ def _db_closed() -> None:
 def open_databases() -> int:
     """How many rekordbox databases are open right now (tests check it drops back to 0)."""
     return _open_count
+
+
+def databases_opened() -> int:
+    """How many rekordbox databases were ever opened in this process."""
+    return _opened_total
 
 
 def open_master_database(path: str | Path, db_dir: str | Path | None = None):
