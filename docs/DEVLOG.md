@@ -139,6 +139,9 @@ npm run test:e2e                         # Playwright e2e: own profile, server :
       scope: "just add highlight". Tag creation is unchanged: "Create New Tags" (`POST /api/tags/create`), then
       "Map them to rekordbox playlists →", and Import selected creates them. `#rekordbox/tags=a,b` opens Settings with
       those tags pointed out in the mapping editor.
+    - "Located shows – after an import" (user bug): the page mirrors /api/items. The commit didn't save the rows'
+      located files for their items, so they read "unknown" until a Locate (A fixed it in `52e045c`). e2e: a files
+      import's new items show located right after the commit, on the server and on the page.
     - The reported "lost" tags: neither the editor (a row's own tags are always options), nor the row save, nor a
       reload or the commit dropped them. What was missing: other rows couldn't add a row's new tag, and nothing
       showed which tags were new.
