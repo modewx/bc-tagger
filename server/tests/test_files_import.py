@@ -285,3 +285,45 @@ def test_unlocated_collection_items_get_located_checked_or_not(tree, monkeypatch
     assert "Collection items located to these files (checked or not):" in md
     assert {d["id"] for k, d in events if k == "item"} >= {"t901", "a950"}
     assert "t901" not in {e["item_id"] for e in svc.pending_tag_edits()}  # unchecked: its tags stay as they were
+
+
+def test_committed_items_show_located_at_once(tree, monkeypatch):
+    svc, coll, complete, files = tree
+    events = []
+    publish = svc.jobs.bus.publish
+    monkeypatch.setattr(svc.jobs.bus, "publish", lambda kind, data: (events.append((kind, data)), publish(kind, data)))
+    with TestClient(create_app(svc)) as c:
+        r = start(c, [{"path": str(coll), "since": since(7)}, {"path": str(complete), "since": since(7)}])
+        assert svc.jobs.wait(r["job_id"], timeout=30).status == "done"
+        rows = c.get(f"/api/import/{r['batch_id']}").json()["rows"]
+        boot = next(x for x in rows if x["raw"] == str(files["boot"]))  # a duplicate of t900, which is located
+        c.put(f"/api/import/{r['batch_id']}/rows/{boot['n']}", json={"checked": True})  # merge it this time
+        result = c.post(f"/api/import/{r['batch_id']}/commit").json()
+        new = {x["commit_info"]["item_id"]: x["raw"] for x in importer.load_rows(svc.store, r["batch_id"])
+               if x["committed"] in ("pending_add", "other")}
+        assert len(new) == 4 and result["items_located"] == 4
+        for item_id, path in new.items():  # new Bandcamp and Other items: located to the row's file
+            local = c.get(f"/api/items/{item_id}").json()["local"]
+            assert local["status"] == "located" and local["best"]["path"] == path, item_id
+        # the merged, already located item keeps its file
+        assert c.get("/api/items/t900").json()["local"]["best"]["path"] == str(files["tagged"])
+    assert {d["id"] for k, d in events if k == "item"} >= set(new)
+
+
+def test_a_json_imports_new_items_are_located_too(make_service, tmp_path):
+    from .test_import import load_recorded, recorded_rows
+
+    music = tmp_path / "music"
+    astika = write_aiff(music / "Space Drum Meditation - SDM005" / "01. Astika.aiff", "Astika", "Space Drum Meditation",
+                        "SDM005", 1)
+    svc = make_service(music, tags=["must"])
+    load_recorded(svc.store)
+    svc.bandcamp_fetcher = lambda: Fetcher(svc.store, "test", offline=True)
+    svc.scan()
+    rows = [r for r in recorded_rows() if r["line"] == 206]
+    batch = importer.create_batch(svc, {"format": "bc-tagger-import/1", "items": rows}, ["must"])
+    importer.run_batch(svc, batch["batch_id"])
+    importer.apply_tag_mapping(svc, batch["batch_id"], {}, "create")
+    result = importer.commit(svc, batch["batch_id"])
+    item_id = result["item_ids"]["added"][0]
+    assert svc.get_item_view(item_id)["local"]["best"]["path"] == str(astika) and result["items_located"] == 1
