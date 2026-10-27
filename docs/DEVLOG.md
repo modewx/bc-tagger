@@ -257,6 +257,12 @@ npm run test:e2e                         # Playwright e2e: own profile, server :
   that has started swaps its source at the same moment and keeps playing (`swapSource`), the others when they
   next load. "▶ preview / original / Bandcamp stream" says what the track playing is heard from (the toggle and
   `local.best.preview`). Play/pause are SVG icons (the text glyphs rendered as a square in the docked player).
+- **Test 95 (Build previews on the e2e server) failed on other machines** (coordinator: "Of all 950 items"): the test
+  wrote the kept selection to localStorage right after the page's load event, then reloaded; the app's start-up
+  (still running) saved the selection it had read, empty, over it. Not a button bug (it reads the selection when
+  clicked). Fixes: the app saves the pruned selection at start only when pruning changed it (another tab's choice
+  stays); tests set kept state before the app's scripts run (`storageFirst`: an init script, first load only).
+  Alone 3/3 and the full suite pass.
 - **Build previews; Settings → Previews** (user, A's API in `960b36c`): Tools ▾ → Build previews runs the dry run
   (`POST /api/previews/build {ids|all, dry_run}`) and shows its plan in a dialog (needed / already / native /
   missing, what's left out and whether the cap or the 2 GB guard, size of the cap, time from `source_bytes` at

@@ -414,10 +414,12 @@ async function refreshHealth() {
   events.start(); // after the items: the stream holds a connection for good
   followRunning(jobs, page.statusEl, document.getElementById("buildPreviews")); // a build started before this page
 
-  // The kept selection: only items still in the collection.
+  // The kept selection: only items still in the collection. (Saved only if that changed it: what another tab
+  // selected meanwhile stays.)
   const items = page.getItems();
-  [...selected].forEach((k) => !(k in items) && selected.delete(k));
-  saveSelection();
+  const gone = [...selected].filter((k) => !(k in items));
+  gone.forEach((k) => selected.delete(k));
+  if (gone.length) saveSelection();
   updateShownButtons();
 
   const imported = takeImportedSelection();

@@ -4523,9 +4523,21 @@ test("collection: the toolbar is everyday actions (test ones in Settings → Tes
 
 const GB = 1024 ** 3;
 const MB = 1024 ** 2;
-// The collection with nothing selected or filtered: a bulk button acts on all of it.
-const unfiltered = (page) =>
-  page.evaluate(() => ["bc_app_selection", "bc_app_status_filter", "bc_app_source_filter"].forEach((k) => localStorage.removeItem(k)));
+// This browser's kept state for the app (localStorage), set before the page's own scripts read it, on its first
+// load only (its reloads keep what the page did). Written after a load instead, it races the page's start-up,
+// which saves what it read.
+const storageFirst = (page, { set = {}, remove = [] } = {}) =>
+  page.addInitScript(
+    ([set, remove]) => {
+      if (sessionStorage.getItem("e2e-storage-first")) return;
+      sessionStorage.setItem("e2e-storage-first", "1");
+      remove.forEach((k) => localStorage.removeItem(k));
+      Object.entries(set).forEach(([k, v]) => localStorage.setItem(k, v));
+    },
+    [set, remove]
+  );
+// The collection's kept selection and filters (and an import's hand-over): without them a bulk button acts on all of it.
+const COLLECTION_STATE = ["bc_app_selection", "bc_app_status_filter", "bc_app_source_filter", "bc_after_import"];
 
 test("Build previews (Tools ▾): the dry run asks first (what's left out, and why); then its progress (built/total, MB/s, ETA, file) and Cancel; the summary lists the errors (stubbed build)", async () => {
   const plan = {
@@ -4564,9 +4576,8 @@ test("Build previews (Tools ▾): the dry run asks first (what's left out, and w
   await app.route("**/api/jobs/e2e-previews-1", (route) => route.fulfill({ json: cancelled ? done : running }));
   const status = () => app.textContent("#refreshStatus");
   try {
+    await storageFirst(app, { remove: COLLECTION_STATE });
     await app.goto(SERVER + "/");
-    await unfiltered(app);
-    await app.reload();
     await app.waitForSelector("#collectionTable tbody tr[data-key]");
     const n = await app.$$eval("#collectionTable tbody tr[data-key]", (rs) => rs.length);
     await tool(app, "buildPreviews");
@@ -4642,10 +4653,8 @@ test("Build previews on the e2e server (3 AIFFs and a FLAC): the dialog's number
 
     const app = await context.newPage();
     pages.push(app);
+    await storageFirst(app, { remove: COLLECTION_STATE, set: { bc_app_selection: JSON.stringify(ids) } });
     await app.goto(SERVER + "/");
-    await unfiltered(app);
-    await app.evaluate((ks) => localStorage.setItem("bc_app_selection", JSON.stringify(ks)), ids);
-    await app.reload();
     await app.waitForFunction((ks) => ks.every((k) => document.querySelector(`tr[data-key="${k}"] audio.local-audio`)), aiffs);
     for (const k of aiffs) assert.match(await srcOf(app, k), /&src=original$/, "no preview yet");
     // The dry run, in a dialog.
