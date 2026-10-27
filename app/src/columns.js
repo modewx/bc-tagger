@@ -391,6 +391,23 @@ export function localPlayUrl(item) {
   return f ? streamUrl(f.path, usePreviews() && f.preview === true) : null;
 }
 
+// Why a located file can't be played, as far as the server can tell without touching the drive: the music drive
+// it's on isn't connected (/api/index/status reads the mount table). Asked after a failed play; kept a few seconds.
+let roots = null;
+let rootsAt = 0;
+export async function localUnavailable(item) {
+  const f = playableFile(item);
+  if (!f) return null;
+  if (!roots || Date.now() - rootsAt > 5000) {
+    roots = (await apiJson("/api/index/status")).roots || [];
+    rootsAt = Date.now();
+  }
+  const root = roots
+    .filter((r) => f.path === r.path || f.path.startsWith(String(r.path).replace(/\/$/, "") + "/"))
+    .sort((a, b) => b.path.length - a.path.length)[0];
+  return root && root.mounted === false ? "drive not connected" : null;
+}
+
 // The file's length the server has cached (no file read), so the player shows it before loading anything.
 export function localDuration(item) {
   const f = playableFile(item);

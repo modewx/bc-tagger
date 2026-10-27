@@ -143,6 +143,32 @@ body { font-family: -apple-system, system-ui, sans-serif; margin: 0; }
   white-space: nowrap;
 }
 .player-btn:disabled { opacity: 0.6; cursor: default; }
+/* A local file that can't be played, with no Bandcamp player instead (e.g. the drive isn't connected); ↻ tries again. */
+.player-unavailable {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  max-width: 100%;
+  padding: 3px 4px 3px 10px;
+  border: 1px solid #f4b4ae;
+  border-radius: 16px;
+  background: #fdecea;
+  color: #8a1c13;
+  font-size: 12px;
+  line-height: 1.3;
+}
+.player-unavailable .pu-retry {
+  flex: none;
+  border: none;
+  border-radius: 50%;
+  width: 22px;
+  height: 22px;
+  background: transparent;
+  color: inherit;
+  font-size: 14px;
+  cursor: pointer;
+}
+.player-unavailable .pu-retry:hover { background: rgba(138, 28, 19, 0.1); }
 /* The players' own controls (rowPlayer.js): play/pause, a seek bar, current / duration. */
 .row-player {
   position: relative;

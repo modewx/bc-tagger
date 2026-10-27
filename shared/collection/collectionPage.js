@@ -73,6 +73,10 @@ const SHELL_HTML = `
  * @param {function} [opts.localPlayUrl]    (item, key) -> url of a local file to play, or null
  * @param {function} [opts.localFallbackUrl] (url) -> another url for a local file whose url can't be played (e.g. the
  *                                          original of a preview the server no longer has), or null
+ * @param {function} [opts.localUnavailable] async (item, key) -> why its local file can't be played, if known (e.g. "drive
+ *                                          not connected"), else null
+ * @param {function} [opts.bandcampFallback] (item) -> false: a row whose local file can't be played has no Bandcamp
+ *                                          player to fall back to (says so instead)
  * @param {function} [opts.localDuration]   (item, key) -> that file's length in seconds, if known (shown before loading)
  * @param {function} [opts.filterItem]      (item) -> false hides the row (extra filters, e.g. statuses)
  * @param {function} [opts.onView]          (shown, total) after each filter/search
@@ -299,11 +303,12 @@ export function createCollectionPage(opts) {
 
   // A local-file <audio> (local app). If the file can't be decoded/streamed: its
   // other url if there is one (opts.localFallbackUrl), from the same moment;
-  // else the Bandcamp player for this row, and no more local tries.
+  // else the Bandcamp player for this row (or, with none, why there's nothing to
+  // play), and no more local tries until asked.
   function makeLocalAudio(url, item, key) {
     const audio = makeRowAudio(url, item, key, opts.localDuration ? opts.localDuration(item, key) : null);
     audio.classList.add("local-audio");
-    audio.addEventListener("error", () => {
+    audio.addEventListener("error", async () => {
       const other = opts.localFallbackUrl ? opts.localFallbackUrl(audio.getAttribute("src") || "") : null;
       if (other && audio.bctPlayer) {
         audio.bctPlayer.swapSource(other, { keepLoading: true });
@@ -313,16 +318,43 @@ export function createCollectionPage(opts) {
       const wasCurrent = playingAudio === audio;
       if (wasCurrent) playingAudio = null;
       playerOf(audio).remove(); // may be docked in the top bar (global mode)
+      item._localWhy = opts.localUnavailable ? await opts.localUnavailable(item, key).catch(() => null) : null;
       const cell = document.querySelector(`#collectionTable tr[data-key="${key}"] td.player-cell`);
       if (!cell) return;
       renderPlayerCell(cell, key, item);
-      cell.title = "The local file could not be played; using the Bandcamp player.";
       if (wasCurrent) {
         const fallback = cell.querySelector("audio");
         if (fallback) fallback.play().catch(() => {});
       }
     });
     return audio;
+  }
+
+  // A row whose local file can't be played and that has no Bandcamp player: what's wrong, and ↻ to try the file
+  // again (e.g. once the drive is back). A click elsewhere on the cell does the same.
+  function localUnavailableState(cell, key, item) {
+    const box = document.createElement("span");
+    box.className = "player-unavailable";
+    const text = document.createElement("span");
+    text.className = "pu-text";
+    text.textContent = item._localWhy ? `File not available (${item._localWhy})` : "File not available (couldn't be played)";
+    const retry = document.createElement("button");
+    retry.type = "button";
+    retry.className = "pu-retry";
+    retry.textContent = "↻";
+    retry.title = "Try the file again";
+    retry.setAttribute("aria-label", retry.title);
+    retry.addEventListener("click", (e) => {
+      e.stopPropagation();
+      delete item._localFailed;
+      delete item._localWhy;
+      renderPlayerCell(cell, key, item);
+      const audio = cell.querySelector("audio");
+      if (audio) audio.play().catch(() => {});
+    });
+    box.append(text, retry);
+    cell.title = text.textContent;
+    return box;
   }
 
   // Any row audio that starts playing becomes the single current player (others
@@ -782,8 +814,18 @@ export function createCollectionPage(opts) {
     // Local app: prefer the located local file.
     const localUrl = !item._localFailed && opts.localPlayUrl ? opts.localPlayUrl(item, key) : null;
     if (localUrl) {
+      cell.removeAttribute("title");
       cell.appendChild(playerOf(makeLocalAudio(localUrl, item, key)));
       return;
+    }
+    if (item._localFailed) {
+      if (opts.bandcampFallback && !opts.bandcampFallback(item)) {
+        cell.appendChild(localUnavailableState(cell, key, item));
+        return;
+      }
+      cell.title = item._localWhy
+        ? `File not available (${item._localWhy}): playing Bandcamp's stream.`
+        : "The local file could not be played; using the Bandcamp player.";
     }
 
     // A live link -> inline <audio>; else a Play button that resolves one.
@@ -992,6 +1034,11 @@ export function createCollectionPage(opts) {
     if (audio) {
       if (audio.paused) audio.play().catch(() => {});
       else audio.pause();
+      return;
+    }
+    const retry = cell.querySelector(".pu-retry"); // the file wasn't available: try it again
+    if (retry) {
+      retry.click();
       return;
     }
     const btn = cell.querySelector("button");

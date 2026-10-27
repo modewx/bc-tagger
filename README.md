@@ -48,6 +48,10 @@ reachable, edits are queued on the server and applied by the extension on its ne
     on it keeps working). A preview that can't be played (the server no longer has it) plays on from the original,
     at the same moment. Next to the toggle, what the track playing is heard from (preview / original / Bandcamp
     stream), from its player's URL.
+  - **A file that can't be played** (e.g. the music drive is unplugged and there's no preview): a Bandcamp item plays
+    Bandcamp's stream instead (the cell's tooltip says why); an item from another source shows "File not available
+    (drive not connected)" (asked of `/api/index/status`, which reads the mount table, never the drive), and ↻ (or a
+    click on the cell) tries the file again, e.g. once the drive is back.
   - Test-only actions (Locate / Export latest 10) are in **Settings → Test**.
   - **Nothing runs unasked:** the app reads the music drive or Bandcamp only when you click (Play, Locate, Tools,
     Refresh ownership) or rest on a player: passing over players loads nothing, resting on one for a moment loads
@@ -141,7 +145,7 @@ Runs the extension, server and local app together in a Playwright Chromium with 
   real server (mapping, linking, browser lookups, downloads, re-locate, browse), settings, and rekordbox dry runs
   and a sandbox write.
 
-A full run (88 tests) takes about 2.5 minutes (2026-10-26: 110–147 s). For a quick check, run a subset by
+A full run (90 tests) takes about 2.5 minutes (2026-10-26: 110–147 s). For a quick check, run a subset by
 name. Include `Import \(replace\)`, which loads the test collection the others use:
 
 ```bash

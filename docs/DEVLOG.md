@@ -191,6 +191,13 @@ npm run test:e2e                         # Playwright e2e: own profile, server :
   that has started swaps its source at the same moment and keeps playing (`swapSource`), the others when they
   next load. "▶ preview / original / Bandcamp stream" says what the track playing is heard from (the toggle and
   `local.best.preview`). Play/pause are SVG icons (the text glyphs rendered as a square in the docked player).
+- **Drive unplugged** (user ejects the music drive): a local file with no preview now fails at once (the server's
+  404 "music drive not mounted"). A Bandcamp item falls back to Bandcamp's stream as before, with the reason in the
+  cell's tooltip; an item from another source used to fall through to an empty Bandcamp embed (spinning forever)
+  and now shows "File not available (drive not connected)" with ↻ (a click on the cell too) to try the file again.
+  The reason comes from `/api/index/status` (the roots' `mounted`, from the mount table; kept 5 s), asked only after
+  a failed play (`localUnavailable`; `bandcampFallback` says which rows have a Bandcamp player). e2e: collection and
+  import preview, unplugged then plugged back.
 - **Stream URLs pin the preview or the original** (user: playback froze after a seek): the first play had the server
   make an Opus preview, and then the same URL served it instead of the ~50 MB WAV; the next seek asked past the
   preview's 4 MB (416) and the player was dead. Local stream URLs now say `src=preview` (previews on and the file's

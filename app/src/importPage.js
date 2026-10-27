@@ -11,14 +11,14 @@ import { ExtensionBridge } from "../../shared/datasource/extensionBridge";
 import { pageEvents } from "../../shared/datasource/serverEvents";
 import { Jobs, progressText, resultText } from "./jobs";
 import { buildNav } from "./nav";
-import { sourceColumn, localPlayUrl, localDuration } from "./columns";
+import { sourceColumn, localPlayUrl, localDuration, localUnavailable } from "./columns";
 import { originalOf, previewToggle } from "./previews";
 import { openPopover, closePopover } from "./popover";
 import { createTags, mapTagsUrl, getBatch, updateRow, commitBatch, discardBatch, resumeLookups, setDefaultTags, relocateRows, relocateRow, searchFiles, listFolder, rowToItem, matchSource, bandcampSearchUrl, openOnBandcampUrl, cleanBandcampUrl } from "./importApi";
 import { statsLine } from "./importTab";
 import { rememberImport } from "./openImport";
 import { downloadFileTitle, downloadFlow, fullReleaseOf, fullReleasesToggle, stateLabel, trackDownloads, troubled } from "./downloads";
-import { playableItem } from "./statusFilter";
+import { playableItem, sourceOf } from "./statusFilter";
 import { logNote } from "./importLogs";
 import { tickTargets } from "./rowTicks";
 import { runExport } from "./exportFlow";
@@ -1152,6 +1152,8 @@ async function discard(statusEl) {
     ],
     localPlayUrl,
     localFallbackUrl: originalOf,
+    localUnavailable,
+    bandcampFallback: (item) => sourceOf(item) !== "other", // other sources: say why there's nothing to play
     localDuration,
     playable: playableItem,
     rowClass: (item) => {

@@ -1687,9 +1687,12 @@ function slowWav(wav, delayMs, reads = []) {
 }
 // Answers a page's /api/files/stream requests with a `seconds` silent WAV after `delayMs` (or with `stream`, a route
 // handler); marks `count` tracks located (local players), with the server's cached `duration` and `preview` flag if
-// given (`preview` may be a function: asked at each items request). Nothing on the server changes and no file is
-// read. Returns the requests seen (not with `stream`).
-async function slowLocalStreams(page, { delayMs = 1500, count = 12, duration = null, preview = null, seconds = 3, stream = null } = {}) {
+// given (`preview` may be a function: asked at each items request); the first `other` of them are shown as from
+// another source (no Bandcamp player). Nothing on the server changes and no file is read. Returns the requests seen
+// (not with `stream`), with `.located` and `.other`: the item ids.
+async function slowLocalStreams(page, { delayMs = 1500, count = 12, duration = null, preview = null, seconds = 3, stream = null, other = 0 } = {}) {
+  const located = [];
+  const others = [];
   // Right after an import the items are still getting their "#" (each re-renders the table): start after.
   await waitFor(
     () => api("/api/items").then((d) => (Array.isArray(d) ? d : d.items).every((i) => i.source === "other" || Number.isFinite(i.order))),
@@ -1700,17 +1703,42 @@ async function slowLocalStreams(page, { delayMs = 1500, count = 12, duration = n
     const data = await res.json();
     (Array.isArray(data) ? data : data.items)
       .filter((i) => i.tralbum_type === "t" && i.source !== "other")
+      .sort((a, b) => String(a.id).localeCompare(String(b.id))) // the same ones at each request
       .slice(0, count)
-      .forEach((it) => {
+      .forEach((it, n) => {
         const pv = typeof preview === "function" ? preview() : preview;
         const best = { path: `/e2e/not-a-real-folder/${it.id}.wav`, ...(duration ? { duration } : {}), ...(pv != null ? { preview: pv } : {}) };
         it.local = { status: "located", best, candidates: [] };
+        if (!located.includes(it.id)) located.push(it.id);
+        if (n < other) {
+          it.source = "other";
+          if (!others.includes(it.id)) others.push(it.id);
+        }
       });
     await route.fulfill({ response: res, json: data });
   });
   const reads = [];
   await page.route("**/api/files/stream**", stream || slowWav(silentWav(seconds), delayMs, reads));
-  return reads;
+  // (not enumerable: tests compare `reads` with arrays)
+  return Object.defineProperties(reads, { located: { value: located }, other: { value: others } });
+}
+// The music drive unplugged (or back): the stream answers as the server does without it, and /api/index/status
+// says the stand-in files' folder isn't mounted. Then `plug(true)`: the files play (a `seconds` silent WAV).
+async function unpluggedDrive(page, folder, { seconds = 3 } = {}) {
+  const d = { plugged: false, streams: 0 };
+  const wav = slowWav(silentWav(seconds), 0);
+  await page.route("**/api/files/stream**", (route) => {
+    d.streams++;
+    if (d.plugged) return wav(route);
+    return route.fulfill({ status: 404, contentType: "application/json", body: '{"detail":"music drive not mounted"}' }).catch(() => {});
+  });
+  await page.route("**/api/index/status", async (route) => {
+    const res = await route.fetch();
+    const data = await res.json();
+    data.roots = [...(data.roots || []), { path: folder, kind: "owned", mounted: d.plugged, files: 12, complete: true }];
+    await route.fulfill({ response: res, json: data });
+  });
+  return d;
 }
 // A stand-in for the server's stream of a local file, in its two versions: the original (`src=original`, 8 kHz) and
 // the preview (`src=preview`, 4 kHz: half the size; 404 until `built`, and once `gone`). A URL without `src` is the
@@ -1939,6 +1967,57 @@ test("local app: a preview the server no longer has (404) plays on from the orig
     assert.ok(double.log.some((r) => r.src === "preview" && r.status === 404), "the preview was asked for, and gone");
     assert.equal(await app.textContent("#playingSource"), "▶ original");
     assert.equal(await app.$(`tr[data-key="${key}"] iframe`), null, "not the Bandcamp player");
+  } finally {
+    await app.evaluate(() => document.querySelectorAll("audio").forEach((au) => au.pause())).catch(() => {});
+    await app.close();
+  }
+});
+
+test("local app: with the music drive unplugged, a file with nothing else to play says so (↻ tries again, and plays once it's back); a Bandcamp item plays Bandcamp's stream", async () => {
+  const app = await context.newPage();
+  const ids = await slowLocalStreams(app, { other: 1, stream: (route) => route.fallback() });
+  const drive = await unpluggedDrive(app, "/e2e/not-a-real-folder");
+  const cell = (key) => `tr[data-key="${key}"] td.player-cell`;
+  try {
+    await app.goto(SERVER + "/");
+    const keys = await localPlayers(app);
+    const [otherKey] = ids.other;
+    assert.ok(keys.includes(otherKey), "the other-source item has a local player");
+    const bcKey = keys.find((k) => k !== otherKey);
+    // Another source: nothing else to play, so it says why (no spinner, no Bandcamp player).
+    await app.locator(`tr[data-key="${otherKey}"]`).scrollIntoViewIfNeeded();
+    await clickBar(app, otherKey, 0.3);
+    await app.waitForSelector(`${cell(otherKey)} .player-unavailable`, { timeout: 10000 });
+    assert.equal(await app.textContent(`${cell(otherKey)} .pu-text`), "File not available (drive not connected)");
+    assert.equal(await app.$(`${cell(otherKey)} iframe`), null);
+    assert.equal(await app.$(`${cell(otherKey)} .row-player`), null);
+    if (process.env.E2E_SHOTS) await app.locator(cell(otherKey)).screenshot({ path: path.join(process.env.E2E_SHOTS, "player-unavailable.png") });
+    // A click on the cell tries again: still unplugged, the same.
+    const asked = drive.streams;
+    await app.locator(`${cell(otherKey)} .pu-text`).click();
+    await waitFor(() => drive.streams > asked, { what: "the file asked for again", timeout: 10000 });
+    await app.waitForSelector(`${cell(otherKey)} .player-unavailable`, { timeout: 10000 });
+    // A Bandcamp item: Bandcamp's stream instead, and the cell says why.
+    await app.locator(`tr[data-key="${bcKey}"]`).scrollIntoViewIfNeeded();
+    await clickBar(app, bcKey, 0.3);
+    await app.waitForFunction((sel) => {
+      const c = document.querySelector(sel);
+      return c && !c.querySelector("audio.local-audio") && /drive not connected/.test(c.title);
+    }, cell(bcKey), { timeout: 10000 });
+    assert.equal(await app.getAttribute(cell(bcKey), "title"), "File not available (drive not connected): playing Bandcamp's stream.");
+    assert.equal(await app.$(`${cell(bcKey)} .player-unavailable`), null);
+    await app.waitForFunction(() => document.getElementById("playingSource").textContent === "▶ Bandcamp stream", null, { timeout: 10000 });
+    await app.evaluate(() => document.querySelectorAll("audio").forEach((au) => au.pause()));
+    // The drive is back: ↻ plays the file.
+    drive.plugged = true;
+    await app.locator(`tr[data-key="${otherKey}"]`).scrollIntoViewIfNeeded();
+    await app.click(`${cell(otherKey)} .pu-retry`);
+    await app.waitForFunction((sel) => {
+      const au = document.querySelector(sel + " audio.local-audio");
+      return au && !au.paused && au.currentTime > 0.2;
+    }, cell(otherKey), { timeout: 10000 });
+    assert.equal(await app.$(`${cell(otherKey)} .player-unavailable`), null);
+    assert.equal(await app.getAttribute(cell(otherKey), "title"), null);
   } finally {
     await app.evaluate(() => document.querySelectorAll("audio").forEach((au) => au.pause())).catch(() => {});
     await app.close();
@@ -3304,6 +3383,33 @@ test("import preview: its players stream the preview or the original like the co
     assert.deepEqual(double.log.filter((r) => r.status === 416), []);
   } finally {
     await page.evaluate(() => localStorage.removeItem("bc_use_previews")).catch(() => {});
+    await page.evaluate(() => document.querySelectorAll("audio").forEach((au) => au.pause())).catch(() => {});
+    await page.close();
+  }
+});
+
+test("import preview: with the music drive unplugged, an unmatched row's file says it isn't available (stubbed API)", async () => {
+  const stub = importStub(JSON.parse(fs.readFileSync(IMPORT_SAMPLE, "utf8")), { located: [3] });
+  const row = stub.rows.find((r) => r.line === 3);
+  assert.equal(row.source, "other", "unmatched: no Bandcamp player");
+  const page = await context.newPage();
+  await stub.install(page);
+  const drive = await unpluggedDrive(page, "/e2e");
+  const key = `r${row.n}`;
+  try {
+    await page.goto(SERVER + "/import/?batch=e2e-b1");
+    await page.waitForSelector(`tr[data-key="${key}"] audio.local-audio`, { state: "attached" });
+    await clickBar(page, key, 0.5);
+    await page.waitForSelector(`tr[data-key="${key}"] .player-unavailable`, { timeout: 10000 });
+    assert.equal(await page.textContent(`tr[data-key="${key}"] .pu-text`), "File not available (drive not connected)");
+    assert.equal(await page.$(`tr[data-key="${key}"] iframe`), null);
+    drive.plugged = true;
+    await page.click(`tr[data-key="${key}"] .pu-retry`);
+    await page.waitForFunction((k) => {
+      const au = document.querySelector(`tr[data-key="${k}"] audio.local-audio`);
+      return au && !au.paused && au.currentTime > 0.2;
+    }, key, { timeout: 10000 });
+  } finally {
     await page.evaluate(() => document.querySelectorAll("audio").forEach((au) => au.pause())).catch(() => {});
     await page.close();
   }
