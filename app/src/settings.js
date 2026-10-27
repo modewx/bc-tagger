@@ -520,7 +520,10 @@ function mappingEditor() {
 // Vocabulary and the target library's playlists for the mapping editor.
 async function loadMappingData() {
   if (!mapping) return;
-  apiJson("/api/tags").then(mapping.setVocabulary).catch(() => {});
+  mapping.loading();
+  apiJson("/api/tags")
+    .then(mapping.setVocabulary)
+    .catch(() => mapping.setVocabulary([]));
   try {
     mapping.setPlaylists(await apiJson("/api/rekordbox/playlists"));
   } catch (e) {

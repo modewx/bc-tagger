@@ -254,8 +254,15 @@ export function createMappingEditor({ onChange }) {
       map = v && typeof v === "object" ? JSON.parse(JSON.stringify(v)) : {};
       render();
     },
+    // The tag list and the target library's playlists load after the page; data-vocab and
+    // data-playlists on the editor say they're in (loading() clears them for a reload).
+    loading() {
+      delete root.dataset.vocab;
+      delete root.dataset.playlists;
+    },
     setVocabulary(tags) {
       vocab = Array.isArray(tags) ? tags : [];
+      root.dataset.vocab = "1";
       const added = mode === "custom" && prefill(); // new tags start with their own name
       render();
       scrollToFocus();
@@ -268,6 +275,7 @@ export function createMappingEditor({ onChange }) {
     },
     setPlaylists(list) {
       playlists = Array.isArray(list) ? list : null;
+      root.dataset.playlists = "1";
       renderOptions();
       repaint();
     },

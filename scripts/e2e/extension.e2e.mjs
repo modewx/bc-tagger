@@ -674,10 +674,15 @@ test("Settings has General and Rekordbox tabs", async () => {
   await page.close();
 });
 
+// The mapping editor's tag list and the library's playlists arrive after the page (each
+// re-renders or repaints it): wait for both before typing, and for each result after.
+const mappingLoaded = (page) => page.waitForSelector(".mapping[data-vocab][data-playlists]", { state: "attached" });
+const settingsNow = () => api("/api/settings").then((d) => d.settings || d);
+
 test("Settings: the tag → playlists mapping round-trips through the server", async () => {
   const page = await context.newPage();
   await page.goto(SERVER + "/settings/#rekordbox");
-  await page.waitForSelector("#mappingAuto");
+  await mappingLoaded(page);
   assert.equal(await page.isChecked("#mappingAuto"), true);
   assert.equal(await page.isVisible(".mapping-panel"), false);
   await page.uncheck("#mappingAuto");
@@ -692,24 +697,26 @@ test("Settings: the tag → playlists mapping round-trips through the server", a
   assert.equal(await page.isVisible(".mapping-warning"), false);
   await page.click("#saveBtn");
   await page.waitForFunction(() => /Saved/.test(document.getElementById("saveState").textContent));
-  let s = await api("/api/settings");
+  let s = await waitFor(() => settingsNow().then((x) => x.tag_playlist_mode === "custom" && x), { what: "the custom mapping saved" });
   assert.equal(s.tag_playlist_mode, "custom");
   assert.deepEqual(s.tag_playlist_map.must, ["/DJ/Status/Must", "Favourites"]);
   assert.deepEqual(s.tag_playlist_map.pool, ["Sub/Pool"]);
   assert.deepEqual(s.tag_playlist_map.build, ["build"], "the others: their own name");
 
   await page.reload();
-  await page.waitForSelector('.map-row[data-tag="build"]'); // the vocabulary is in (it re-renders the rows)
+  await mappingLoaded(page);
   assert.equal(await row("must").locator("input").nth(1).inputValue(), "Favourites");
   await row("pool").locator("input").first().fill("a//b"); // invalid: refused by the server
-  assert.match(await row("pool").locator(".map-status").textContent(), /empty folder name/);
+  await page.waitForFunction(() => /empty folder name/.test(document.querySelector('.map-row[data-tag="pool"] .map-status').textContent));
   await page.click("#saveBtn");
   await page.waitForFunction(() => /Not saved/.test(document.getElementById("saveState").textContent));
+  assert.deepEqual((await settingsNow()).tag_playlist_map.pool, ["Sub/Pool"], "nothing saved");
   await page.click("#revertBtn");
+  await page.waitForFunction(() => document.querySelector('.map-row[data-tag="pool"] input').value === "Sub/Pool");
   await page.check("#mappingAuto"); // back to auto; the map is kept for later
   await page.click("#saveBtn");
   await page.waitForFunction(() => /Saved/.test(document.getElementById("saveState").textContent));
-  s = await api("/api/settings");
+  s = await waitFor(() => settingsNow().then((x) => x.tag_playlist_mode === "auto" && x), { what: "auto mode saved" });
   assert.equal(s.tag_playlist_mode, "auto");
   assert.deepEqual(s.tag_playlist_map.must, ["/DJ/Status/Must", "Favourites"]);
   await page.close();
@@ -720,7 +727,7 @@ test("Settings: unticking Auto prefills unmapped tags (saved ones untouched); a 
   const page = await context.newPage();
   try {
     await page.goto(SERVER + "/settings/#rekordbox");
-    await page.waitForSelector('.map-row[data-tag="build"]', { state: "attached" }); // the vocabulary is in
+    await mappingLoaded(page);
     await page.uncheck("#mappingAuto");
     const row = (tag) => page.locator(`.map-row[data-tag="${tag}"]`);
     const entry = (tag) => row(tag).locator(".map-entry").first();
