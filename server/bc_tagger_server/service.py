@@ -203,6 +203,12 @@ class Service:
         return [{"tag": t, "new": t not in vocab, "playlists": rule(t)} for t in tags]
 
     def sync_tags(self, tags: list[str]) -> dict[str, Any]:
+        """The tag list (the extension's, on sync). Tags the server created and queued for the extension that it
+        hasn't acknowledged yet stay, so a sync racing the queue doesn't drop them."""
+        from .collection import pending_adds
+
+        queued = [t for a in pending_adds(self.store) for t in a.get("tags") or [] if t not in tags]
+        tags = list(tags) + list(dict.fromkeys(queued))
         self.store.set_tags(tags)
         self.jobs.bus.publish("tags", {"count": len(tags)})
         return {"tags": len(tags)}

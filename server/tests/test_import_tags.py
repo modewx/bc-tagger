@@ -49,3 +49,15 @@ def test_ignoring_new_tags_drops_them_only_when_chosen(svc):  # noqa: F811
     assert "mourn" not in rows[181] and "closer" not in rows[181]  # the file's unknown tags, as chosen
     importer.update_row(svc, bid, row_at(importer.get_batch(svc, bid), 181)["n"], {"tags": ["later-tag"]})
     assert importer.get_batch(svc, bid)["new_tags"] == ["later-tag"]  # a tag added afterwards stays
+
+
+def test_an_extension_sync_doesnt_drop_tags_still_queued_for_it(svc):  # noqa: F811
+    from bc_tagger_server.collection import ack_adds
+
+    before = svc.store.get_tags()
+    assert svc.create_tags(["brandnew"])["created"] == ["brandnew"]
+    svc.sync_tags(before)  # the extension's list, from before it got the queued tag
+    assert svc.store.get_tags() == before + ["brandnew"]
+    ack_adds(svc.store, [a["add_id"] for a in pending_adds(svc.store)])
+    svc.sync_tags(before)  # received and then deleted in the extension: gone
+    assert svc.store.get_tags() == before
