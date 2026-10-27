@@ -2,6 +2,11 @@
 const cheerio = require('cheerio');
 const { setupImportLinks } = require('./importLink');
 
+// A copy injected again after the extension reloaded (refreshContentScripts in
+// background.js): the previous copy can no longer reach the extension, so its
+// widgets go and this one adds its own.
+document.querySelectorAll(".tagger-container, .bct-link-btn, .bct-link-menu").forEach((n) => n.remove());
+
 // Content script file will run in the context of web page.
 // With content script you can manipulate the web pages using
 // Document Object Model (DOM).
@@ -303,44 +308,48 @@ function getTaggedItems(callback) {
   });
 }
 
-// When a tag is created/updated elsewhere (e.g. the popup), add any new tags to
-// every annotation dropdown on the page without losing current selections, so
-// no page reload is needed.
-chrome.runtime.onMessage.addListener((request) => {
-  if (request && request.type === "tagsUpdated") {
-    const tags = request.tags || [];
-    $(".chosen-select").each(function () {
-      const sel = $(this);
-      const selected = sel.val() || [];
+// When a tag is created/updated elsewhere (the popup, an import, the app), add
+// any new tags to every annotation dropdown on the page without losing current
+// selections, so no page reload is needed. Storage changes cover every way a
+// tag arrives; the background's broadcast is kept for older pages.
+function refreshTagOptions(tags) {
+  $(".chosen-select").each(function () {
+    const sel = $(this);
+    const selected = sel.val() || [];
 
-      // Options to keep: the new vocabulary, plus any tag currently applied to
-      // this track (so a track never loses a tag even if it left the vocabulary).
-      const keep = {};
-      tags.forEach((t) => { keep[t] = true; });
-      selected.forEach((t) => { keep[t] = true; });
+    // Options to keep: the new vocabulary, plus any tag currently applied to
+    // this track (so a track never loses a tag even if it left the vocabulary).
+    const keep = {};
+    tags.forEach((t) => { keep[t] = true; });
+    selected.forEach((t) => { keep[t] = true; });
 
-      const have = {};
-      sel.find("option").each(function () {
-        const val = this.value;
-        if (val === "") return; // keep the empty placeholder option
-        if (keep[val]) {
-          have[val] = true;
-        } else {
-          $(this).remove(); // drop a deleted tag
-        }
-      });
-
-      // Add newly created tags, in vocabulary order.
-      tags.forEach((tag) => {
-        if (!have[tag]) {
-          sel.append(new Option(tag));
-        }
-      });
-
-      sel.val(selected);
-      sel.trigger("chosen:updated");
+    const have = {};
+    sel.find("option").each(function () {
+      const val = this.value;
+      if (val === "") return; // keep the empty placeholder option
+      if (keep[val]) {
+        have[val] = true;
+      } else {
+        $(this).remove(); // drop a deleted tag
+      }
     });
-  }
+
+    // Add newly created tags, in vocabulary order.
+    tags.forEach((tag) => {
+      if (!have[tag]) {
+        sel.append(new Option(tag));
+      }
+    });
+
+    sel.val(selected);
+    sel.trigger("chosen:updated");
+  });
+}
+chrome.runtime.onMessage.addListener((request) => {
+  if (request && request.type === "tagsUpdated") refreshTagOptions(request.tags || []);
+});
+chrome.storage.onChanged.addListener((changes, area) => {
+  if (area === "local" && changes.tags) refreshTagOptions(changes.tags.newValue || []);
 });
 
 function extractMetadata(element) {

@@ -346,7 +346,35 @@ if (__DEV_BUILD__) {
 // Lifecycle
 // ---------------------------------------------------------------------------
 
+// After an update or a dev reload, tabs that were already open keep a content
+// script cut off from the extension: no saves, no new tags, no app bridge.
+// Give the Bandcamp pages and the local app a fresh one; it drops the old
+// copy's widgets (contentScript.js), and a cut-off bridge stays quiet (appBridge.js).
+async function refreshContentScripts() {
+  const entries = (chrome.runtime.getManifest().content_scripts || []).filter((e) =>
+    (e.js || []).some((f) => /contentScript|appBridge/.test(f))
+  );
+  for (const entry of entries) {
+    let tabs = [];
+    try {
+      tabs = await chrome.tabs.query({ url: entry.matches });
+    } catch (e) {
+      continue;
+    }
+    for (const tab of tabs) {
+      const target = { tabId: tab.id };
+      try {
+        if (entry.css && entry.css.length) await chrome.scripting.insertCSS({ target, files: entry.css });
+        await chrome.scripting.executeScript({ target, files: entry.js });
+      } catch (e) {
+        // a tab that can't be scripted (discarded, an error page)
+      }
+    }
+  }
+}
+
 chrome.runtime.onInstalled.addListener(() => {
+  refreshContentScripts();
   chrome.storage.local.get("taggedItems", ({ taggedItems }) => {
     if (!taggedItems) {
       chrome.storage.local.set({ taggedItems: {} });
@@ -417,6 +445,12 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
 
   if (request.type === "updateTaggedItemTags") {
     updateItemTags(request.id, request.tags).then(sendResponse);
+    return true;
+  }
+
+  if (request.type === "refreshContentScripts") {
+    // What an update or dev reload does to open tabs (tests call it directly).
+    refreshContentScripts().then(() => sendResponse({ ok: true }));
     return true;
   }
 

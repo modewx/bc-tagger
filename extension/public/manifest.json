@@ -19,7 +19,8 @@
   "permissions": [
     "storage",
     "webRequest",
-    "alarms"
+    "alarms",
+    "scripting"
   ],
   "host_permissions": [
     "https://*.bandcamp.com/*",

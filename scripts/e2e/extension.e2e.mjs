@@ -947,6 +947,101 @@ test("Main target, real server: dry run, confirm, and write to a sandbox copy", 
   fs.rmSync(path.dirname(sandboxDir), { recursive: true, force: true });
 });
 
+test("a tag created in the extension is offered at once in pages already open: a Bandcamp page's tagger, the extension's collection page, the local app", async () => {
+  const send = (msg) => probe.evaluate((m) => new Promise((r) => chrome.runtime.sendMessage(m, r)), msg);
+  const TAG = "e2e-live-tag";
+  const { tags: before } = await storage("tags");
+  const bc = await context.newPage();
+  const ext = await context.newPage();
+  const app = await context.newPage();
+  try {
+    await bc.goto("https://infiniteexpanse.bandcamp.com/album/synergy-trilogy");
+    await bc.waitForSelector("#tagger_a563830364", { state: "attached", timeout: 30000 });
+    await ext.goto(extPage("collection.html"));
+    await ext.waitForSelector(`tr[data-key="${ITEM}"]`);
+    await app.goto(SERVER + "/");
+    await app.waitForSelector(`tr[data-key="${ITEM}"]`);
+    await app.locator(`tr[data-key="${ITEM}"]`).scrollIntoViewIfNeeded();
+    await ext.locator(`tr[data-key="${ITEM}"]`).scrollIntoViewIfNeeded();
+    await app.waitForSelector(`tr[data-key="${ITEM}"] select.tag-editor`, { state: "attached" });
+    await ext.waitForSelector(`tr[data-key="${ITEM}"] select.tag-editor`, { state: "attached" });
+
+    // Created in the popup (its "+ New tag" sends addTag).
+    const res = await send({ type: "addTag", tag: TAG });
+    assert.equal(res.ok, true, JSON.stringify(res));
+    const offered = (page, sel) =>
+      page.waitForFunction(([s, t]) => [...document.querySelectorAll(s)].some((x) => [...x.options].some((o) => o.value === t)), [sel, TAG], { timeout: 10000 });
+    const where = [];
+    for (const [name, page, sel] of [
+      ["Bandcamp page", bc, "#tagger_a563830364"],
+      ["extension collection page", ext, `tr[data-key="${ITEM}"] select.tag-editor`],
+      ["local app", app, `tr[data-key="${ITEM}"] select.tag-editor`],
+    ]) {
+      await offered(page, sel).catch(() => where.push(name));
+    }
+    assert.deepEqual(where, [], `not offered on: ${where.join(", ")}`);
+    // The Bandcamp tagger's autocomplete finds it too.
+    await bc.click("#tagger_a563830364 + .chosen-container");
+    await bc.keyboard.type("e2e-live");
+    await bc.waitForFunction((t) => [...document.querySelectorAll(".chosen-container-active .chosen-results li")].some((li) => li.textContent.trim() === t), TAG, { timeout: 5000 });
+    // Tags that arrive without the popup's broadcast (an import's new tags are written straight to storage).
+    const { tags: now } = await storage("tags");
+    await probe.evaluate((t) => chrome.storage.local.set({ tags: t }), [...now, `${TAG}-2`]);
+    await offered(bc, "#tagger_a563830364").catch(() => {});
+    await bc.waitForFunction((t) => [...document.querySelectorAll("#tagger_a563830364 option")].some((o) => o.value === t), `${TAG}-2`, { timeout: 10000 });
+  } finally {
+    await send({ type: "updateTags", tags: before });
+    await Promise.all([bc.close(), ext.close(), app.close()]);
+  }
+});
+
+test("after the extension reloads (a dev rebuild, an update), open pages get a fresh content script: one tagger per item, which hears new tags; the app's bridge still answers", async () => {
+  // Chrome cuts off the old copies on a reload, and the background injects fresh ones
+  // (refreshContentScripts). Reloading the extension here unloads it for good, so the
+  // test asks the background to do the injection directly.
+  const send = (msg) => probe.evaluate((m) => new Promise((r) => chrome.runtime.sendMessage(m, r)), msg);
+  const TAG = "e2e-after-reload";
+  const { tags: before } = await storage("tags");
+  const bc = await context.newPage();
+  const app = await context.newPage();
+  try {
+    await bc.goto("https://infiniteexpanse.bandcamp.com/album/synergy-trilogy");
+    await bc.waitForSelector("#tagger_a563830364", { state: "attached", timeout: 30000 });
+    const widgets = await bc.$$eval(".tagger-container", (n) => (n.forEach((x) => (x.dataset.e2eOld = "1")), n.length));
+    await app.goto(SERVER + "/");
+    await app.waitForFunction(() => /extension connected/.test(document.getElementById("navExt").textContent));
+    assert.deepEqual(await send({ type: "refreshContentScripts" }), { ok: true });
+    // The Bandcamp tab: the old widgets replaced by fresh ones, one per item, which hear a new tag.
+    await bc.waitForFunction(
+      (n) => !document.querySelector("[data-e2e-old]") && document.querySelectorAll(".tagger-container").length === n && document.querySelector("#tagger_a563830364"),
+      widgets,
+      { timeout: 30000 }
+    );
+    await send({ type: "addTag", tag: TAG });
+    await bc.waitForFunction((t) => [...document.querySelectorAll("#tagger_a563830364 option")].some((o) => o.value === t), TAG, { timeout: 15000 });
+    // The app tab: its bridge answers.
+    const answer = await app.evaluate(
+      () =>
+        new Promise((resolve) => {
+          const id = `e2e-${Math.random()}`;
+          const on = (e) => {
+            if (e.data && e.data.bcTagger === "response" && e.data.id === id) {
+              removeEventListener("message", on);
+              resolve(e.data);
+            }
+          };
+          addEventListener("message", on);
+          postMessage({ bcTagger: "request", id, op: "status", payload: {} }, location.origin);
+          setTimeout(() => resolve(null), 5000);
+        })
+    );
+    assert.ok(answer && answer.ok, JSON.stringify(answer));
+  } finally {
+    await send({ type: "updateTags", tags: before }).catch(() => {});
+    await Promise.all([bc.close(), app.close()]);
+  }
+});
+
 // Album pages: the header widget is the album (a<id>), each row its own track
 // (t<id>), paired by position with the page's data. If Bandcamp's markup ever
 // shifts that pairing, album items would be saved/removed under track ids.

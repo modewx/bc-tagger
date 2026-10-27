@@ -16,6 +16,8 @@ function activate() {
 
   window.addEventListener("message", (e) => {
     if (e.source !== window || e.origin !== location.origin) return;
+    // Cut off by an extension reload: a fresh copy (injected by the background) answers.
+    if (!chrome.runtime || !chrome.runtime.id) return;
     const d = e.data;
     if (!d || typeof d !== "object") return;
     if (d.bcTagger === "ping") {
