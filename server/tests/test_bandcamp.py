@@ -286,7 +286,7 @@ def test_one_honest_product_user_agent():
 
 
 def test_interval_default_and_migration(tmp_path):
-    from bc_tagger_server.config import Settings
+    from bc_tagger_server.config import SETTINGS_VERSION, Settings
 
     fresh = Settings(path=tmp_path / "a" / "settings.json")
     assert fresh.get("bandcamp_request_interval_s") == 1.0
@@ -298,7 +298,7 @@ def test_interval_default_and_migration(tmp_path):
     # chosen after the change (the file says so): kept
     s = Settings(path=old)
     s.update({"bandcamp_request_interval_s": 2.5})
-    assert json.loads(old.read_text())["settings_version"] == 2
+    assert json.loads(old.read_text())["settings_version"] == SETTINGS_VERSION
     assert Settings(path=old).get("bandcamp_request_interval_s") == 2.5
     old.write_text(json.dumps({"bandcamp_request_interval_s": 3}))  # not the old default: kept
     assert Settings(path=old).get("bandcamp_request_interval_s") == 3

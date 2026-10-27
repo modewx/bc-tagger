@@ -1,23 +1,43 @@
 """Serve indexed audio files to the browser with HTTP Range support.
 
-Chrome can't play AIFF (or ALAC), so those are transcoded once to FLAC with ffmpeg into a
-cache under the data dir (~1 s per track) and served from there, which keeps seeking working.
-Only files that are in the index can be streamed.
+A preview (``previews``: Opus on the internal disk) is played when there is one: it starts at once and needs no
+music drive. Asked for the original (``previews=None``, ``preview=0`` on the API), or without a preview, Chrome
+can't play AIFF (or ALAC), so:
+
+* an uncompressed AIFF is served as a WAV built on the fly: the 44-byte header comes from the layout the
+  index keeps (``files.aiff_layout``, see ``aiff``), and each requested range reads only that slice of the
+  samples. So the header goes out before the drive is read, and a seek reads only what it plays. It never
+  goes through the FLAC cache (the internal disk is short of space), not even an entry made before;
+* ALAC, and AIFF that can't be read as PCM (compressed AIFF-C, more than two channels), are transcoded
+  once to FLAC with ffmpeg into a cache under the data dir.
+
+Only files that are in the index can be streamed. ``X-Bc-Source`` says what was served: ``preview``, ``wav``,
+``flac`` or ``native``. Playing an AIFF or ALAC without a preview queues one (in the background, a moment later).
 """
 
 from __future__ import annotations
 
 import hashlib
+import json
+import logging
+import os
+import re
 import shutil
 import subprocess
 import threading
 from pathlib import Path
+from typing import BinaryIO, Iterator
 
 from fastapi import HTTPException
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, Response, StreamingResponse
 
+from .aiff import WavFormat, read_layout, to_wav, wav_format, wav_header
 from .config import data_dir
+from .fsguard import is_mounted
+from .previews import PLAY_DELAY_S, PREVIEW_FORMATS, Previews
 from .store import Store
+
+log = logging.getLogger(__name__)
 
 NATIVE_TYPES = {
     ".mp3": "audio/mpeg",
@@ -30,6 +50,9 @@ NATIVE_TYPES = {
 }
 TRANSCODE_FORMATS = {"aiff", "alac"}
 CACHE_LIMIT_BYTES = 2 * 1024**3
+CACHE_CONTROL = "no-cache"  # revalidate: a URL's representation may change between plays (ETag, If-Range)
+WAV_CHUNK = 256 * 1024  # bytes read from the drive per step; a stopped player stops the reads
+_RANGE = re.compile(r"bytes=(\d*)-(\d*)")
 
 _locks: dict[str, threading.Lock] = {}
 _locks_guard = threading.Lock()
@@ -50,8 +73,12 @@ def _lock_for(key: str) -> threading.Lock:
         return _locks.setdefault(key, threading.Lock())
 
 
+def _flac_key(src: Path, size: int, mtime: float) -> str:
+    return hashlib.sha1(f"{src}|{size}|{mtime}".encode()).hexdigest()
+
+
 def transcode_to_flac(src: Path, size: int, mtime: float) -> Path:
-    key = hashlib.sha1(f"{src}|{size}|{mtime}".encode()).hexdigest()
+    key = _flac_key(src, size, mtime)
     out = cache_dir() / f"{key}.flac"
     with _lock_for(key):
         if out.is_file():
@@ -78,17 +105,229 @@ def _prune_cache() -> None:
             f.unlink(missing_ok=True)
 
 
-def stream_response(store: Store, path: str) -> FileResponse:
-    row = store.query_one("SELECT path, format, size, mtime, ext FROM files WHERE path = ?", (path,))
+def stream_response(store: Store, path: str, range_header: str | None = None, previews: Previews | None = None,
+                    src: str = "auto", queue: bool = True, if_range: str | None = None) -> Response:
+    """What a URL serves never changes under a player: ``src="preview"`` serves only the preview (404 without one,
+    never the original), ``src="original"`` only the original (WAV, FLAC or the file), even once a preview exists.
+    ``src="auto"`` picks the preview when there is one, and a play keeps what it started on. ``queue``: playing
+    the original of an AIFF/ALAC file queues its preview (a first play). Each representation has its own strong
+    ``ETag``; an ``If-Range`` that doesn't match gets the whole current representation (200), not a slice."""
+    row = store.query_one("SELECT path, root, root_kind, format, size, mtime, ext, aiff_layout FROM files WHERE path = ?",
+                          (path,))
     if row is None:
         raise HTTPException(404, "not an indexed audio file")
+    has_previews = previews is not None and row["format"] in PREVIEW_FORMATS
+    if src == "preview":
+        out = previews.lookup(row) if has_previews else None
+        if out is None:
+            raise HTTPException(404, "no preview of this file")
+        return _preview_response(previews, row, out)
+    if src == "auto" and has_previews:
+        # A player asks for "bytes=0-" to start a play and for later ranges as it goes. A play stays on what it
+        # started on: a preview made meanwhile (a first play makes one) would change the bytes under it.
+        start = _range_start(range_header)
+        if start == 0 or (start is not None and previews.playing(row["path"]) is None):
+            out = previews.lookup(row)  # a new play: the preview, if there is one
+            previews.started(row["path"], "preview" if out is not None else "original")
+        elif start is None:  # no Range: a whole-file fetch, not a player; it doesn't change what a play uses
+            out = previews.lookup(row)
+        else:
+            out = previews.lookup(row) if previews.playing(row["path"]) == "preview" else None
+        if out is not None:  # the internal disk only: no music drive needed
+            return _preview_response(previews, row, out)
+    if not is_mounted(row["path"]):
+        raise HTTPException(404, "music drive not mounted")
+    response = _original(store, row, range_header, if_range)
+    if has_previews and queue and response.status_code < 400:  # a first play: its preview, a moment later
+        previews.enqueue([row["path"]], delay=PLAY_DELAY_S, play=True)
+    return response
+
+
+class _TrackedFileResponse(FileResponse):
+    """A preview being sent: counted as open, so the store never drops it meanwhile."""
+
+    def __init__(self, previews: Previews, source: str, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._previews, self._source = previews, source
+
+    async def __call__(self, scope, receive, send) -> None:
+        self._previews.stream_opened(self._source)
+        try:
+            await super().__call__(scope, receive, send)
+        finally:
+            self._previews.stream_closed(self._source)
+
+
+def _preview_response(previews: Previews, row, out: Path) -> Response:
+    previews.touch(row["path"])  # every request: the least recently played go first
+    etag = f'"opus-{out.stem[:16]}-{out.stat().st_size}"'
+    return _TrackedFileResponse(previews, row["path"], out, media_type="audio/webm",
+                                headers={"Cache-Control": CACHE_CONTROL, "X-Bc-Source": "preview", "ETag": etag})
+
+
+def _original(store: Store, row, range_header: str | None, if_range: str | None = None) -> Response:
+    """The file itself (FileResponse honours If-Range against the ETag given), or WAV / FLAC made from it."""
     src = Path(row["path"])
-    if not src.is_file():
-        raise HTTPException(404, "file is gone (re-scan the index)")
+    headers = {"Cache-Control": CACHE_CONTROL}
     if row["format"] in TRANSCODE_FORMATS:
+        if row["format"] == "aiff":
+            response = wav_response(store, row, range_header, if_range)
+            if response is not None:
+                return response
+        if not src.is_file():
+            raise HTTPException(404, "file is gone (re-scan the index)")
         out = transcode_to_flac(src, row["size"], row["mtime"])
-        return FileResponse(out, media_type="audio/flac", headers={"Cache-Control": "private, max-age=3600"})
+        return FileResponse(out, media_type="audio/flac", headers={
+            **headers, "X-Bc-Source": "flac", "ETag": f'"flac-{row["size"]}-{row["mtime"]}"'})
+    try:
+        st = src.stat()
+    except FileNotFoundError:
+        raise HTTPException(404, "file is gone (re-scan the index)") from None
     media = NATIVE_TYPES.get(row["ext"])
     if media is None:
         raise HTTPException(415, f"can't stream {row['ext']} files")
-    return FileResponse(src, media_type=media, headers={"Cache-Control": "private, max-age=3600"})
+    return FileResponse(src, media_type=media, stat_result=st, headers={
+        **headers, "X-Bc-Source": "native", "ETag": f'"orig-{st.st_size}-{st.st_mtime}"'})
+
+
+# -- AIFF as WAV -----------------------------------------------------------------------------
+
+
+def _open_source(path: Path) -> BinaryIO:
+    return open(path, "rb", buffering=0)
+
+
+def _open_current(store: Store, row):
+    """``(file opened for reading, row)``. A file changed since it was indexed is indexed again first, so its
+    kept layout (and length) match what is read."""
+    try:
+        f = _open_source(Path(row["path"]))
+    except FileNotFoundError:
+        raise HTTPException(404, "file is gone (re-scan the index)") from None
+    st = os.fstat(f.fileno())
+    if (st.st_size, st.st_mtime) != (row["size"], row["mtime"]):
+        from .indexer import _flush, file_record
+
+        log.info("%s changed since it was indexed: indexing it again", row["path"])
+        _flush(store, [file_record(Path(row["path"]), row["root"], row["root_kind"], st)])
+        row = store.query_one("SELECT path, root, root_kind, format, size, mtime, ext, aiff_layout FROM files "
+                              "WHERE path = ?", (row["path"],))
+    return f, row
+
+
+def wav_response(store: Store, row, range_header: str | None, if_range: str | None = None) -> Response | None:
+    """The uncompressed AIFF in ``row`` as a WAV, or None to transcode it instead. An ``If-Range`` other than this
+    WAV's ETag gets the whole WAV."""
+    layout = json.loads(row["aiff_layout"]) if row["aiff_layout"] else None
+    source = None
+    if layout is None:  # indexed before layouts were kept: read it now (a few small reads), once
+        source, fresh = _open_current(store, row)
+        if fresh is not row:  # indexed again just now, layout included
+            row, layout = fresh, json.loads(fresh["aiff_layout"]) if fresh["aiff_layout"] else None
+        try:
+            layout = layout or read_layout(source, row["size"])
+        except Exception:  # noqa: BLE001 - a broken header: let ffmpeg try
+            layout = None
+        if layout is None:
+            source.close()
+            return None
+        if not row["aiff_layout"]:
+            with store.tx() as c:
+                c.execute("UPDATE files SET aiff_layout = ?, channels = ? WHERE path = ? AND size = ? AND mtime = ?",
+                          (json.dumps(layout), layout["channels"], row["path"], row["size"], row["mtime"]))
+    fmt = wav_format(layout)
+    if fmt is None:  # compressed AIFF-C, or more than two channels
+        if source is not None:
+            source.close()
+        return None
+    header = wav_header(layout, fmt)
+    total = len(header) + layout["size"]
+    etag = f'"wav-{row["size"]}-{row["mtime"]}"'
+    headers = {"Accept-Ranges": "bytes", "Cache-Control": CACHE_CONTROL, "X-Bc-Source": "wav", "ETag": etag}
+    if if_range is not None and if_range.strip() != etag:  # a range of something else: send this one whole
+        range_header = None
+    try:
+        span = parse_range(range_header, total)
+    except RangeNotSatisfiable:
+        if source is not None:
+            source.close()
+        return Response(status_code=416, headers={**headers, "Content-Range": f"bytes */{total}"})
+    start, end = span or (0, total - 1)
+    if end >= len(header) and source is None:  # sample data asked for: only now is the drive read
+        source, fresh = _open_current(store, row)
+        if fresh is not row:  # changed since it was indexed: describe it as it is now
+            source.close()
+            return wav_response(store, fresh, range_header, if_range)
+    elif end < len(header) and source is not None:
+        source.close()
+        source = None
+    headers["Content-Length"] = str(end - start + 1)
+    if span:
+        headers["Content-Range"] = f"bytes {start}-{end}/{total}"
+    return StreamingResponse(_wav_body(source, layout["offset"], fmt, header, start, end),
+                             status_code=206 if span else 200, media_type="audio/wav", headers=headers)
+
+
+def _wav_body(source: BinaryIO | None, offset: int, fmt: WavFormat, header: bytes,
+              start: int, end: int) -> Iterator[bytes]:
+    """Bytes ``start``..``end`` (inclusive) of the WAV: header bytes as they are, sample bytes read in
+    whole samples from ``offset`` in the source and reordered."""
+    try:
+        if start < len(header):
+            yield header[start:end + 1]
+        a, b = max(start - len(header), 0), end + 1 - len(header)  # the sample bytes wanted, [a, b)
+        pos = a - a % fmt.width
+        while pos < b:
+            stop = min(b, pos + WAV_CHUNK)
+            stop += -stop % fmt.width  # whole samples (the data is whole frames, so this stays inside it)
+            buf = _read_at(source, offset + pos, stop - pos)
+            yield to_wav(buf, fmt)[max(a - pos, 0):b - pos]
+            pos = stop
+    finally:
+        if source is not None:
+            source.close()
+
+
+def _read_at(f: BinaryIO, at: int, n: int) -> bytes:
+    f.seek(at)
+    parts, got = [], 0
+    while got < n:
+        part = f.read(n - got)
+        if not part:  # shorter than when it was indexed: keep the promised length with silence
+            parts.append(b"\x00" * (n - got))
+            break
+        parts.append(part)
+        got += len(part)
+    return b"".join(parts)
+
+
+def _range_start(value: str | None) -> int | None:
+    """Where a single ``bytes=`` range starts (-1 for a suffix range), or None without one."""
+    m = _RANGE.fullmatch((value or "").strip())
+    if not m or not (m[1] or m[2]):
+        return None
+    return int(m[1]) if m[1] else -1
+
+
+class RangeNotSatisfiable(Exception):
+    pass
+
+
+def parse_range(value: str | None, total: int) -> tuple[int, int] | None:
+    """``(start, end)`` (inclusive) of a single ``bytes=`` range, or None to send everything (no Range,
+    or one this doesn't serve, like several ranges). Raises ``RangeNotSatisfiable`` past the end."""
+    m = _RANGE.fullmatch((value or "").strip())
+    if not m or not (m[1] or m[2]):
+        return None
+    if m[1]:
+        start = int(m[1])
+        end = min(int(m[2]), total - 1) if m[2] else total - 1
+        if m[2] and int(m[2]) < start:
+            return None  # invalid: ignored, as the RFC says
+        if start >= total:
+            raise RangeNotSatisfiable
+        return start, end
+    suffix = int(m[2])
+    if suffix == 0 or total == 0:
+        raise RangeNotSatisfiable
+    return max(total - suffix, 0), total - 1

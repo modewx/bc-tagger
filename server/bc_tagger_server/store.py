@@ -48,9 +48,22 @@ CREATE TABLE IF NOT EXISTS files (
     created REAL,
     parsed TEXT,
     scanned_at TEXT NOT NULL,
-    error TEXT
+    error TEXT,
+    channels INTEGER,
+    aiff_layout TEXT  -- AIFF only: where the samples are and how they're stored (aiff.read_layout)
 );
 CREATE INDEX IF NOT EXISTS files_root ON files(root);
+-- Opus previews of AIFF/ALAC files (previews.py), one per source path, for the version it was made from.
+CREATE TABLE IF NOT EXISTS previews (
+    path TEXT PRIMARY KEY,
+    size INTEGER NOT NULL,
+    mtime REAL NOT NULL,
+    file TEXT NOT NULL,  -- under <data dir>/previews/
+    bytes INTEGER NOT NULL,
+    created_at REAL NOT NULL,
+    played_at REAL NOT NULL
+);
+CREATE INDEX IF NOT EXISTS previews_played ON previews(played_at);
 CREATE INDEX IF NOT EXISTS files_release_dir ON files(release_dir);
 
 -- Files per root, kept by triggers on every write to files, so the index status never counts them.
@@ -237,6 +250,9 @@ class Store:
         cols = {r[1] for r in self._conn.execute("PRAGMA table_info(files)")}
         if "created" not in cols:  # file creation time (st_birthtime), added for date matching
             self._conn.execute("ALTER TABLE files ADD COLUMN created REAL")
+        if "channels" not in cols:  # rows indexed before these are filled when re-read (AIFF: when played)
+            self._conn.execute("ALTER TABLE files ADD COLUMN channels INTEGER")
+            self._conn.execute("ALTER TABLE files ADD COLUMN aiff_layout TEXT")
         if self._conn.execute("SELECT 1 FROM meta WHERE key = 'file_counts_v1'").fetchone() is None:
             # the triggers keep file_counts from now on; count what's there once
             with self.tx() as c:
@@ -313,7 +329,9 @@ class Store:
 
         Python's sqlite3 lets go of the GIL for every row it steps through and has to take it back for the next.
         While another thread is busy in Python (scoring, say), each take-back waits its turn, so reading a few
-        thousand rows can take seconds. One aggregated row takes it back once."""
+        thousand rows can take seconds. One aggregated row takes it back once.
+
+        JSON keeps 15 significant digits of a REAL: don't use it for values compared exactly later (an mtime)."""
         cols = ", ".join(columns)
         row = self.query_one(f"SELECT json_group_array(json_array({cols})) AS j FROM ({sql})", params)
         return [dict(zip(columns, values)) for values in json.loads(row["j"])]

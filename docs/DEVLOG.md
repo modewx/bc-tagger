@@ -165,6 +165,72 @@ Tests never touch Bandcamp, the music drive or a real rekordbox library: Bandcam
   - New: another file of the same song (same normalized artist and title, length within 2 s) isn't added.
     It's listed in the diff as `entries_same_song`, "already in playlist (other file)".
   - A file skipped for all its playlists isn't added to the library. `add_same_song: true` adds them anyway.
+- **Playback starts fast and reads only what's played (user's request: "save a cache of file length and other
+  metadata, to minimize disk reads"):**
+  - Before: the first play of an AIFF (755 of the 813 located items) had ffmpeg read the whole 50+ MB file from
+    the music drive and encode it to FLAC before the first byte went out.
+  - Now an uncompressed AIFF is served as a WAV made on the fly:
+    - The 44-byte header comes from the AIFF layout the index keeps (`files.aiff_layout`), so it needs no read.
+    - A range reads only that slice of the samples and reorders their bytes (big-endian to little-endian;
+      AIFF-C `sowt` as is; `fl32`/`fl64` as float WAV; 8-bit signed to unsigned).
+    - The layout is read at index time (scan, quick scan, Import from Files, the watcher, downloads) with a few
+      small reads. Rows indexed before this get one on first play.
+    - ALAC and compressed AIFF-C are still transcoded to FLAC.
+    - Follow-up (the internal disk had 6.5 GB free): AIFF never goes through the FLAC cache, and FLACs of AIFFs
+      cached before aren't served. 64 of the cache's 66 files (2.01 of 2.07 GB) came from AIFF; the cache is
+      left as it is until the user decides. A file changed since it was indexed is indexed again when played,
+      instead of transcoded. All 802 located AIFFs are plain 16 or 24-bit stereo, so all stream as WAV.
+  - Item views give each located file `duration`, `sample_rate`, `bits` and `channels`, from one bulk query:
+    no file access.
+  - On the live server, for AIFFs not in the FLAC cache, with the drive awake:
+    - **Mid-file range (256 KB): first byte 0.76–2.3 s → 0.011–0.067 s**, with 0.019–0.093 s for the whole
+      range (including the one-time layout read).
+    - **Drive read per first play: 49–115 MB → about 0.3 MB.** The header alone takes 4 ms and reads nothing.
+    - A real 58 MB Bandcamp AIFF served whole decodes to exactly ffmpeg's samples.
+  - A sleeping drive still adds its spin-up (disk sleep is 10 min) to the first range that reads samples;
+    these numbers had the drive awake.
+- **Previews (user decided: "Cap at 3GB"):** Opus 96 kbps WebM copies of AIFF/ALAC files on the internal disk
+  (about 4 MB per 5-minute track), played instead of the original when there is one: no drive spin-up, and
+  they play with the drive unplugged.
+  - Made only by work the user started: an import commit, a finished download, a first play (in the
+    background), and a build job for a selection (with progress and cancel, on its own two workers under
+    `nice`, so scans and exports don't wait for it). Page loads only read the `previews` table.
+  - Capped at `preview_cache_gb` (3), least recently played first. Never written when the internal disk would
+    drop below 2 GB free; that's skipped and counted in the status.
+  - `preview=0` on the stream always plays the original and builds nothing, so the app can compare the two.
+    `X-Bc-Source` says what was served (`preview`, `wav`, `flac`, `native`).
+  - Found live right after: a first play's preview was ready 3 s in, and that play's next ranges got the
+    preview's bytes (a 200, then 416s past its end), so the track stopped. Now a play stays on what it started
+    on: `bytes=0-` starts a play; later ranges keep its source.
+  - Live: a preview's first 64 KB of audio in 2–25 ms with nothing read from the drive, against 0.26 s for WAV
+    from the awake drive. Encodes take 0.6–3.3 s per track (0.7–5.4 MB). The sleeping-drive case wasn't
+    captured: the drive never stayed idle for 11 minutes.
+- **Playback froze after a first play (user, import `imp-45e20d7a`):** a seek after the first play's preview was
+  ready asked for an offset of the 50 MB WAV and got the 4 MB preview, or a 416; the audio stayed dead. The
+  per-play memory of `f780ca2` covered one server process; the rule now holds per URL:
+  - `src=preview` serves only the preview (404 without one), `src=original` only the original, even once a
+    preview exists. Players choose when they're created and fall back to `src=original` on a 404.
+  - Strong `ETag` per representation, `If-Range` honoured (a mismatch gets the whole current representation),
+    `Cache-Control: no-cache`.
+  - A preview being sent is never dropped by the cap, and each request bumps its last-played time.
+- **Preview defaults (user: "Raise the preview cap to 3.5 GB and keep 96 kbps"):** `preview_cache_gb` 3.5 and
+  `preview_bitrate_kbps` 96. A stored 3 (the old default) becomes 3.5 (settings version 3).
+- The sleeping-drive measurement was dropped: the drive never idled while the user played, and it's unplugged
+  now. Nothing here was measured from a sleeping drive.
+- **Build all previews (user: a button that converts all tracks, "parallelized for max speed"):**
+  `POST /api/previews/build {all: true}` (or `{ids}`), planned first (`dry_run`): what fits the cap and the 2 GB
+  guard, in collection order, and what's left out.
+  - One reader reads each file once, whole, in path order, into a queue of 3 files / 300 MB; `preview_build_parallel`
+    encoders (cores − 2 = 10 here) take them through stdin. The drive sees one sequential reader, never several.
+  - Found while measuring: `subprocess.communicate()` feeds stdin 512 bytes per step, holding the GIL each time, so
+    10 encoders were slower than 2 (20 files in 49 s vs 33 s). Writing 1 MB blocks: 10.6 s.
+  - On 20 local AIFFs (1.47 GB, 137 min; the SSD, not the HDD): 138 MB/s with 10 encoders, 83 with 4, 44 with 2.
+    All 800 files (52.7 GB) would take 6.3 min if the drive kept up; from the HDD the drive sets the pace (about
+    7 min at 120 MB/s).
+- **Select all in an import, saved in one call (coordinator: ticks were one PUT per row, so leaving the page lost
+  some):** `PUT /api/import/<id>/rows {ns, changes: {checked?, tags?}}` → `{updated, rows}`. All rows and the batch's
+  counts in one transaction, one `import` event. 1,000 rows in one call in a test; a failure at row 500 leaves all
+  1,000 as they were.
 
 ## App and extension (`app/`, `extension/`, `shared/`, branch `claude/local-collection-ui-e8f6f6`)
 

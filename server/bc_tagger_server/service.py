@@ -12,6 +12,7 @@ from . import __version__
 from .config import Settings
 from .items import is_valid_id, item_tags, matches_query, seed_from_export
 from .jobs import JobManager
+from .previews import Previews
 from .store import Store, now_iso
 from .views import ViewData, item_view
 
@@ -25,6 +26,7 @@ class Service:
         self.settings = settings or Settings()
         self.store = store or Store()
         self.jobs = JobManager()
+        self.previews = Previews(self.store, self.settings, self.jobs.bus.publish)
         # Jobs live in memory: a batch whose job ran under another boot_id was interrupted by a restart.
         self.boot_id = __import__("secrets").token_hex(4)
         self.committing: set[str] = set()  # import batches being committed by this process
@@ -795,10 +797,46 @@ class Service:
         return self.jobs.submit("download-items",
                                 lambda ctx: downloads.run(self, refs, force, ctx, full_release=full_release))
 
-    def stream_file(self, request, path: str):
+    def stream_file(self, request, path: str, src: str = "auto", queue: bool = True):
+        """``src``: "preview" (only the preview, 404 without one), "original" (never the preview) or "auto".
+        ``queue=False``: playing the original doesn't make a preview (comparing the two)."""
         from .stream import stream_response
 
-        return stream_response(self.store, path)
+        return stream_response(self.store, path, request.headers.get("range"), self.previews, src, queue,
+                               request.headers.get("if-range"))
+
+    # -- previews ---------------------------------------------------------------------------
+
+    def preview_build(self, ids: list[str] | None = None, everything: bool = False,
+                      dry_run: bool = False) -> dict[str, Any]:
+        """Previews for the located AIFF/ALAC files of these items (``everything``: the whole collection, in "#"
+        order): ``{plan}`` for a dry run, else ``{job_id, plan}``. The build runs alongside other jobs; progress
+        on SSE ``job``. Raises ``BuildRunning`` while another build runs."""
+        from .collection import all_items, by_order
+        from .previews import located_paths
+
+        if everything:
+            ids = [it["id"] for it in by_order(all_items(self.store))]
+        plan = self.previews.plan(located_paths(self.store, ids or []))
+        public = {k: v for k, v in plan.items() if not k.startswith("_")}
+        if dry_run:
+            return {"plan": public}
+        running = self.previews.batch_job()
+        if running:
+            from .previews import BuildRunning
+
+            raise BuildRunning(running)
+        ctx = self.jobs.track("previews")
+        ctx.progress(0, plan["planned"], f"previews 0/{plan['planned']}")
+        self.previews.start_batch(ctx.job.id, plan, lambda fields: ctx.progress(**fields),
+                                  lambda result, error: ctx.finish(result, error))
+        return {"job_id": ctx.job.id, "plan": public}
+
+    def cancel_preview_build(self, job_id: str) -> dict[str, Any]:
+        job = self.jobs.get(job_id)
+        if job is None or job.kind != "previews":
+            raise KeyError(job_id)
+        return {"job_id": job_id, "cancelled": self.previews.cancel_batch(job_id)}
 
     # -- imports (Phase 3) --------------------------------------------------------------
 

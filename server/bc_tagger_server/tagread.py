@@ -133,6 +133,7 @@ def read_tags(path: Path) -> dict:
         bitrate=int(bitrate) if bitrate else None,
         sample_rate=getattr(info, "sample_rate", None),
         bits=getattr(info, "bits_per_sample", None),
+        channels=getattr(info, "channels", None),
         codec=codec,
         format=classify_format(path.suffix, codec, bitrate),
     )

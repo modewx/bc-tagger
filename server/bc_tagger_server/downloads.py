@@ -121,12 +121,12 @@ def _index_folder(svc, folder: str | None) -> int:
     if not folder or not Path(folder).is_dir():
         return 0
     roots = svc.settings.roots()
-    n = 0
+    indexed = []
     for p in sorted(Path(folder).rglob("*")):
         if p.is_file() and p.suffix.lower() in AUDIO_EXTS and not p.name.startswith("."):
-            index_file(svc.store, p, roots)
-            n += 1
-    return n
+            indexed.append(index_file(svc.store, p, roots)["path"])
+    svc.previews.enqueue(indexed)  # while the files are fresh (AIFF/ALAC only; previews.py)
+    return len(indexed)
 
 
 def _album_of(item: dict) -> str | None:

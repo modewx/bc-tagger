@@ -79,6 +79,7 @@ def make_service(tmp_path):
         settings.update(changes)
         svc = Service(settings=settings, store=Store(path=tmp_path / "data" / "server.db"), seed=False)
         svc.default_scan_mode = "full"  # tests add files between calls; quick scans are tested explicitly
+        svc.previews.autostart = False  # queued previews wait for previews.run_pending() (test_previews)
         if items is not None:
             svc.store.upsert_items(items, full=True)
             svc.store.set_tags(tags or sorted({t for it in items.values() for t in it.get("tags", [])}))
@@ -87,6 +88,7 @@ def make_service(tmp_path):
 
     yield _make
     for svc in services:
+        svc.previews.close()
         svc.jobs.shutdown()
         svc.store.close()
 

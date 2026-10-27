@@ -14,7 +14,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, JSONResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.concurrency import run_in_threadpool
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 from .config import PRESETS, SettingsError
 from .service import Service
@@ -83,6 +83,12 @@ class ExportBody(SelectionBody):
     add_same_song: bool = False
 
 
+class PreviewBuildBody(BaseModel):
+    ids: Optional[list[str]] = Field(default=None, max_length=20000)
+    all: bool = False  # the whole collection, in "#" order
+    dry_run: bool = False  # only the plan
+
+
 class NamesBody(BaseModel):
     names: list[str]
     target: Optional[Literal["test", "main"]] = None  # also as ?target=: read that library, not the saved one
@@ -94,6 +100,17 @@ class ImportBody(BaseModel):
     default_tags_all: bool = False  # add the default tags to every row, not only untagged ones
     lookup: Literal["server", "browser"] = "server"  # browser: the extension runs the Bandcamp lookups
     name: Optional[str] = None
+
+
+class BulkRowChanges(BaseModel):
+    model_config = ConfigDict(extra="forbid")  # only these two apply to many rows at once
+    checked: Optional[bool] = None
+    tags: Optional[list[str]] = None
+
+
+class RowsBody(BaseModel):
+    ns: list[int] = Field(min_length=1, max_length=20000)
+    changes: BulkRowChanges
 
 
 class RowChanges(BaseModel):
@@ -173,7 +190,7 @@ def create_app(service: Service | None = None) -> FastAPI:
         allow_origin_regex=ALLOWED_ORIGIN_RE,
         allow_methods=["*"],
         allow_headers=["*"],
-        expose_headers=["X-Total-Count"],
+        expose_headers=["X-Total-Count", "X-Bc-Source"],
     )
 
     @app.middleware("http")
@@ -338,6 +355,11 @@ def create_app(service: Service | None = None) -> FastAPI:
     @app.get("/api/import/{batch_id}")
     def import_get(batch_id: str) -> dict:
         return _import_call(imp.get_batch, svc, batch_id)
+
+    @app.put("/api/import/{batch_id}/rows")
+    def import_rows(batch_id: str, body: RowsBody) -> dict:
+        """``{ns, changes: {checked?, tags?}}`` → ``{updated, rows: [{n, checked, tags}]}``: all or none."""
+        return _import_call(imp.update_rows, svc, batch_id, body.ns, body.changes.model_dump(exclude_unset=True))
 
     @app.put("/api/import/{batch_id}/rows/{n}")
     def import_row(batch_id: str, n: int, body: RowChanges) -> dict:
@@ -612,13 +634,48 @@ def create_app(service: Service | None = None) -> FastAPI:
             updated = svc.settings.update(changes)
         except (SettingsError, ValueError, TypeError) as e:
             raise HTTPException(400, str(e)) from e
+        if "preview_cache_gb" in changes:  # a smaller cap drops the least recently played now
+            svc.previews.prune()
         return {**updated, "presets": PRESETS, "derived": svc.settings_derived()}
 
     # -- files & dev -------------------------------------------------------------------
 
     @app.get("/api/files/stream")
-    def stream_file(request: Request, path: str) -> Response:
-        return svc.stream_file(request, path)
+    def stream_file(request: Request, path: str, src: Optional[Literal["auto", "preview", "original"]] = None,
+                    preview: bool = True) -> Response:
+        """``src=preview``: only the preview (404 without one); ``src=original``: only the original (WAV for AIFF,
+        FLAC for ALAC, else the file), even once a preview exists, and its first play queues a preview. No ``src``:
+        the preview when there is one. ``preview=0``: ``src=original`` that makes no preview (comparing the two).
+        ``X-Bc-Source``: preview | wav | flac | native; ``ETag`` per representation, ``If-Range`` honoured."""
+        return svc.stream_file(request, path, src or ("auto" if preview else "original"), queue=preview)
+
+    # -- previews (previews.py) --------------------------------------------------------
+
+    @app.get("/api/previews/status")
+    def previews_status() -> dict:
+        return svc.previews.status()
+
+    @app.post("/api/previews/build")
+    def previews_build(body: PreviewBuildBody) -> dict:
+        from .previews import BuildRunning
+
+        if body.all == (body.ids is not None):
+            raise HTTPException(400, "send either all: true or ids")
+        try:
+            return svc.preview_build(body.ids, body.all, body.dry_run)
+        except BuildRunning as e:
+            raise HTTPException(409, f"a preview build is running ({e})") from None
+
+    @app.post("/api/previews/build/{job_id}/cancel")
+    def previews_cancel(job_id: str) -> dict:
+        try:
+            return svc.cancel_preview_build(job_id)
+        except KeyError:
+            raise HTTPException(404, f"no preview build {job_id}") from None
+
+    @app.delete("/api/previews")
+    def previews_clear() -> dict:
+        return svc.previews.clear()
 
     @app.get("/api/dev/build-id")
     def build_id() -> dict:

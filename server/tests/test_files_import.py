@@ -158,6 +158,8 @@ def test_commit_numbers_in_row_order_and_confirms_the_files(tree):
     assert log["batch"]["source"] == "files" and [f["path"] for f in log["batch"]["folders"]] == [str(coll),
                                                                                                     str(complete)]
     assert log["counts"]["unchecked"] == 2 and log["rows"][0]["located"]["path"] == str(files["first_aiff"])
+    # previews of the AIFFs it located (the FLACs play as they are)
+    assert svc.previews.queued() == [str(files["first_aiff"]), str(files["second"])]
 
 
 def test_since_and_defaults(tree):
