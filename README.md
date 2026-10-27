@@ -68,7 +68,13 @@ reachable, edits are queued on the server and applied by the extension on its ne
   - An open import survives leaving the page; the header shows where it is.
 - **Settings → General:** music folders, matching, downloads (folder and format), Bandcamp request pacing, the
   lookup source (Bandcamp / MusicBrainz / both), the import log folder (not inside a music folder or on the music
-  drive); **Rekordbox:** the target library and tag → playlist mapping.
+  drive); **Rekordbox:** the Target library (Test / Main), whether bc-tagger may write to the main one, and the tag →
+  playlist mapping.
+- **Main library:** picking Main is safe on its own: exports to it stop at the dry run, which says writes are
+  locked and links to **Allow bc-tagger to write to my main rekordbox collection**. Ticking that asks for a backup
+  first; unticking it locks writes again and keeps Main. The header says **MAIN LIBRARY · read-only** or **MAIN
+  LIBRARY · writes enabled** (nothing for the test library). The Playlists marks follow the Target library radios before
+  you save.
 
 Bandcamp is only reached by the server's paced lookups (if enabled) and by the extension in your own Chrome. The
 first "Client Challenge" (bot check) stops it and says so.
@@ -114,7 +120,7 @@ Runs the extension, server and local app together in a Playwright Chromium with 
   real server (mapping, linking, browser lookups, downloads, re-locate, browse), settings, and rekordbox dry runs
   and a sandbox write.
 
-A full run (67 tests) takes about 2 minutes (2026-10-26: 110–147 s). For a quick check, run a subset by
+A full run (70 tests) takes about 2 minutes (2026-10-26: 110–147 s). For a quick check, run a subset by
 name. Include `Import \(replace\)`, which loads the test collection the others use:
 
 ```bash

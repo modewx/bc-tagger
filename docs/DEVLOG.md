@@ -108,6 +108,13 @@ npm run test:e2e                         # Playwright e2e: own profile, server :
 
 ### 2026-10-26
 
+- **Main library, read-only or writable** (user request, A's `main_writes_locked`): Settings → Rekordbox has
+  Target library radios (Test / Main, `rekordbox_target`) and, separately, Allow writes (`allow_main_writes`, backup
+  dialog). Before, ticking Allow was what switched to Main. The radios reload the Playlists marks from that
+  library (`?target=`) before Save; a slower earlier load is dropped. Export and Transfer dialogs on a locked main
+  show the blocker with a link to the checkbox, and Confirm stays disabled. The header shows read-only (amber) or
+  writes enabled. e2e: two sandbox libraries from `server/scripts/make_sandbox_library.py`, and a locked dry run
+  on a copy that's checked unchanged.
 - **Shared collection page:**
   - The extension's built-in page and the local app use the same table (`shared/collection/`).
   - Column widths are stored by column id. Adding a column once shifted them onto the wrong columns.

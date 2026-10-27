@@ -693,6 +693,7 @@ test("local app: a loaded album embed survives an unrelated update of its row", 
 // nothing here opens or writes ~/Library/Pioneer/rekordbox.
 
 const SANDBOX_MAIN = path.join(E2E, "main-sandbox", "master.db");
+const PYTHON = process.env.E2E_PYTHON || "/Users/alvaroh/Projects/auto-rekordbox/.venv/bin/python"; // the server's (has mutagen)
 const put = (body) =>
   api("/api/settings", { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
 
@@ -802,46 +803,130 @@ test("Settings: unticking Auto prefills unmapped tags (saved ones untouched); a 
   }
 });
 
-test("Settings: the main-collection opt-in asks first, and the header shows MAIN LIBRARY", async () => {
-  await put({ rekordbox_main_db_path: SANDBOX_MAIN });
+test("Settings → Rekordbox: Library (Test / Main) and Allow writes are separate; unticking Allow keeps Main; the header says read-only or writes enabled", async () => {
+  await put({ rekordbox_main_db_path: SANDBOX_MAIN, rekordbox_target: "test", allow_main_writes: false });
   const page = await context.newPage();
-  await page.goto(SERVER + "/settings/#rekordbox");
-  await page.waitForSelector("#f_allow_main_writes");
-  assert.equal(await page.isVisible("#mainLibraryBanner"), false);
+  const saved = async () => {
+    await page.click("#saveBtn");
+    await page.waitForFunction(() => /Saved/.test(document.getElementById("saveState").textContent));
+    return api("/api/settings").then((d) => d.settings || d);
+  };
+  try {
+    await page.goto(SERVER + "/settings/#rekordbox");
+    await page.waitForSelector("#f_target_test");
+    assert.equal(await page.isChecked("#f_target_test"), true);
+    assert.equal(await page.isVisible("#mainLibraryBanner"), false, "no banner for the test library");
 
-  await page.check("#f_allow_main_writes").catch(() => {}); // the dialog opens and un-ticks it
-  await page.waitForSelector("#mainLibraryConfirm");
-  assert.match(await page.textContent("#mainLibraryConfirm"), /Backup Library/);
-  assert.equal(await page.isDisabled("#mainLibraryConfirm .dialog-confirm"), true, "needs the backup acknowledgement");
-  await page.click("#mainLibraryConfirm .dialog-cancel");
-  assert.equal(await page.isChecked("#f_allow_main_writes"), false, "cancel keeps the test library");
+    // Main with writes locked: read-only.
+    await page.check("#f_target_main");
+    let s = await saved();
+    assert.deepEqual([s.rekordbox_target, s.allow_main_writes], ["main", false]);
+    await page.waitForFunction(() => document.getElementById("mainLibraryBanner").textContent === "MAIN LIBRARY · read-only");
+    assert.match(await page.textContent("#mainTargetBanner"), /read-only/);
 
-  await page.check("#f_allow_main_writes").catch(() => {});
-  await page.waitForSelector("#mainLibraryConfirm");
-  await page.check("#mainLibraryConfirm .dialog-ack input");
-  await page.click("#mainLibraryConfirm .dialog-confirm");
-  assert.equal(await page.isChecked("#f_allow_main_writes"), true);
-  await page.click("#saveBtn");
-  await page.waitForFunction(() => /Saved/.test(document.getElementById("saveState").textContent));
-  let s = await api("/api/settings");
-  assert.equal(s.rekordbox_target, "main");
-  assert.equal(s.allow_main_writes, true);
-  assert.equal(s.rekordbox_main_db_path, SANDBOX_MAIN);
-  assert.equal(await page.isVisible("#mainLibraryBanner"), true);
+    // Allow asks first (a backup acknowledgement); cancel keeps it locked.
+    await page.check("#f_allow_main_writes").catch(() => {}); // the dialog opens and un-ticks it
+    await page.waitForSelector("#mainLibraryConfirm");
+    assert.match(await page.textContent("#mainLibraryConfirm"), /Backup Library/);
+    assert.equal(await page.isDisabled("#mainLibraryConfirm .dialog-confirm"), true, "needs the backup acknowledgement");
+    await page.click("#mainLibraryConfirm .dialog-cancel");
+    assert.equal(await page.isChecked("#f_allow_main_writes"), false);
+    await page.check("#f_allow_main_writes").catch(() => {});
+    await page.waitForSelector("#mainLibraryConfirm");
+    await page.check("#mainLibraryConfirm .dialog-ack input");
+    await page.click("#mainLibraryConfirm .dialog-confirm");
+    s = await saved();
+    assert.deepEqual([s.rekordbox_target, s.allow_main_writes, s.rekordbox_main_db_path], ["main", true, SANDBOX_MAIN]);
+    await page.waitForFunction(() => document.getElementById("mainLibraryBanner").textContent === "MAIN LIBRARY · writes enabled");
+    const app = await context.newPage();
+    await app.goto(SERVER + "/");
+    await app.waitForFunction(() => document.getElementById("mainLibraryBanner").textContent === "MAIN LIBRARY · writes enabled");
+    await app.close();
 
-  const app = await context.newPage();
-  await app.goto(SERVER + "/");
-  await app.waitForSelector("#mainLibraryBanner:not([hidden])");
-  await app.close();
+    // Unticking Allow locks writes and keeps Main.
+    await page.uncheck("#f_allow_main_writes");
+    s = await saved();
+    assert.deepEqual([s.rekordbox_target, s.allow_main_writes], ["main", false]);
+    assert.equal(await page.isChecked("#f_target_main"), true);
+    await page.waitForFunction(() => document.getElementById("mainLibraryBanner").textContent === "MAIN LIBRARY · read-only");
 
-  await page.uncheck("#f_allow_main_writes");
-  await page.click("#saveBtn");
-  await page.waitForFunction(() => /Saved/.test(document.getElementById("saveState").textContent));
-  s = await api("/api/settings");
-  assert.equal(s.rekordbox_target, "test");
-  assert.equal(s.allow_main_writes, false);
-  assert.equal(await page.isVisible("#mainLibraryBanner"), false);
-  await page.close();
+    // Back to Test: no banner.
+    await page.check("#f_target_test");
+    s = await saved();
+    assert.equal(s.rekordbox_target, "test");
+    await page.waitForFunction(() => document.getElementById("mainLibraryBanner").hidden);
+  } finally {
+    await put({ rekordbox_target: "test", allow_main_writes: false });
+    await page.close();
+  }
+});
+
+test("Settings → Rekordbox: the Playlists marks follow the Library radios before Save (two sandbox libraries)", async (t) => {
+  const template = process.env.E2E_TEMPLATE_DB || path.join(process.env.HOME, "Library/Pioneer/rekordbox_test/master.db");
+  if (!fs.existsSync(template)) {
+    t.skip(`no template DB at ${template} (test library switched out?)`);
+    return;
+  }
+  // Copies of the template, each with a playlist only it has (the script refuses ~/Library/Pioneer).
+  const dir = path.join(E2E, "marks");
+  fs.rmSync(dir, { recursive: true, force: true });
+  const sandbox = (name, playlist, ...flags) =>
+    execFileSync(PYTHON, [path.join(ROOT, "server", "scripts", "make_sandbox_library.py"), path.join(dir, name), "--playlist", playlist, ...flags], {
+      env: { ...process.env, BCT_TEST_TEMPLATE_DB: template },
+    })
+      .toString()
+      .trim();
+  const testDb = sandbox("test", "/E2E Marks/Only Test", "--test-marker");
+  const mainDb = sandbox("main", "/E2E Marks/Only Main");
+  const { rekordbox_db_path: savedTestDb } = await api("/api/settings");
+  await put({
+    rekordbox_db_path: testDb,
+    rekordbox_main_db_path: mainDb,
+    rekordbox_target: "test",
+    allow_main_writes: false,
+    tag_playlist_mode: "custom",
+    tag_playlist_map: { must: ["/E2E Marks/Only Test"], pool: ["/E2E Marks/Only Main"] },
+  });
+  const page = await context.newPage();
+  const marks = () =>
+    page.evaluate(() =>
+      ["must", "pool"].map((tag) => document.querySelector(`.map-row[data-tag="${tag}"] .map-entry .map-status`).textContent)
+    );
+  const marksAre = (must, pool) =>
+    page.waitForFunction(
+      ([m, p]) => {
+        const st = (tag) => (document.querySelector(`.map-row[data-tag="${tag}"] .map-entry .map-status`) || {}).textContent || "";
+        return m.test(st("must")) && p.test(st("pool"));
+      },
+      [must, pool]
+    );
+  const EXISTS = /^exists · \d+ tracks?$/;
+  const MISSING = /^does not exist/;
+  try {
+    await page.goto(SERVER + "/settings/#rekordbox");
+    await mappingLoaded(page);
+    await marksAre(EXISTS, MISSING).catch(async (e) => assert.fail(`test library marks: ${await marks()}`));
+    await page.check("#f_target_main"); // not saved: the marks read the main library
+    await marksAre(MISSING, EXISTS).catch(async (e) => assert.fail(`main library marks: ${await marks()}`));
+    assert.equal((await api("/api/settings")).rekordbox_target, "test", "a radio alone doesn't save");
+    await page.check("#f_target_test");
+    await marksAre(EXISTS, MISSING);
+    // Quick switches: the last one picked wins.
+    await page.check("#f_target_main");
+    await page.check("#f_target_test");
+    await page.check("#f_target_main");
+    await marksAre(MISSING, EXISTS);
+  } finally {
+    await put({
+      rekordbox_db_path: savedTestDb,
+      rekordbox_main_db_path: SANDBOX_MAIN,
+      rekordbox_target: "test",
+      tag_playlist_mode: "auto",
+      tag_playlist_map: {},
+    });
+    await page.close();
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 test("Main target: every export runs a dry run and writes only after confirming", async () => {
@@ -924,6 +1009,56 @@ test("Main target: every export runs a dry run and writes only after confirming"
 // library) standing in for "main". With rekordbox running, the server must
 // refuse the write and leave the sandbox untouched; otherwise the confirmed
 // export writes the mapped playlists and a re-run changes nothing.
+test("Main library with writes locked: the dry run shows the blocker, with a link to allow writes, and Confirm stays disabled (sandbox copy)", async (t) => {
+  const template = process.env.E2E_TEMPLATE_DB || path.join(process.env.HOME, "Library/Pioneer/rekordbox_test/master.db");
+  if (!fs.existsSync(template)) {
+    t.skip(`no template DB at ${template} (test library switched out?)`);
+    return;
+  }
+  const dir = path.join(E2E, "main-locked", "rekordbox");
+  fs.rmSync(path.dirname(dir), { recursive: true, force: true });
+  fs.mkdirSync(dir, { recursive: true });
+  const db = path.join(dir, "master.db");
+  fs.copyFileSync(template, db); // a copy: the template is only read
+  const stat = () => {
+    const st = fs.statSync(db);
+    return `${st.size}:${st.mtimeMs}`;
+  };
+  await put({
+    rekordbox_main_db_path: db,
+    rekordbox_target: "main",
+    allow_main_writes: false,
+    tag_playlist_mode: "custom",
+    tag_playlist_map: { must: ["/E2E/Must"], pool: ["Pool"] },
+  });
+  const loc = await post("/api/locate", { latest: 10 });
+  await waitFor(() => api(`/api/jobs/${loc.job_id}`).then((j) => j.status === "done" || j.status === "error"), {
+    timeout: 120000,
+    what: "locate",
+  });
+  const before = stat();
+  const page = await context.newPage();
+  try {
+    await page.goto(SERVER + "/settings/#test");
+    await page.waitForFunction(() => document.getElementById("mainLibraryBanner").textContent === "MAIN LIBRARY · read-only");
+    await page.click("#exportLatest");
+    // The dialog, or the flow ended without one (then its status says why).
+    await page.waitForFunction(() => document.getElementById("exportConfirm") || !document.getElementById("exportLatest").disabled, null, {
+      timeout: 120000,
+    });
+    assert.ok(await page.$("#exportConfirm"), `no dry-run dialog: ${await page.textContent("#refreshStatus")}`);
+    assert.match(await page.textContent("#exportConfirm"), /Writing to your main collection is locked/);
+    assert.equal(await page.getAttribute("#exportConfirm .allow-writes-link", "href"), "/settings/#rekordbox");
+    assert.equal(await page.isDisabled("#exportConfirm .dialog-confirm"), true);
+    await page.click("#exportConfirm .dialog-cancel");
+    assert.equal(stat(), before, "nothing written");
+  } finally {
+    await put({ rekordbox_target: "test", allow_main_writes: false, tag_playlist_mode: "auto" });
+    await page.close();
+    fs.rmSync(path.dirname(dir), { recursive: true, force: true });
+  }
+});
+
 test("Main target, real server: dry run, confirm, and write to a sandbox copy", async (t) => {
   const template = process.env.E2E_TEMPLATE_DB || path.join(process.env.HOME, "Library/Pioneer/rekordbox_test/master.db");
   if (!fs.existsSync(template)) {
@@ -994,7 +1129,7 @@ test("Main target, real server: dry run, confirm, and write to a sandbox copy", 
     assert.match(await app.textContent("#refreshStatus"), /up to date/);
   }
   await app.close();
-  await put({ allow_main_writes: false, tag_playlist_mode: "auto" });
+  await put({ allow_main_writes: false, rekordbox_target: "test", tag_playlist_mode: "auto" });
   fs.rmSync(path.dirname(sandboxDir), { recursive: true, force: true });
 });
 
@@ -1787,7 +1922,6 @@ test("import: Add default tags to all tracks, at the start and on an open batch'
 // after the batch exists; nothing touches the user's music folders.
 
 const E2E_MUSIC = path.join(E2E, "music");
-const PYTHON = process.env.E2E_PYTHON || "/Users/alvaroh/Projects/auto-rekordbox/.venv/bin/python"; // the server's (has mutagen)
 function writeAiff(file, title, artist, album) {
   execFileSync(PYTHON, [
     "-c",

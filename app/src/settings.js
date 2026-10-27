@@ -554,17 +554,21 @@ function mappingEditor() {
 // Vocabulary and the target library's playlists for the mapping editor.
 // `target`: the library to read the playlists from (the Target radios, before
 // they're saved); none: the saved one.
+let mappingLoads = 0;
 async function loadMappingData(target) {
   if (!mapping) return;
+  const load = ++mappingLoads; // a slower earlier load (quick radio switches) mustn't win
   mapping.loading();
   apiJson("/api/tags")
     .then(mapping.setVocabulary)
     .catch(() => mapping.setVocabulary([]));
+  let playlists = null; // null: not available (older server, library unreadable)
   try {
-    mapping.setPlaylists(await apiJson(`/api/rekordbox/playlists${target ? `?target=${target}` : ""}`));
+    playlists = await apiJson(`/api/rekordbox/playlists${target ? `?target=${target}` : ""}`);
   } catch (e) {
-    mapping.setPlaylists(null); // not available (older server, library unreadable)
+    /* not available */
   }
+  if (load === mappingLoads) mapping.setPlaylists(playlists);
 }
 
 function makeEditor(key, def, value) {
