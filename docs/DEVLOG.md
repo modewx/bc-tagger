@@ -104,6 +104,68 @@ Tests never touch Bandcamp, the music drive or a real rekordbox library: Bandcam
   - Tests close every `Store` and fail if a rekordbox connection is left open.
   - Before, the full suite crashed on nearly every run; after, 9/9 runs passed (`-q` and `-v`).
 
+### 2026-10-27
+
+- **Page loads no longer wake the music drive (user report: Collection empty for about a minute while the drive
+  spun up).** The rule: no drive or online work runs unless the user clicked for it.
+  - "Mounted" now comes from the kernel's mount table (`mount`, cached 10 s), not from looking at the folder.
+    This covers `GET /api/index/status`, the Import from Files folder list, and the import-logs folder check.
+    Whether a root folder exists is checked only by work the user starts (scan, locate, download, import).
+  - Files per root are kept in a `file_counts` table that triggers update on every write to the index. The
+    status no longer counts 41k rows on each call (about 230 ms).
+  - The extension's periodic full sync rewrites and announces only items that changed (it returns `changed`).
+    Before, every open tab re-read all items every 15 minutes. The tag list announces only a real change too.
+  - The build id (asked every few seconds by each tab) is cached for 2 s.
+- **A 45 s stall after the 01:16 rebuild, found and fixed.**
+  - What happened: every open tab reloaded at once, and the Bandcamp tabs asked `link-candidates` for every
+    item on their pages. Each of those calls parsed all 1,591 open import rows (5.2 MB of JSON) while holding
+    the Store's single lock. `/api/items` runs about 5,000 small queries, each needing that lock, so it waited
+    behind them. Most of the 40 worker threads sat waiting on the lock, so new requests also waited for a free
+    thread.
+  - Reproduced on a copy (10 tabs, 40 `link-candidates`, a full sync): 10.5 s, with 36 threads waiting on
+    the Store lock in the stack dump.
+  - Fixes:
+    - Reads use a pool of up to 8 SQLite read connections instead of the write lock. A thread inside `tx`
+      still reads through its own connection, so it sees its own writes.
+    - `link-candidates`: the open rows are kept slimmed in memory until an import row changes (a trigger-kept
+      version). Title normalization is memoized: 128 → 53 ms per call, 0.2 ms when the same item is asked
+      again. At most two run at once, and requests the extension already gave up on are skipped.
+    - `/api/items` reads locate results, ownership and rekordbox entries once for all items:
+      0.13 → 0.07 s, with identical views.
+    - The mount table comes from `getfsstat(MNT_NOWAIT)` (0.1 ms, no process spawned); `mount` is the fallback.
+  - After the fixes, the same load finishes in 3–5 s, all of it CPU, with light requests under 1 s. A
+    normal reload (6 tabs, 15 `link-candidates`, unchanged sync) finishes in 1.2 s.
+  - To catch the next one: every request is logged with its time and duration. A request with no response
+    after 5 s dumps every thread's stack and the Store lock's owner. Event and audio streams have started
+    their response, so they never count.
+
+- **Page loads during lookup bursts (coordinator: 40 `link-candidates` made `/api/items` take 3.2 s):**
+  - Cause: a GIL convoy, not worker threads. The `link-candidates` route already waited on its semaphore in
+    the event loop, holding no thread.
+    - Python's sqlite3 lets go of the GIL around every row it steps through. While two scoring threads were
+      busy, each row's take-back waited its turn, so `/api/items`, reading about 7,000 rows (4,751 owned ids),
+      finished only when the burst did.
+    - In isolation: 1,085 rows took 60 ms alone, 1.4 s next to one busy thread and 3.5 s next to two.
+    - A shorter switch interval didn't help the server.
+  - Fixes:
+    - `Store.query_all` reads many rows as one JSON value (one take-back). It's used by the item list's
+      bulk reads, the item mirror, `other` items and pending adds.
+    - Scoring memoizes the title and artist variants of rows and hits, plus `numbers`, `strip_feat` and
+      `strip_side`: 53 → 19 ms per new page item (128 ms two commits ago).
+    - Identical `link-candidates` requests in flight share one answer.
+    - New batch form, `{items: [...]}` → `{results: [...]}`, so the extension can ask once per page.
+  - On a copy of the live data, `/api/items` during a burst of 40 new page items: 2.8 s → 0.26–0.40 s; a
+    batch of 40 answers in about 1 s.
+  - A test checks five item loads stay under 0.5 s during a 40-call burst. With row-by-row reads the same
+    test takes 0.92–0.95 s and fails.
+- **Re-export never duplicates playlist entries (user's request, queued in "Later"):**
+  - The same file was already found by its Content row. Tests now cover the user's case on the test library
+    and on a main-mode sandbox: the same track from two imports exported in separate runs, and a track the
+    user added to the playlist themselves.
+  - New: another file of the same song (same normalized artist and title, length within 2 s) isn't added.
+    It's listed in the diff as `entries_same_song`, "already in playlist (other file)".
+  - A file skipped for all its playlists isn't added to the library. `add_same_song: true` adds them anyway.
+
 ## App and extension (`app/`, `extension/`, `shared/`, branch `claude/local-collection-ui-e8f6f6`)
 
 ### How to run

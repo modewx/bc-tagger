@@ -17,7 +17,7 @@ from pathlib import Path
 from typing import Any
 
 from .config import all_root_paths, import_log_dir_problem
-from .fsguard import NotMounted, require_mounted
+from .fsguard import NotMounted, is_mounted, require_mounted, volume_root
 from .items import album_name
 from .store import now_iso
 
@@ -38,15 +38,19 @@ class LogNotFound(KeyError):
 
 def log_dir(svc, create: bool = True) -> tuple[Path, str | None]:
     """The folder for logs and, when the setting can't be used right now, why the default is used.
-    Only writing a log (or opening the folder) creates it; listing and reading don't."""
+    Only writing a log (or opening the folder) creates it; listing and reading don't, and don't touch the
+    music drive either (no symlinks resolved there, mounted read from the mount table)."""
     configured = svc.settings.import_log_dir()
     default = svc.settings.path.parent / "import-logs"
     warning = None
     if configured != default:
-        warning = import_log_dir_problem(configured, all_root_paths(svc.settings.all()))
+        warning = import_log_dir_problem(configured, all_root_paths(svc.settings.all()), resolve=create)
         if warning is None:
             try:
-                require_mounted(configured)
+                if create:
+                    require_mounted(configured)
+                elif not is_mounted(configured):
+                    raise NotMounted(f"music drive not mounted: {volume_root(configured)}")
             except NotMounted as e:
                 warning = str(e)
         if warning:

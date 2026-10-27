@@ -92,14 +92,14 @@ def test_release_links():
     assert musicbrainz.candidate_links(f, {"release_ids": ["gone"]}) == {}
 
 
-def test_fetcher_rate_limit_cache_and_user_agent(tmp_path):
+def test_fetcher_rate_limit_cache_and_user_agent(new_store, tmp_path):
     calls = []
 
     def handler(request):
         calls.append((time.monotonic(), request.headers["user-agent"]))
         return httpx.Response(200, text=f"ok {request.url}")
 
-    store = Store(path=tmp_path / "s.db")
+    store = new_store()
     f = musicbrainz.make_fetcher(store, min_interval=0.2, transport=httpx.MockTransport(handler))
     for i in range(3):
         assert f.request("GET", f"https://musicbrainz.org/x{i}")[0] == 200
@@ -120,11 +120,11 @@ def _page(tralbum):
     return f'<div data-tralbum="{attr}" data-embed="{{}}"></div>'
 
 
-def test_lookup_source_musicbrainz_gives_hints_only(svc):  # noqa: F811
+def test_lookup_source_musicbrainz_gives_hints_only(new_store, svc):  # noqa: F811
     calls = []
     svc.settings.update({"lookup_source": "musicbrainz"})
     no_bandcamp = httpx.MockTransport(lambda request: calls.append(str(request.url)) or httpx.Response(500))
-    svc.bandcamp_fetcher = lambda: Fetcher(Store(path=svc.store.path.parent / "empty.db"), "test", transport=no_bandcamp)
+    svc.bandcamp_fetcher = lambda: Fetcher(new_store(path=svc.store.path.parent / "empty.db"), "test", transport=no_bandcamp)
     q = query_for("Shinichi Atobe", "Butterfly Effect")
     svc.musicbrainz_fetcher = lambda: FakeMB(
         {q: [rec("r1", "Butterfly Effect", "Shinichi Atobe", [("rel1", "Butterfly Effect", "Official", "2014", "Album")])]},
@@ -177,8 +177,8 @@ def test_lookup_source_setting():
 
 @pytest.mark.skipif(os.environ.get("BCT_LIVE_MUSICBRAINZ") != "1",
                     reason="live MusicBrainz smoke test (set BCT_LIVE_MUSICBRAINZ=1)")
-def test_live_musicbrainz_smoke(tmp_path):
-    f = musicbrainz.make_fetcher(Store(path=tmp_path / "s.db"))
+def test_live_musicbrainz_smoke(new_store, tmp_path):
+    f = musicbrainz.make_fetcher(new_store())
     r = musicbrainz.resolve(f, {"artist": "Front 242", "title": "Headhunter", "flags": []})
     assert r["status"] == "accepted" and r["chosen"]["artist"].lower().startswith("front 242")
     assert musicbrainz.candidate_links(f, r["chosen"]).get("release_id")

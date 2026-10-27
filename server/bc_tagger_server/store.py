@@ -1,11 +1,14 @@
 """SQLite state: the items/tags mirror plus local-only data.
 
-One connection shared across threads behind a lock; the server's write volume is tiny.
+Writes go through one connection behind a lock (``tx``); the server's write volume is tiny. Reads outside a
+transaction use a small pool of their own connections (WAL lets them run beside a write), so a page load never
+waits behind another request's queries or a long write.
 """
 
 from __future__ import annotations
 
 import json
+import queue
 import sqlite3
 import threading
 from contextlib import contextmanager
@@ -49,6 +52,21 @@ CREATE TABLE IF NOT EXISTS files (
 );
 CREATE INDEX IF NOT EXISTS files_root ON files(root);
 CREATE INDEX IF NOT EXISTS files_release_dir ON files(release_dir);
+
+-- Files per root, kept by triggers on every write to files, so the index status never counts them.
+CREATE TABLE IF NOT EXISTS file_counts (root TEXT PRIMARY KEY, n INTEGER NOT NULL);
+CREATE TRIGGER IF NOT EXISTS file_counts_insert AFTER INSERT ON files BEGIN
+    INSERT INTO file_counts(root, n) VALUES(new.root, 1) ON CONFLICT(root) DO UPDATE SET n = n + 1;
+END;
+CREATE TRIGGER IF NOT EXISTS file_counts_delete AFTER DELETE ON files BEGIN
+    UPDATE file_counts SET n = n - 1 WHERE root = old.root;
+    DELETE FROM file_counts WHERE root = old.root AND n <= 0;
+END;
+CREATE TRIGGER IF NOT EXISTS file_counts_move AFTER UPDATE OF root ON files WHEN old.root IS NOT new.root BEGIN
+    UPDATE file_counts SET n = n - 1 WHERE root = old.root;
+    DELETE FROM file_counts WHERE root = old.root AND n <= 0;
+    INSERT INTO file_counts(root, n) VALUES(new.root, 1) ON CONFLICT(root) DO UPDATE SET n = n + 1;
+END;
 
 CREATE TABLE IF NOT EXISTS locate_results (
     item_id TEXT PRIMARY KEY,
@@ -136,6 +154,18 @@ CREATE TABLE IF NOT EXISTS import_rows (
     PRIMARY KEY (batch_id, n)
 );
 
+-- Bumped by triggers on every write to a table, so caches built from it know when to rebuild.
+CREATE TABLE IF NOT EXISTS data_versions (name TEXT PRIMARY KEY, n INTEGER NOT NULL);
+CREATE TRIGGER IF NOT EXISTS import_rows_insert AFTER INSERT ON import_rows BEGIN
+    INSERT INTO data_versions(name, n) VALUES('import_rows', 1) ON CONFLICT(name) DO UPDATE SET n = n + 1;
+END;
+CREATE TRIGGER IF NOT EXISTS import_rows_update AFTER UPDATE ON import_rows BEGIN
+    INSERT INTO data_versions(name, n) VALUES('import_rows', 1) ON CONFLICT(name) DO UPDATE SET n = n + 1;
+END;
+CREATE TRIGGER IF NOT EXISTS import_rows_delete AFTER DELETE ON import_rows BEGIN
+    INSERT INTO data_versions(name, n) VALUES('import_rows', 1) ON CONFLICT(name) DO UPDATE SET n = n + 1;
+END;
+
 -- Items (and new vocabulary tags) for the extension to add to chrome.storage.
 CREATE TABLE IF NOT EXISTS pending_adds (
     add_id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -182,11 +212,20 @@ def now_iso() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 
+READERS = 8  # read connections at most (3 file descriptors each)
+
+
 class Store:
     def __init__(self, path: Path | None = None):
         self.path = path or data_dir() / "server.db"
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self._lock = threading.RLock()
+        self._local = threading.local()  # .tx: this thread is inside tx() (its reads must see its writes)
+        self._readers: queue.SimpleQueue[sqlite3.Connection] = queue.SimpleQueue()
+        self._readers_made = 0
+        self._readers_lock = threading.Lock()
+        self._all_readers: list[sqlite3.Connection] = []
+        self._closed = False
         self._conn = sqlite3.connect(self.path, check_same_thread=False, isolation_level=None)
         self._conn.row_factory = sqlite3.Row
         self._conn.execute("PRAGMA journal_mode=WAL")
@@ -198,15 +237,25 @@ class Store:
         cols = {r[1] for r in self._conn.execute("PRAGMA table_info(files)")}
         if "created" not in cols:  # file creation time (st_birthtime), added for date matching
             self._conn.execute("ALTER TABLE files ADD COLUMN created REAL")
+        if self._conn.execute("SELECT 1 FROM meta WHERE key = 'file_counts_v1'").fetchone() is None:
+            # the triggers keep file_counts from now on; count what's there once
+            with self.tx() as c:
+                c.execute("DELETE FROM file_counts")
+                c.execute("INSERT INTO file_counts(root, n) SELECT root, COUNT(*) FROM files GROUP BY root")
+                c.execute("INSERT INTO meta(key, value) VALUES('file_counts_v1', 'true')")
 
     def close(self) -> None:
-        with self._lock:
+        with self._lock, self._readers_lock:
+            self._closed = True
+            for conn in self._all_readers:
+                conn.close()
             self._conn.close()
 
     @contextmanager
     def tx(self) -> Iterator[sqlite3.Connection]:
         with self._lock:
             self._conn.execute("BEGIN IMMEDIATE")
+            self._local.tx = True
             try:
                 yield self._conn
             except BaseException:
@@ -214,14 +263,65 @@ class Store:
                 raise
             else:
                 self._conn.execute("COMMIT")
+            finally:
+                self._local.tx = False
+
+    def _new_reader(self) -> sqlite3.Connection:
+        conn = sqlite3.connect(self.path, check_same_thread=False, isolation_level=None, timeout=30)
+        conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA query_only=ON")
+        return conn
+
+    @contextmanager
+    def _reader(self) -> Iterator[sqlite3.Connection]:
+        """A read connection from the pool (made on demand, up to ``READERS``). Inside ``tx`` the reads use the
+        transaction's own connection, so they see its uncommitted writes."""
+        if getattr(self._local, "tx", False) or self._closed:
+            with self._lock:
+                yield self._conn
+            return
+        try:
+            conn = self._readers.get_nowait()
+        except queue.Empty:
+            conn = None
+            with self._readers_lock:
+                if self._readers_made < READERS and not self._closed:
+                    self._readers_made += 1
+                    conn = self._new_reader()
+                    self._all_readers.append(conn)
+            if conn is None:
+                conn = self._readers.get()
+        try:
+            yield conn
+        finally:
+            self._readers.put(conn)
 
     def query(self, sql: str, params: Iterable[Any] = ()) -> list[sqlite3.Row]:
-        with self._lock:
-            return self._conn.execute(sql, tuple(params)).fetchall()
+        with self._reader() as conn:
+            return conn.execute(sql, tuple(params)).fetchall()
 
     def query_one(self, sql: str, params: Iterable[Any] = ()) -> sqlite3.Row | None:
-        with self._lock:
-            return self._conn.execute(sql, tuple(params)).fetchone()
+        with self._reader() as conn:
+            cur = conn.execute(sql, tuple(params))
+            try:
+                return cur.fetchone()
+            finally:
+                cur.close()  # ends the statement, so this connection's next read sees the newest data
+
+    def query_all(self, sql: str, columns: list[str], params: Iterable[Any] = ()) -> list[dict[str, Any]]:
+        """``sql``'s rows (as dicts of ``columns``) fetched as one JSON value, in no set order.
+
+        Python's sqlite3 lets go of the GIL for every row it steps through and has to take it back for the next.
+        While another thread is busy in Python (scoring, say), each take-back waits its turn, so reading a few
+        thousand rows can take seconds. One aggregated row takes it back once."""
+        cols = ", ".join(columns)
+        row = self.query_one(f"SELECT json_group_array(json_array({cols})) AS j FROM ({sql})", params)
+        return [dict(zip(columns, values)) for values in json.loads(row["j"])]
+
+    def version(self, name: str) -> int:
+        """How many writes ``name`` has had (kept by triggers; 0 before the first)."""
+        row = self.query_one("SELECT n FROM data_versions WHERE name = ?", (name,))
+        return row["n"] if row else 0
 
     # -- meta -------------------------------------------------------------------------
 
@@ -240,31 +340,40 @@ class Store:
     # -- items mirror -----------------------------------------------------------------
 
     def upsert_items(self, items: dict[str, dict], deleted: Iterable[str] = (), full: bool = False) -> dict:
+        """Write the items whose data changed (an unchanged one is left alone) and remove ``deleted`` (with
+        ``full``: every item not in ``items``). ``{upserted, changed, removed, changed_ids, removed_ids}``."""
         ts = now_iso()
         deleted = list(deleted)
+        changed_ids: list[str] = []
+        removed_ids: list[str] = []
         with self.tx() as c:
-            removed = 0
             if full:
                 keep = set(items)
                 existing = [r["id"] for r in c.execute("SELECT id FROM items")]
                 gone = [i for i in existing if i not in keep]
                 for i in gone:
                     c.execute("DELETE FROM items WHERE id = ?", (i,))
-                removed += len(gone)
+                removed_ids += gone
             for item_id in deleted:
-                removed += c.execute("DELETE FROM items WHERE id = ?", (item_id,)).rowcount
+                if c.execute("DELETE FROM items WHERE id = ?", (item_id,)).rowcount:
+                    removed_ids.append(item_id)
             for item_id, item in items.items():
                 if not isinstance(item, dict):
                     continue
-                item = {**item, "id": item_id}
+                data = json.dumps({**item, "id": item_id})
+                row = c.execute("SELECT data FROM items WHERE id = ?", (item_id,)).fetchone()
+                if row is not None and json.loads(row["data"]) == json.loads(data):
+                    continue
                 date_added = item.get("date_added") if isinstance(item.get("date_added"), str) else None
                 c.execute(
                     "INSERT INTO items(id, data, date_added, updated_at) VALUES(?, ?, ?, ?) "
                     "ON CONFLICT(id) DO UPDATE SET data = excluded.data, "
                     "date_added = excluded.date_added, updated_at = excluded.updated_at",
-                    (item_id, json.dumps(item), date_added, ts),
+                    (item_id, data, date_added, ts),
                 )
-        return {"upserted": len(items), "removed": removed}
+                changed_ids.append(item_id)
+        return {"upserted": len(items), "changed": len(changed_ids), "removed": len(removed_ids),
+                "changed_ids": changed_ids, "removed_ids": removed_ids}
 
     def set_tags(self, tags: list[str]) -> None:
         with self.tx() as c:
@@ -275,6 +384,10 @@ class Store:
     def get_tags(self) -> list[str]:
         return [r["name"] for r in self.query("SELECT name FROM tags ORDER BY pos")]
 
+    def file_counts(self) -> dict[str, int]:
+        """Indexed files per root (kept by triggers: no count over the files table)."""
+        return {r["root"]: r["n"] for r in self.query("SELECT root, n FROM file_counts")}
+
     def count_items(self) -> int:
         return self.query_one("SELECT COUNT(*) AS n FROM items")["n"]
 
@@ -284,7 +397,8 @@ class Store:
 
     def all_items(self) -> list[dict]:
         """All items, newest ``date_added`` first (undated last, then by id)."""
-        rows = self.query(
-            "SELECT data FROM items ORDER BY date_added IS NULL, date_added DESC, id"
-        )
-        return [json.loads(r["data"]) for r in rows]
+        items = [json.loads(r["data"]) for r in self.query_all("SELECT data FROM items", ["data"])]
+        items.sort(key=lambda it: it["id"])
+        dated = [it for it in items if isinstance(it.get("date_added"), str)]
+        dated.sort(key=lambda it: it["date_added"], reverse=True)  # stable: ties stay by id
+        return dated + [it for it in items if not isinstance(it.get("date_added"), str)]

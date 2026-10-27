@@ -91,6 +91,11 @@ def since(days: float) -> str:
     return (datetime.now() - timedelta(days=days)).date().isoformat()
 
 
+def since_at(days: float) -> str:
+    """Exactly ``days`` ago (``since`` rounds to midnight: at 1 AM "2.5 days" would reach 3-day-old files)."""
+    return (datetime.now() - timedelta(days=days)).isoformat(timespec="seconds")
+
+
 def start(c, folders, **kw):
     r = c.post("/api/import/files", json={"folders": folders, "default_tags": ["pool"], **kw})
     assert r.status_code == 200, r.text
@@ -162,7 +167,7 @@ def test_since_and_defaults(tree):
         assert [(f["path"], f["kind"], f["since"], f["last_run"]) for f in d["folders"]] == [
             (str(coll), "owned", since(7), None), (str(complete), "not_owned", since(7), None)]
         assert d["default_tags"] == ["pool"] and all(f["mounted"] and f["exists"] for f in d["folders"])
-        r = start(c, [{"path": str(coll), "since": since(2.5)}])  # only the last two days' releases
+        r = start(c, [{"path": str(coll), "since": since_at(2.5)}])  # only the last two days' releases
         assert svc.jobs.wait(r["job_id"], timeout=30).status == "done"
         titles = [x["title"] for x in c.get(f"/api/import/{r['batch_id']}").json()["rows"]]
         assert titles == ["Old Track", "Later"]
@@ -189,7 +194,7 @@ def test_folders_are_checked_before_anything_is_written(tree, tmp_path):
 def test_browser_lookups_and_no_new_files(tree):
     svc, coll, complete, files = tree
     with TestClient(create_app(svc)) as c:
-        r = start(c, [{"path": str(complete), "since": since(0.5)}])  # nothing that new
+        r = start(c, [{"path": str(complete), "since": since_at(0.5)}])  # nothing that new
         assert svc.jobs.wait(r["job_id"], timeout=30).status == "done"
         batch = c.get(f"/api/import/{r['batch_id']}").json()
         assert batch["status"] == "ready" and batch["rows"] == [] and batch["files"] == {"found": 0, "rows": 0}
@@ -223,8 +228,8 @@ def test_the_same_track_in_two_folders_keeps_the_preferred_format(tree):
     svc, coll, complete, files = tree
     flac = aged(write_flac(coll / "Artist Q - EP [FLAC]" / "01 Song.flac", "Song", "Artist Q", "EP", 1), 2)
     aiff = aged(write_aiff(complete / "Artist Q - EP" / "01 Song.aiff", "Song", "Artist Q", "EP", 1), 1)
-    batch = filesimport.create(svc, [{"path": str(coll), "since": since(2.5)}, {"path": str(complete),
-                                                                                 "since": since(2.5)}], ["pool"])
+    batch = filesimport.create(svc, [{"path": str(coll), "since": since_at(2.5)}, {"path": str(complete),
+                                                                                 "since": since_at(2.5)}], ["pool"])
     filesimport.run(svc, batch["batch_id"])
     rows = importer.load_rows(svc.store, batch["batch_id"])
     assert [(r["title"], r["file"]["format"]) for r in rows if r["artist"] == "Artist Q"] == [("Song", "flac"),

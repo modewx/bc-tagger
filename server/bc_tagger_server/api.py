@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import copy
 import json
 import logging
 import re
@@ -12,6 +13,7 @@ from fastapi import Body, FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, JSONResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
+from starlette.concurrency import run_in_threadpool
 from pydantic import BaseModel, Field
 
 from .config import PRESETS, SettingsError
@@ -23,6 +25,7 @@ log = logging.getLogger(__name__)
 ALLOWED_ORIGIN_RE = r"^(chrome-extension://[a-p]{32}|http://(127\.0\.0\.1|localhost)(:\d+)?)$"
 ALLOWED_HOSTS = {"127.0.0.1", "localhost", "testserver"}
 LOOPBACK = {"127.0.0.1", "::1", "testclient"}  # testclient: FastAPI's TestClient
+LINK_CANDIDATE_SLOTS = 2
 
 
 class SyncItemsBody(BaseModel):
@@ -75,6 +78,9 @@ class ExportBody(SelectionBody):
     confirm_token: Optional[str] = None
     # import rows ("<batch_id>:<n>") instead of items: sent to rekordbox without adding them to the collection
     rows: Optional[list[str]] = None
+    # also add a track whose playlist already holds the same song as another file (default: skip, listed
+    # in the diff's entries_same_song)
+    add_same_song: bool = False
 
 
 class NamesBody(BaseModel):
@@ -112,6 +118,13 @@ class LinkBody(BaseModel):
     tralbum: Optional[dict] = None
     embed: Optional[dict] = None
     page_url: Optional[str] = None
+
+
+class LinkCandidatesBody(LinkBody):
+    """One Bandcamp page item (``item``, or ``tralbum`` + ``embed``; ``page_url``), or with ``items`` several, each
+    shaped like a single request: one request per page instead of one per item."""
+
+    items: Optional[list[LinkBody]] = Field(default=None, max_length=1000)
 
 
 class LookupResultsBody(BaseModel):
@@ -337,9 +350,61 @@ def create_app(service: Service | None = None) -> FastAPI:
             raise HTTPException(400, "send item (null to unlink) or tralbum")
         return _import_call(imp.link_row, svc, batch_id, n, payload)
 
+    link_slots = asyncio.Semaphore(LINK_CANDIDATE_SLOTS)
+    link_running: dict[str, asyncio.Future] = {}
+
+    async def _link_candidates(request: Request, payload: dict) -> list[dict]:
+        """Identical requests in flight share one answer (the extension resends after its 4 s timeout)."""
+        key = json.dumps(payload, sort_keys=True, default=str)
+        running = link_running.get(key)
+        if running is not None:
+            try:
+                return copy.deepcopy(await asyncio.shield(running))
+            except asyncio.CancelledError:
+                if not running.cancelled():
+                    raise  # this request itself was cancelled
+                # the first asker left before its turn: compute it ourselves
+        future = asyncio.get_running_loop().create_future()
+        link_running[key] = future
+        try:
+            async with link_slots:  # waiting here holds no worker thread
+                if await request.is_disconnected():  # gave up while waiting its turn
+                    future.cancel()
+                    return []
+                result = await run_in_threadpool(_import_call, imp.link_candidates, svc, payload)
+            future.set_result(result)
+            return copy.deepcopy(result)
+        except BaseException as e:
+            if not future.done():
+                if isinstance(e, Exception):
+                    future.set_exception(e)
+                    future.exception()  # the waiting duplicates get it too; no "never retrieved" warning
+                else:
+                    future.cancel()
+            raise
+        finally:
+            if link_running.get(key) is future:
+                del link_running[key]
+
     @app.post("/api/import/link-candidates")
-    def import_link_candidates(body: LinkBody) -> list[dict]:
-        return _import_call(imp.link_candidates, svc, body.model_dump(exclude_unset=True))
+    async def import_link_candidates(request: Request, body: LinkCandidatesBody) -> Union[list[dict], dict[str, Any]]:
+        """Rows of open import batches that fit a Bandcamp page item: ``[candidate, …]``. With ``items``,
+        ``{"results": [[candidate, …], …]}`` in the order sent.
+
+        At most ``LINK_CANDIDATE_SLOTS`` run at once. The extension asks for every item of a Bandcamp page at once,
+        which would otherwise take every CPU slice from the page loads. A request the extension already gave up on
+        isn't computed, and identical requests in flight are answered once."""
+        payload = body.model_dump(exclude_unset=True, exclude={"items"})
+        if body.items is None:
+            return await _link_candidates(request, payload)
+        if payload:
+            raise HTTPException(400, "send items, or one item, not both")
+        payloads = [b.model_dump(exclude_unset=True) for b in body.items]
+        async with link_slots:
+            if await request.is_disconnected():
+                return {"results": []}
+            results = await run_in_threadpool(_import_call, imp.link_candidates_many, svc, payloads)
+        return {"results": results}
 
     @app.get("/api/import/{batch_id}/lookups")
     def import_lookups(batch_id: str, limit: int = 20) -> dict:
@@ -455,7 +520,8 @@ def create_app(service: Service | None = None) -> FastAPI:
         if body.rows is not None and not body.rows:
             raise HTTPException(400, "no rows selected")
         job = svc.start_export(ids=body.ids, latest=body.latest, dry_run=body.dry_run,
-                               confirm_token=body.confirm_token, scan=body.scan, rows=body.rows)
+                               confirm_token=body.confirm_token, scan=body.scan, rows=body.rows,
+                               add_same_song=body.add_same_song)
         return {"job_id": job.id}
 
     @app.get("/api/rekordbox/playlists")
@@ -559,6 +625,11 @@ def create_app(service: Service | None = None) -> FastAPI:
         return {"build_id": svc.build_id()}
 
     # -- the built local app -----------------------------------------------------------
+
+    from .reqlog import RequestLog
+
+    # outermost: times every request, and names the threads when one stalls
+    app.add_middleware(RequestLog, extra=lambda: f"store lock: {svc.store._lock!r}")
 
     dist = svc.settings.app_dist_dir()
     if dist.is_dir():

@@ -437,3 +437,47 @@ def test_playlists_of_the_library_picked_before_saving(svc, main_db, test_db):
         assert c.get("/api/rekordbox/playlists", params={"target": "other"}).status_code == 422
     assert _files(main_db.parent) == before  # main was only read, through its snapshot
     assert svc.settings.get("rekordbox_target") == "test"  # nothing was saved
+
+
+def test_main_reexports_never_duplicate_the_song(svc, library, main_db):
+    """The user's case on a main-mode sandbox: the same track from a second import, then the song as another
+    file, never gives a second entry; a song the user already has in a playlist (their own copy) isn't added
+    there."""
+    from bc_tagger_server.rbexport import content_kwargs
+
+    from .test_export import _import_row, _same_song_files
+
+    a, b = _same_song_files(library["root"])
+    mine = str(write_aiff(library["root"] / "Delta - Single" / "01 Delta Song.aiff", "Delta Song", "Delta", "Single", 1,
+                          seconds=5.0))
+    theirs = str(write_aiff(main_db.parent.parent / "elsewhere" / "Delta Song.aiff", "Delta Song", "Delta", "", 1,
+                            seconds=5.0))
+    with _raw(main_db) as db:  # the user's own copy of Delta Song, in /DJ/Status/Must
+        must = next(p for p in db.get_playlist(Name="Must"))
+        db.add_to_playlist(must, db.add_content(theirs, **content_kwargs(db, {"title": "Delta Song", "artist": "Delta",
+                                                                              "duration": 5.0})))
+        db.commit()
+        (main_db.parent / "masterPlaylists6.xml").write_text(_xml_for(db))
+    keys = ["/DJ/Status/Must", f"/{FOLDER}/Keepers"]
+
+    def send(path):
+        dry = svc.export(rows=[_import_row(svc, path, ["must"])], dry_run=True)
+        if dry["can_confirm"]:
+            svc.export(rows=[_import_row(svc, path, ["must"])], confirm_token=dry["confirm_token"])
+        return dry
+
+    first = send(a)
+    assert sorted((e["playlist"], e["path"]) for e in first["entries_added"]) == [(k, a) for k in keys]
+    state = read_back(svc.target(), FOLDER, keys)
+    assert not send(a)["changed"]  # the same file from a second import
+    other = send(b)  # the song as another file: nothing, not even a new track in the collection
+    assert not other["changed"] and other["content_added"] == []
+    assert sorted((e["playlist"], e["existing"]["path"]) for e in other["entries_same_song"]) == [(k, a) for k in keys]
+    assert read_back(svc.target(), FOLDER, keys) == state
+    # Delta Song: Must has the user's copy, Keepers doesn't
+    delta = send(mine)
+    assert [(e["playlist"], e["path"]) for e in delta["entries_added"]] == [(f"/{FOLDER}/Keepers", mine)]
+    assert [(e["playlist"], e["existing"]["path"]) for e in delta["entries_same_song"]] == [("/DJ/Status/Must", theirs)]
+    after = read_back(svc.target(), FOLDER, keys)["mapped"]
+    assert after["/DJ/Status/Must"] == [library["user"], library["alpha"][0], theirs, a]
+    assert after[f"/{FOLDER}/Keepers"] == [a, mine]

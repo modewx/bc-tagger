@@ -30,7 +30,7 @@ def build(svc, sample: int = 12, seed: int = 7) -> str:
     located = [v for v in views if v["local"]["status"] == "located"]
     fmt = Counter(v["local"]["best"].get("format") for v in located)
     root_kind = Counter(v["local"]["best"].get("root_kind") for v in located)
-    files_per_root = {r["root"]: r["n"] for r in svc.store.query("SELECT root, COUNT(*) AS n FROM files GROUP BY root")}
+    files_per_root = svc.store.file_counts()
     last_scan = svc.store.get_meta("last_scan") or {}
 
     out = [

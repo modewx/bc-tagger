@@ -13,9 +13,11 @@ from .config import Settings
 from .items import is_valid_id, item_tags, matches_query, seed_from_export
 from .jobs import JobManager
 from .store import Store, now_iso
-from .views import item_view
+from .views import ViewData, item_view
 
 log = logging.getLogger(__name__)
+
+BUILD_ID_TTL_S = 2.0
 
 
 class Service:
@@ -32,6 +34,8 @@ class Service:
         self._scan_lock = threading.Lock()
         self.last_prepare: dict[str, Any] | None = None
         self._file_index = None
+        self._build_id: tuple[float, str] | None = None
+        self.link_rows_cache: tuple[int, dict, dict] | None = None  # importer._link_cache
         # Bandcamp lookups for imports; tests swap in an offline fetcher with recorded responses.
         self.bandcamp_fetcher = self.default_bandcamp_fetcher
         self.musicbrainz_fetcher = lambda: __import__("bc_tagger_server.musicbrainz", fromlist=["x"]).make_fetcher(
@@ -149,7 +153,8 @@ class Service:
         page = items[offset : offset + limit if limit is not None else None]
         db_path = self.db_path()
         rule = self.playlist_rule()
-        return total, [item_view(self.store, it, db_path, rule) for it in page]
+        data = ViewData(self.store, db_path) if len(page) > 20 else None
+        return total, [item_view(self.store, it, db_path, rule, data) for it in page]
 
     def get_item_view(self, item_id: str) -> dict | None:
         from .collection import all_items
@@ -164,10 +169,13 @@ class Service:
         return all_items(self.store)
 
     def sync_items(self, items: dict[str, dict], deleted: list[str], full: bool) -> dict[str, Any]:
+        """Only items whose data changed are written and announced (an ``item`` event makes every open tab
+        re-read its items): the extension's full sync every 15 min mostly sends what's already here.
+        ``{upserted, changed, removed}``."""
         items = self._keep_modified_at(items)
         result = self.store.upsert_items(items, deleted, full=full)
         self.store.set_meta("items_source", {"kind": "extension", "synced_at": now_iso(), "full": full})
-        for item_id in list(items) + list(deleted):
+        for item_id in result.pop("changed_ids") + result.pop("removed_ids"):
             self.jobs.bus.publish("item", {"id": item_id})
         return result
 
@@ -220,9 +228,13 @@ class Service:
         return [{"tag": t, "new": t not in vocab, "playlists": rule(t)} for t in tags]
 
     def sync_tags(self, tags: list[str]) -> dict[str, Any]:
-        self.store.set_tags(tags)
-        self.jobs.bus.publish("tags", {"count": len(tags)})
-        return {"tags": len(tags)}
+        """Replace the tag list; the ``tags`` event only goes out when it changed."""
+        clean = list(dict.fromkeys(t for t in tags if isinstance(t, str)))
+        changed = clean != self.store.get_tags()
+        if changed:
+            self.store.set_tags(clean)
+            self.jobs.bus.publish("tags", {"count": len(clean)})
+        return {"tags": len(clean), "changed": changed}
 
     # -- tag edits queue (app -> extension) -------------------------------------------
 
@@ -415,27 +427,32 @@ class Service:
         }
 
     def index_status(self) -> dict[str, Any]:
+        """Reads only the database and the mount table: page loads never touch (or wake) the music drive.
+        ``mounted``: the root's volume is mounted (a root on the boot disk always is)."""
         from datetime import datetime, timezone
+
+        from .fsguard import is_mounted, volume_root
 
         s = self.settings.all()
         full = self.store.get_meta("last_full_scan") or self._legacy_full_scan()
         quick = self.store.get_meta("last_quick_scan")
-        per_root = {r["root"]: r["n"] for r in self.store.query("SELECT root, COUNT(*) AS n FROM files GROUP BY root")}
+        per_root = self.store.file_counts()
         full_roots = {r["path"]: r for r in (full or {}).get("roots", [])}
         roots, hints = [], []
         for r in self.settings.roots():
             path = str(Path(r["path"]).expanduser())
             last = full_roots.get(path)
-            mounted = Path(path).is_dir()
+            mounted = is_mounted(path)
             roots.append({"path": path, "kind": r["kind"], "mounted": mounted, "files": per_root.get(path, 0),
                           "complete": bool(last and last["complete"])})
             if full and last is None:
                 hints.append({"code": "root_never_scanned", "path": path,
                               "message": f"{path} hasn't had a full scan yet: run Rescan drive."})
             elif full and not last["complete"]:
+                back = " and is mounted now" if mounted and volume_root(path) is not None else ""
                 hints.append({"code": "root_incomplete", "path": path,
                               "message": f"{path} was {'missing' if not last['mounted'] else 'not fully read'} "
-                                         f"at the last full scan{' and is mounted now' if mounted else ''}: run Rescan drive."})
+                                         f"at the last full scan{back}: run Rescan drive."})
         age_days = None
         if full:
             age_days = (datetime.now(timezone.utc) - datetime.fromisoformat(full["at"])).total_seconds() / 86400
@@ -624,9 +641,11 @@ class Service:
                 importer._row_event(self, batch_id, r["n"], len(rows))
 
     def export(self, ids=None, latest=None, dry_run=False, ctx=None, guard_kwargs=None,
-               confirm_token: str | None = None, scan: str | None = None, rows: list[str] | None = None) -> dict[str, Any]:
+               confirm_token: str | None = None, scan: str | None = None, rows: list[str] | None = None,
+               add_same_song: bool = False) -> dict[str, Any]:
         """Export to the configured target. The main collection needs ``confirm_token`` from a dry run.
-        ``rows``: import rows instead of collection items (nothing is added to the collection)."""
+        ``rows``: import rows instead of collection items (nothing is added to the collection).
+        ``add_same_song``: also add tracks whose playlist already holds the same song as another file."""
         from .rbexport import ExportError, build_selection, export
 
         target = self.target(guard_kwargs)
@@ -655,6 +674,7 @@ class Service:
             file_meta=self.file_meta(selection.tracks),
             progress=progress,
             expect=expect,
+            add_same_song=add_same_song,
         )
         diff["selected_items"] = [{"id": it["id"], "title": it.get("title"), "tags": it.get("tags")} for it in items]
         diff["scan"] = scan_stats
@@ -674,11 +694,12 @@ class Service:
                 ctx.item_updated(it["id"])
         return diff
 
-    def start_export(self, ids=None, latest=None, dry_run=False, confirm_token=None, scan=None, rows=None):
+    def start_export(self, ids=None, latest=None, dry_run=False, confirm_token=None, scan=None, rows=None,
+                     add_same_song=False):
         return self.jobs.submit(
             "export",
             lambda ctx: self.export(ids=ids, latest=latest, dry_run=dry_run, ctx=ctx,
-                                    confirm_token=confirm_token, scan=scan, rows=rows),
+                                    confirm_token=confirm_token, scan=scan, rows=rows, add_same_song=add_same_song),
         )
 
     def rekordbox_playlists(self, target: str | None = None) -> list[dict[str, Any]]:
@@ -860,13 +881,21 @@ class Service:
         }
 
     def build_id(self) -> str:
-        """Changes whenever the dev extension build or the app build changes."""
+        """Changes whenever the dev extension build or the app build changes. Cached for ``BUILD_ID_TTL_S``:
+        every open tab asks every few seconds."""
+        import time
+
+        cached = self._build_id
+        if cached is not None and time.monotonic() - cached[0] < BUILD_ID_TTL_S:
+            return cached[1]
         newest = 0.0
         for key in ("dev_extension_build_dir",):
             d = Path(self.settings.get(key) or "").expanduser()
             newest = max(newest, _newest_mtime(d))
         newest = max(newest, _newest_mtime(self.settings.app_dist_dir()))
-        return f"{int(newest * 1000):x}" if newest else "0"
+        build_id = f"{int(newest * 1000):x}" if newest else "0"
+        self._build_id = (time.monotonic(), build_id)
+        return build_id
 
     def valid_item_ids(self) -> list[str]:
         return [it["id"] for it in self.collection_items() if is_valid_id(it["id"])]

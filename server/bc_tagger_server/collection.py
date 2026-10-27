@@ -71,7 +71,7 @@ def search_links(artist: str | None, title: str | None, album: str | None = None
 
 
 def other_all(store: Store) -> list[dict]:
-    return [json.loads(r["data"]) for r in store.query("SELECT data FROM other_items")]
+    return [json.loads(r["data"]) for r in store.query_all("SELECT data FROM other_items", ["data"])]
 
 
 def other_get(store: Store, item_id: str) -> dict | None:
@@ -118,8 +118,8 @@ def queue_add(store: Store, *, item: dict | None = None, tags: list[str] | None 
 
 
 def pending_adds(store: Store) -> list[dict]:
-    rows = store.query("SELECT add_id, payload FROM pending_adds WHERE acked_at IS NULL ORDER BY add_id")
-    return [{"add_id": r["add_id"], **json.loads(r["payload"])} for r in rows]
+    rows = store.query_all("SELECT add_id, payload FROM pending_adds WHERE acked_at IS NULL", ["add_id", "payload"])
+    return [{"add_id": r["add_id"], **json.loads(r["payload"])} for r in sorted(rows, key=lambda r: r["add_id"])]
 
 
 def ack_adds(store: Store, add_ids: Iterable[int]) -> int:

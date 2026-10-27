@@ -78,7 +78,7 @@ def seed_from_export(store: Store, path: Path, force: bool = False) -> dict[str,
     result = store.upsert_items(items, full=True)
     store.set_tags(tags)
     store.set_meta("items_source", {"kind": "export-json", "path": str(path)})
-    return {"seeded": True, **result, "tags": len(tags)}
+    return {"seeded": True, **{k: v for k, v in result.items() if not k.endswith("_ids")}, "tags": len(tags)}
 
 
 def select_items(

@@ -5,6 +5,7 @@ Bandcamp page the user has open."""
 from __future__ import annotations
 
 import re
+from functools import lru_cache
 from typing import Protocol
 
 from rapidfuzz import fuzz
@@ -17,6 +18,21 @@ ACCEPT_AT = 0.85
 # Store-added title noise: "[Bandcamp Digital Exclusive]", "(Bonus Track)"
 _STORE_NOISE = re.compile(r"\s*[\(\[][^\)\]]*\b(?:bandcamp|bonus|exclusive)\b[^\)\]]*[\)\]]", re.I)
 _PARENS = re.compile(r"\s*[\(\[][^\)\]]*[\)\]]")
+
+
+@lru_cache(maxsize=1 << 15)
+def _row_forms(title: str | None, artist: str | None) -> tuple[tuple[str, ...], tuple[str, ...]]:
+    """A row's title and artist variants. Remembered: link-candidates scores every open row against every item
+    of a Bandcamp page, and the resolver scores each row against many hits."""
+    titles, artists = _with_variants([title], [artist] if artist else [])
+    return tuple(titles), tuple(artists)
+
+
+@lru_cache(maxsize=1 << 15)
+def _hit_forms(title: str | None, artist: str | None) -> tuple[tuple[str, ...], tuple[str, ...]]:
+    """A found track's variants, plus its titles without store noise ("[Bandcamp Exclusive]")."""
+    titles, artists = _with_variants([title], [artist] if artist else [])
+    return tuple(_clean(titles + [_STORE_NOISE.sub("", t) for t in titles])), tuple(artists)
 
 
 class Found(Protocol):
@@ -39,9 +55,8 @@ def _best_title(row_titles: list[str], hit_titles: list[str]) -> float:
 def score_hit(hit: Found, artist: str | None, title: str, album: str | None = None, strict: bool = False) -> float:
     """How well ``hit`` agrees with the row. ``strict``: the artist was guessed, so it must match
     closely to auto-accept. Title-only rows are never auto-accepted."""
-    row_titles, row_artists = _with_variants([title], [artist] if artist else [])
-    hit_titles, hit_artists = _with_variants([hit.title], [hit.artist] if hit.artist else [])
-    hit_titles = _clean(hit_titles + [_STORE_NOISE.sub("", t) for t in hit_titles])
+    row_titles, row_artists = _row_forms(title, artist)
+    hit_titles, hit_artists = _hit_forms(hit.title, hit.artist)
     t = _best_title(row_titles, hit_titles)
     if t < 0.88:
         # Same title once "(Metamorphic)", "(… Remix)" etc. are dropped: maybe another version, so

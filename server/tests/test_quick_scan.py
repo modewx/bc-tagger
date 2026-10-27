@@ -46,8 +46,8 @@ def _paths(store):
     return sorted(r["path"] for r in store.query("SELECT path FROM files"))
 
 
-def test_quick_scan_indexes_only_files_since_the_cutoff(drive, tmp_path):
-    store = Store(path=tmp_path / "s.db")
+def test_quick_scan_indexes_only_files_since_the_cutoff(new_store, drive, tmp_path):
+    store = new_store()
     roots = [{"path": str(drive["root"]), "globs": [], "kind": "owned"}]
     stats = indexer.quick_scan(store, roots, NOW - timedelta(days=2))
     assert _paths(store) == [drive["new"]]
@@ -56,10 +56,10 @@ def test_quick_scan_indexes_only_files_since_the_cutoff(drive, tmp_path):
     assert (again["read"], again["unchanged"]) == (0, 1)
 
 
-def test_spotlight_results_are_merged_in(drive, tmp_path, monkeypatch):
+def test_spotlight_results_are_merged_in(new_store, drive, tmp_path, monkeypatch):
     """Spotlight finds files deep inside unchanged folders that the shallow walk can't reach."""
     monkeypatch.setattr(indexer, "spotlight_recent", lambda root, cutoff: [drive["old"], str(root / "notes.txt")])
-    store = Store(path=tmp_path / "s.db")
+    store = new_store()
     stats = indexer.quick_scan(store, [{"path": str(drive["root"]), "globs": [], "kind": "owned"}], NOW - timedelta(days=2))
     assert stats["roots"][0]["method"] == "spotlight+walk"
     assert _paths(store) == sorted([drive["old"], drive["new"]])
@@ -86,8 +86,8 @@ def test_spotlight_unavailable_falls_back(monkeypatch, tmp_path):
     assert indexer.spotlight_recent(tmp_path, NOW) is None
 
 
-def test_unmounted_root_is_skipped(tmp_path):
-    store = Store(path=tmp_path / "s.db")
+def test_unmounted_root_is_skipped(new_store, tmp_path):
+    store = new_store()
     stats = indexer.quick_scan(store, [{"path": str(tmp_path / "gone"), "globs": [], "kind": "owned"}], NOW)
     assert stats["roots"][0]["method"] == "skipped (not mounted)" and stats["checked"] == 0
 
@@ -126,13 +126,13 @@ def test_locate_uses_a_quick_scan_and_never_a_full_one(svc, drive, monkeypatch):
     assert svc.export(ids=["t1"], dry_run=True)["scan"]["mode"] == "quick"
 
 
-def test_manual_full_scan_finds_old_files_and_sets_status(svc, drive, tmp_path):
-    svc.settings.update({"extra_roots": [{"path": str(tmp_path / "unplugged"), "globs": [], "kind": "not_owned"}]})
+def test_manual_full_scan_finds_old_files_and_sets_status(svc, drive, tmp_path, mount_table):
+    unplugged = "/Volumes/BctTestUnplugged/soulseek"  # its drive isn't in the mount table
+    svc.settings.update({"extra_roots": [{"path": unplugged, "globs": [], "kind": "not_owned"}]})
     result = svc.locate(ids=["t2"], scan="full")
     assert result["scan"]["mode"] == "full" and result["items"][0]["status"] == "located"
     st = svc.index_status()
     assert st["last_scan_at"] and not st["stale"] and st["files"] == 2
-    unplugged = str(tmp_path / "unplugged")
     assert unplugged in st["incomplete_roots"]
     hints = {h["path"]: h["code"] for h in st["hints"]}
     assert hints[unplugged] == "root_incomplete" and set(hints.values()) == {"root_incomplete"}
@@ -140,7 +140,7 @@ def test_manual_full_scan_finds_old_files_and_sets_status(svc, drive, tmp_path):
     by_path = {r["path"]: r for r in st["roots"]}
     assert by_path[str(drive["root"])] == {"path": str(drive["root"]), "kind": "not_owned", "mounted": True, "files": 2, "complete": True}
     assert by_path[unplugged]["mounted"] is False and by_path[unplugged]["complete"] is False
-    (tmp_path / "unplugged").mkdir()  # the drive is back: still only a hint, now saying so
+    mount_table("/Volumes/BctTestUnplugged")  # the drive is back: still only a hint, now saying so
     assert "mounted now" in next(h for h in svc.index_status()["hints"] if h["path"] == unplugged)["message"]
     svc.settings.update({"full_rescan_hint_days": 0})
     assert "stale" in [h["code"] for h in svc.index_status()["hints"]]

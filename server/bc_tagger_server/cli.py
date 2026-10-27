@@ -41,7 +41,9 @@ def cmd_serve(svc: Service, args: argparse.Namespace) -> int:
     if watch.get("enabled"):
         print(f"file watcher: {'running' if watch.get('running') else watch.get('error')}")
     # Open SSE streams would otherwise keep a stopping server alive forever.
-    uvicorn.run(create_app(svc), host="127.0.0.1", port=port, log_level="info", timeout_graceful_shutdown=3)
+    # bc_tagger_server.requests logs each request with its time and duration instead of uvicorn's access log
+    uvicorn.run(create_app(svc), host="127.0.0.1", port=port, log_level="info", timeout_graceful_shutdown=3,
+                access_log=False)
     return 0
 
 
@@ -335,7 +337,8 @@ def main(argv: list[str] | None = None) -> int:
         os.environ["BC_TAGGER_DATA_DIR"] = str(Path(args.data_dir).expanduser())
     logging.basicConfig(
         level=logging.DEBUG if args.verbose else logging.WARNING if getattr(args, "json", False) else logging.INFO,
-        format="%(levelname)s %(name)s: %(message)s",
+        format="%(asctime)s.%(msecs)03d %(levelname)s %(name)s: %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S",
     )
     svc = Service()
     try:

@@ -183,13 +183,15 @@ def all_root_paths(settings: dict[str, Any]) -> list[str]:
     return [p for p in paths if p]
 
 
-def import_log_dir_problem(folder: Path, roots: list[str]) -> str | None:
-    """Why ``folder`` can't hold import logs (inside a root, or on a music root's drive), else None."""
+def import_log_dir_problem(folder: Path, roots: list[str], resolve: bool = True) -> str | None:
+    """Why ``folder`` can't hold import logs (inside a root, or on a music root's drive), else None.
+    ``resolve=False`` compares the paths as written: resolving symlinks would read the music drive."""
     from .fsguard import volume_root
 
-    folder = Path(os.path.realpath(Path(folder).expanduser()))
+    real_path = os.path.realpath if resolve else os.path.abspath
+    folder = Path(real_path(Path(folder).expanduser()))
     for root in roots:
-        real = Path(os.path.realpath(Path(root).expanduser()))
+        real = Path(real_path(Path(root).expanduser()))
         if folder == real or real in folder.parents:
             return f"import_log_dir can't be inside a music root ({root})"
         vol = volume_root(root)

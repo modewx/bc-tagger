@@ -41,6 +41,12 @@ cd server
   `transcode-cache/`.
 - Until the extension pushes its data, the items mirror is seeded from the export JSON
   (setting `seed_export_json`). `./bct seed --force` reloads it.
+- The log (stderr) has one timed line per request: when it ended, port, method, path, status, the time until
+  its response started, size, when it started, and for a stream (events, audio) how long it stayed open. A
+  request with no response after 5 s logs every thread's stack once, plus who holds the Store's write lock
+  (`slow requests: …`), so a stall names its cause. Open streams never count.
+- Reads use their own pooled SQLite connections (WAL), so a page load never waits for another request's
+  queries or for a write.
 
 ## CLI
 
@@ -78,6 +84,8 @@ for `export` and `xml`.
   off or hasn't indexed them yet), and old files that were never indexed. `./bct index-status` (or
   `GET /api/index/status`) says when a full rescan is worth it: never scanned, a root missing or interrupted
   at the last full scan, or the last full scan older than `full_rescan_hint_days` (default 30).
+  The status never touches the music drive: a root's `mounted` comes from the kernel's mount table (a root on
+  the boot disk always counts as mounted), and its `files` count is kept by triggers on the index.
 - When several copies match equally well, the one created closest after the item was tagged wins.
 - **Opt-in file watcher** (`watch_roots`, default off): while `bct serve` runs, file events from the roots
   update the index within seconds (debounced until the size is stable; a file leaves the index only when its
@@ -237,6 +245,19 @@ target's playlist tree; `POST /api/rekordbox/resolve` says which names exist or 
   alone. Items that aren't located right now are left out of the selection, so an unmounted
   drive doesn't empty your playlists. If you delete a managed entry in rekordbox, the next
   export puts it back; untag the item to drop it.
+- **No duplicate entries:** a track is never added to a playlist twice. Exporting it again, from a second
+  import for example, finds its entry (or the one you added yourself).
+  - **Same song, another file:** a different file of the same song isn't added either. This covers a FLAC
+    when the AIFF is in, or your own copy. Same song means the same artist and title (case, punctuation and
+    "(Original Mix)" ignored) with lengths within 2 s; an unknown title, artist or length never matches.
+  - **In the diff:** these are listed under `entries_same_song` as
+    `{playlist, content_id, path, title, artist, reason: "same_song_other_file",
+    message: "already in playlist (other file)", existing: {content_id, path, title, artist}}`.
+    `per_playlist[].same_song` counts them, and a `same_song_other_file` warning gives the total.
+  - A file skipped this way for every playlist isn't added to the library either. `content_id` is then
+    `null`.
+  - `add_same_song: true` in `POST /api/rekordbox/export` (on both the dry run and the confirm) adds them
+    anyway.
 
 ### XML fallback
 
@@ -344,7 +365,10 @@ server's own cache only.
 Rows below the threshold keep up to three candidates to pick (`PUT …/rows/<n> {choose}`). A row the
 search misses can be linked from the extension to the Bandcamp page the user has open
 (`POST /api/import/<id>/rows/<n>/link {item}`; `POST /api/import/link-candidates {item}` says which
-rows fit that page). On commit, Bandcamp rows go to the extension's pending-adds queue and the rest
+rows fit that page). For a whole Bandcamp page, `POST /api/import/link-candidates {items: [{item, page_url?}, …]}`
+returns `{results: [[candidate, …], …]}` in the order sent (up to 1,000 items). At most two run at once, waiting
+ones hold no worker thread, identical requests in flight are answered once, a request the extension gave up on
+is skipped, and answers are cached until an import row changes. On commit, Bandcamp rows go to the extension's pending-adds queue and the rest
 to the server's `other` collection with Bandcamp/Discogs/YouTube links. Each committed row that is located gives
 its item that location right away (new items always; a merged item only if it wasn't located already, or the row
 confirms it), with SSE `item` events, so the collection shows it located without a Locate (`items_located`).
@@ -406,7 +430,9 @@ import: rows, review, commit, log (`source: "files"`), `modified_at` and "#".
 
 `GET /api/import/files/defaults` → `{folders: [{path, kind, since, last_run, mounted, exists}], remembered,
 default_tags: ["pool"], lookup}`: the owned root and the not-owned `complete` root. Each `since` is the date of
-that folder's last files-import (remembered when one is created), else 7 days ago. It only reads.
+that folder's last files-import (remembered when one is created), else 7 days ago. It only reads, and never
+touches the music drive: `mounted` comes from the mount table and `exists` is the same value. A missing folder
+is reported when the import starts.
 
 ### Import rows straight to rekordbox
 

@@ -28,7 +28,7 @@ from typing import Callable
 
 from . import rbguard
 from .items import album_name, is_album, item_tags
-from .normalize import norm
+from .normalize import norm, norm_title
 from .playlists import Tree, key_of, parts_of, playlists_for_tag
 from .store import Store, now_iso
 from .views import located_tracks
@@ -295,6 +295,37 @@ def playlist_songs(db: Any, playlist_id: str) -> list:
     )
 
 
+SAME_SONG_SECONDS = 2.0
+SAME_SONG_MESSAGE = "already in playlist (other file)"
+
+
+def song_identity(title: Any, artist: Any, length: Any, content_id: str | None, path: str | None) -> dict[str, Any]:
+    """What makes two files the same song: normalized artist and title, and the length (``None`` when unknown:
+    rekordbox stores 0 for that)."""
+    key = (norm(artist or ""), norm_title(title or ""))
+    try:
+        seconds = float(length) if length else None
+    except (TypeError, ValueError):
+        seconds = None
+    return {"key": key if all(key) else None, "length": seconds, "content_id": content_id, "path": path,
+            "nfc": unicodedata.normalize("NFC", path) if path else None, "title": title or None,
+            "artist": artist or None}
+
+
+def same_song(mine: dict[str, Any] | None, songs: list[dict[str, Any]]) -> dict[str, Any] | None:
+    """The song in ``songs`` that is ``mine`` as another file: same artist and title, lengths within
+    ``SAME_SONG_SECONDS``. Unknown titles, artists or lengths never match."""
+    if not mine or mine["key"] is None or mine["length"] is None:
+        return None
+
+    def same_file(s: dict[str, Any]) -> bool:
+        return (bool(s["content_id"]) and s["content_id"] == mine["content_id"]) or (
+            bool(s["nfc"]) and s["nfc"] == mine["nfc"])
+
+    return next((s for s in songs if not same_file(s) and s["key"] == mine["key"] and s["length"] is not None
+                 and abs(s["length"] - mine["length"]) <= SAME_SONG_SECONDS), None)
+
+
 def remove_song(db: Any, song: Any) -> None:
     """Remove one playlist entry and renumber the rest, without committing.
 
@@ -347,15 +378,19 @@ def export(
     file_meta: dict[str, dict] | None = None,
     progress=None,
     expect: dict[str, str] | None = None,
+    add_same_song: bool = False,
 ) -> dict[str, Any]:
     """Apply (or with ``dry_run`` only compute) the export. Returns a diff.
+
+    A track whose playlist already holds the same song as another file (same artist and title, length within
+    2 s) isn't added, unless ``add_same_song``; the diff lists it under ``entries_same_song``.
 
     A real run first plans with a dry pass (on the main collection: on a snapshot copy). It
     refuses if the plan has errors, or if ``expect`` (from a confirmed dry run) no longer
     matches the plan or the DB files. When nothing would change it returns without a backup.
     """
     source_fp = target.source_fingerprint()
-    kw = dict(folder_name=folder_name, file_meta=file_meta, progress=progress)
+    kw = dict(folder_name=folder_name, file_meta=file_meta, progress=progress, add_same_song=add_same_song)
     plan = _export(store, target, selection, dry_run=True, record=False, **kw)
     plan["plan_fingerprint"] = plan_fingerprint(plan)
     plan["source_fingerprint"] = source_fp
@@ -388,6 +423,7 @@ def _export(
     file_meta: dict[str, dict] | None,
     progress,
     expect_plan: str | None = None,
+    add_same_song: bool = False,
 ) -> dict[str, Any]:
     db_key = str(rbguard.resolve(target.db_path))
     file_meta = file_meta or {}
@@ -404,6 +440,9 @@ def _export(
         "entries_added": [],
         "entries_removed": [],
         "entries_kept_user": 0,
+        # tracks not added: their playlist already holds the same song as another file
+        # [{playlist, content_id, path, title, artist, reason, message, existing: {content_id, path, title, artist}}]
+        "entries_same_song": [],
         "per_playlist": [],
         "errors": [],
         # [{code, message}] — blockers make a confirm fail (shown before the user confirms);
@@ -501,12 +540,73 @@ def _export(
         if folder_name:
             diff["folder"]["created"] = key_of((folder_name,)) in diff["folders_created"]
 
+        # Songs already in the playlists, so another file of one of them isn't added (unless add_same_song)
+        songs_by_pl: dict[str, dict[str, list]] = {}
+
+        def songs_for(pl) -> dict[str, list]:
+            if pl is None:
+                return {}
+            if pl.ID not in songs_by_pl:
+                by_cid: dict[str, list] = {}
+                for song in playlist_songs(db, pl.ID):
+                    by_cid.setdefault(str(song.ContentID), []).append(song)
+                songs_by_pl[pl.ID] = by_cid
+            return songs_by_pl[pl.ID]
+
+        known_songs: dict[str, list[dict[str, Any]]] = {}  # playlist key -> songs in it (and added by this run)
+
+        def songs_in(key: str) -> list[dict[str, Any]]:
+            if key not in known_songs:
+                known_songs[key] = []
+                for cid, entries in songs_for(rows.get(key)).items():
+                    c = entries[0].Content
+                    if c is not None:
+                        known_songs[key].append(song_identity(c.Title, c.ArtistName, c.Length, cid, c.FolderPath))
+            return known_songs[key]
+
+        mine: dict[str, dict[str, Any]] = {}  # path -> the song this export would add
+        for path, plan in selection.tracks.items():
+            meta = merged_meta(file_meta.get(path, {}), plan.meta)
+            mine[path] = song_identity(meta.get("title"), meta.get("artist"), meta.get("duration"), None, path)
+
+        per: dict[str, dict[str, Any]] = {}
+
+        def stats_for(key: str) -> dict[str, Any]:
+            return per.setdefault(key, {"playlist": key, "exists": key not in planned, "add": 0, "remove": 0,
+                                        "same_song": 0})
+
+        def skip_same_song(key: str, me: dict[str, Any], cid: str | None, twin: dict[str, Any]) -> None:
+            diff["entries_same_song"].append({
+                "playlist": key, "content_id": cid, "path": me["path"], "title": me["title"], "artist": me["artist"],
+                "reason": "same_song_other_file", "message": SAME_SONG_MESSAGE,
+                "existing": {k: twin[k] for k in ("content_id", "path", "title", "artist")}})
+            stats_for(key)["same_song"] += 1
+
         # 2. Content rows (looked up by path first, NFC/NFD-insensitive)
         known = content_path_index(db)
+        # A file not in the library whose every playlist already holds its song as another file isn't added at
+        # all (no stray track in the collection). Files kept here count for the ones after them.
+        skip_new: set[str] = set()
+        if not add_same_song:
+            for path, plan in selection.tracks.items():
+                if known.get(unicodedata.normalize("NFC", path)) is not None or not Path(path).is_file():
+                    continue
+                keys = list(dict.fromkeys(k for k, _ in plan.claims if k not in bad))
+                twins = {k: same_song(mine[path], songs_in(k)) for k in keys}
+                if keys and all(twins.values()):
+                    skip_new.add(path)
+                    for k in keys:
+                        skip_same_song(k, mine[path], None, twins[k])
+                else:
+                    for k in keys:
+                        if twins[k] is None:
+                            songs_in(k).append(mine[path])
         total = len(selection.tracks)
         for n, path in enumerate(selection.tracks, 1):
             if not Path(path).is_file():
                 diff["missing_files"].append(path)
+                continue
+            if path in skip_new:
                 continue
             existing = known.get(unicodedata.normalize("NFC", path))
             meta = merged_meta(file_meta.get(path, {}), selection.tracks[path].meta)
@@ -544,6 +644,8 @@ def _export(
         new_claims: dict[tuple[str, str], set[str]] = {}
         track_pos: dict[str, int] = {}
         for pos, (path, plan) in enumerate(selection.tracks.items()):
+            if path in skip_new:
+                continue
             cid = content_ids.get(path)
             if cid is None:
                 # File vanished since locate: keep the claims on the content it had before.
@@ -572,19 +674,8 @@ def _export(
         )
 
         # 4. Entries
-        songs_by_pl: dict[str, dict[str, list]] = {}
-
-        def songs_for(pl) -> dict[str, list]:
-            if pl is None:
-                return {}
-            if pl.ID not in songs_by_pl:
-                by_cid: dict[str, list] = {}
-                for song in playlist_songs(db, pl.ID):
-                    by_cid.setdefault(str(song.ContentID), []).append(song)
-                songs_by_pl[pl.ID] = by_cid
-            return songs_by_pl[pl.ID]
-
-        per: dict[str, dict[str, Any]] = {}
+        mine_by_cid = {content_ids[p]: {**me, "content_id": content_ids[p]}
+                       for p, me in mine.items() if p in content_ids}
         for key, cid in affected:
             others = store.query(
                 f"SELECT 1 FROM rb_claims WHERE db_path = ? AND tag = ? AND content_id = ? "
@@ -603,12 +694,19 @@ def _export(
             ours_song = next((s for s in present if ours and str(s.ID) == ours["song_id"]), None)
             if ours and ours_song is None:
                 stale_entries.append((key, cid))
-            stats = per.setdefault(key, {"playlist": key, "exists": key not in planned, "add": 0, "remove": 0})
+            stats = stats_for(key)
             if wanted:
                 if present:
                     if ours_song is None:
                         diff["entries_kept_user"] += 1  # the user's own entry: not claimed
                     continue
+                me = mine_by_cid.get(cid)
+                twin = None if add_same_song else same_song(me, songs_in(key))
+                if twin is not None:  # e.g. the FLAC is in, this is the AIFF (or the user added their own copy)
+                    skip_same_song(key, me, cid, twin)
+                    continue
+                if me is not None:
+                    songs_in(key).append(me)  # a second file of it in this run is caught too
                 entry = {"playlist": key, "tag": key, "content_id": cid, "path": _path_of(content_ids, cid)}
                 diff["entries_added"].append(entry)
                 stats["add"] += 1
@@ -627,8 +725,12 @@ def _export(
                     songs_for(pl)[cid].remove(ours_song)
                     touched[str(pl.ID)] = pl
         for key in diff["playlists_created"]:
-            per.setdefault(key, {"playlist": key, "exists": False, "add": 0, "remove": 0})
-        diff["per_playlist"] = [v for v in per.values() if v["add"] or v["remove"] or not v["exists"]]
+            stats_for(key)
+        diff["per_playlist"] = [v for v in per.values()
+                                if v["add"] or v["remove"] or v["same_song"] or not v["exists"]]
+        if diff["entries_same_song"]:
+            n = len(diff["entries_same_song"])
+            warn("same_song_other_file", f"{n} track{'s' if n != 1 else ''} not added: {SAME_SONG_MESSAGE}")
 
         changed = bool(
             diff["folders_created"]

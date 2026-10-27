@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import re
 import unicodedata
+from functools import lru_cache, wraps
 
 _SPECIAL = str.maketrans({"æ": "ae", "Æ": "ae", "ø": "o", "Ø": "o", "ß": "ss", "œ": "oe", "Œ": "oe", "đ": "d", "ł": "l", "Ł": "l"})
 _NON_ALNUM = re.compile(r"[^0-9a-z]+")
@@ -15,6 +16,19 @@ _SIDE_PREFIX = re.compile(r"^\s*[a-dA-D][1-9]\s*[-.:)]?\s+(?=\S)")
 _SLUG_SEP = re.compile(r"[-_]+")
 
 
+def _memo(fn):
+    """Remember results for string arguments: matching normalizes the same titles over and over (every
+    link-candidates call scores all open import rows)."""
+    cached = lru_cache(maxsize=1 << 16)(fn)
+
+    @wraps(fn)
+    def call(s):
+        return cached(s) if s is None or isinstance(s, str) else fn(s)
+
+    return call
+
+
+@_memo
 def fold(s: str | None) -> str:
     """Lowercase, strip accents, map a few special letters (æ -> ae)."""
     if not s:
@@ -25,6 +39,7 @@ def fold(s: str | None) -> str:
     return s.casefold()
 
 
+@_memo
 def norm(s: str | None) -> str:
     """Folded, '&' -> 'and', punctuation -> spaces, whitespace collapsed."""
     s = fold(s).replace("&", " and ").replace("+", " and ")
@@ -34,6 +49,7 @@ def norm(s: str | None) -> str:
 _GLUED_DIGITS = re.compile(r"(?<=[a-z])(?=\d)")
 
 
+@_memo
 def norm_title(s: str | None) -> str:
     """Like ``norm`` but drops '(Original Mix)' noise and Mixed In Key '- 11A - 82' suffixes,
     and splits digits glued to words ('Sfire2' -> 'sfire 2')."""
@@ -41,6 +57,7 @@ def norm_title(s: str | None) -> str:
     return " ".join(_GLUED_DIGITS.sub(" ", t).split())
 
 
+@_memo
 def strip_side(s: str | None) -> str:
     """'B1- Tiberis' -> 'Tiberis' (vinyl side prefixes on Bandcamp track titles)."""
     return _SIDE_PREFIX.sub("", s or "", count=1).strip()
@@ -57,6 +74,7 @@ def looks_like_label(artist: str | None) -> bool:
 _FEAT = re.compile(r"\s*[\(\[]?\s*\b(?:feat\.?|ft\.?|featuring)\s+[^\)\]]*[\)\]]?", re.I)
 
 
+@_memo
 def strip_feat(s: str | None) -> str:
     """'Song (feat. X)' / 'Artist ft. X' -> 'Song' / 'Artist' (featured artists move between
     title and artist fields from one source to another)."""
@@ -70,7 +88,8 @@ def unslug(s: str | None) -> str:
 _ROMAN = {"i": "1", "ii": "2", "iii": "3", "iv": "4", "v": "5", "vi": "6", "vii": "7", "viii": "8", "ix": "9", "x": "10"}
 
 
-def numbers(s: str | None) -> set[str]:
+@_memo
+def numbers(s: str | None) -> frozenset[str]:
     """Number tokens in a title ('Part 3', 'File #2', 'Vol. II') for the number-mismatch guard."""
     out = set()
     for tok in norm_title(s).split():
@@ -79,7 +98,7 @@ def numbers(s: str | None) -> set[str]:
         elif tok in _ROMAN and tok not in ("i", "v", "x"):
             # single letters are too ambiguous ("I like to watch", "V/A")
             out.add(_ROMAN[tok])
-    return out
+    return frozenset(out)
 
 
 # -- filename parsing ---------------------------------------------------------------------
