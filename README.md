@@ -39,6 +39,14 @@ reachable, edits are queued on the server and applied by the extension on its ne
     Modified first, ready for **Export Selected to RB**. It also saves an import log (JSON plus a Markdown summary,
     named by date and time): **View** shows it, and **Show in Finder** shows the file.
   - **Past imports** on the Import tab lists the logs, newest first, with their counts.
+- **Settings → Import → Import from Files:** folders (by default the Collection and the downloads `complete`
+  folder), each with an "added since" date that starts from its last run. Default tags are `pool`, with the same
+  lookup choice.
+  - One row per track file (a FLAC + AIFF pair counts once), already located, folder by folder, oldest release
+    first.
+  - Tracks already in the collection show as duplicates, unticked.
+  - **Locations to update (N):** collection items that aren't located yet get these files on Import selected,
+    whether or not their rows are ticked.
   - An open import survives leaving the page; the header shows where it is.
 - **Settings → General:** music folders, matching, downloads (folder and format), Bandcamp request pacing, the
   lookup source (Bandcamp / MusicBrainz / both), the import log folder (not inside a music folder or on the music

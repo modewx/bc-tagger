@@ -113,6 +113,12 @@ npm run test:e2e                         # Playwright e2e: own profile, server :
     order when the extension updates, skipping numbers already in use. The server numbers imports above its
     Bandcamp item count, so those numbers stay free. A new tag gets max(own, the server's `max_order`) + 1, and a re-tag keeps its
     number. Import → **Set the # order only** restores an order from a file.
+  - **Import from Files** (Phase 7, A's API): the Import tab's folder rows come prefilled with dates from each
+    folder's last run, with Browse… (a folder picker of the music folders), `pool` and the lookup choice. The
+    preview groups rows under their folder's path (`groupBy` in the shared table, in "#" order only), shows a
+    FLAC + AIFF pair as one row with "+1", and lists **Locations to update**: collection items that get located
+    on commit, ticked or not. The preview's "#" is the row's own place. e2e uses a fixture tree with real file
+    dates on the test server.
 - **Extension:**
   - Syncs to the server (diffs, a guarded full sync) and is the bridge for the local app (tag edits, page fetches,
     pending adds from imports).
