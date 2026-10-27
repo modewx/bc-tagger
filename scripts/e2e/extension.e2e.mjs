@@ -222,7 +222,11 @@ test("the e2e extension loads with its own name", async () => {
 });
 
 test("a fresh, empty profile does not wipe the server mirror", async () => {
-  await sleep(4000); // onInstalled → sync tick
+  // The first sync tick (onInstalled) has run to its end (the ownership check is its last step).
+  await waitFor(
+    () => probe.evaluate(() => chrome.storage.session.get("bcSyncStatus").then((s) => s.bcSyncStatus || {})).then((s) => !!(s.lastCheckAt && s.ownership && s.ownership.at)),
+    { what: "the first sync tick", timeout: 20000 }
+  );
   const health = await api("/api/health");
   assert.equal(health.items, exportCount);
   assert.equal((health.items_source || {}).kind, "export-json");
@@ -279,6 +283,13 @@ test("\"#\" is explicit: a new tag goes last, a re-tag keeps its number, \"Set t
     const bc = rows.filter(([k]) => !/^o/.test(k));
     assert.deepEqual(bc[bc.length - 1], [NEW, String(max + 1)], "the new tag is last");
     assert.deepEqual(bc[0], [first, String(before[first].order)]);
+    // Another new item rebuilds the table: the page stays where it was.
+    await page.evaluate(() => window.scrollTo(0, 3000));
+    const y = await page.evaluate(() => window.scrollY);
+    await send({ type: "addTaggedItem", item: { id: `${NEW}2`, raw_id: 90000000012, tralbum_type: "t", artist: "E2E Artist", title: "E2E Newer", tags: ["must"] } });
+    await page.waitForFunction((id) => document.querySelector(`tr[data-key="${id}"]`), `${NEW}2`, { timeout: 15000 });
+    const scrolled = await page.evaluate(() => [window.scrollY, document.documentElement.scrollHeight, innerHeight]);
+    assert.ok(Math.abs(scrolled[0] - y) < 50, `scroll kept: ${y} → ${JSON.stringify(scrolled)}`);
 
     // "Set the # order only" from an order file: these three first, the rest after in their order.
     const top = ordered(before).slice(-3).reverse();
@@ -301,6 +312,7 @@ test("\"#\" is explicit: a new tag goes last, a re-tag keeps its number, \"Set t
   } finally {
     // Back to the export's numbering, without the e2e item and tag.
     await send({ type: "removeTaggedItem", id: NEW });
+    await send({ type: "removeTaggedItem", id: `${NEW}2` });
     const first = Object.keys(exportData.taggedItems)[0];
     await send({ type: "updateTaggedItemTags", id: first, tags: exportData.taggedItems[first].tags });
     await send({ type: "importData", data: { format: "bc-tagger-order/1", order: Object.keys(exportData.taggedItems) }, mode: "order" });
@@ -578,19 +590,26 @@ test("titles are rendered as text, not HTML (extension page and local app)", asy
 });
 
 test("local app: a reload before an edit reaches the server doesn't undo it", async () => {
+  const before = await itemTags(ITEM);
+  // A vocabulary tag the item doesn't have (the editor only offers vocabulary tags).
+  const extra = (await storage("tags")).tags.find((t) => !before.includes(t));
+  const want = [...before, extra].sort();
+  // Right after an import the server is still getting the extension's tag list and "#" numbers
+  // (each re-sorts the app's table): start once it has both.
+  await waitFor(() => api("/api/tags").then((t) => Array.isArray(t) && t.includes(extra)), { what: "the tag list on the server" });
+  await waitFor(
+    () => api("/api/items").then((d) => (Array.isArray(d) ? d : d.items).every((i) => i.source === "other" || Number.isFinite(i.order))),
+    { what: "every item numbered on the server", timeout: 30000 }
+  );
   const app = await context.newPage();
   await app.goto(SERVER + "/");
   await app.waitForFunction(() => /extension connected/.test(document.getElementById("navExt").textContent));
-  const before = await itemTags(ITEM);
   const set = async (tags) => {
     await app.locator(`tr[data-key="${ITEM}"]`).scrollIntoViewIfNeeded();
     await app.waitForSelector(`tr[data-key="${ITEM}"] select.tag-editor`, { state: "attached" });
     await app.evaluate(([id, t]) => $(`tr[data-key="${id}"] select.tag-editor`).val(t).trigger("change"), [ITEM, tags]);
   };
   const editorTags = async () => [...((await app.evaluate((id) => $(`tr[data-key="${id}"] select.tag-editor`).val(), ITEM)) || [])].sort();
-  // A vocabulary tag the item doesn't have (the editor only offers vocabulary tags).
-  const extra = (await storage("tags")).tags.find((t) => !before.includes(t));
-  const want = [...before, extra].sort();
 
   await set([...before, extra]);
   // Force a reload now, while the server mirror still has the old tags (the
@@ -609,7 +628,9 @@ test("local app: a reload before an edit reaches the server doesn't undo it", as
   assert.deepEqual([...(await itemTags(ITEM))].sort(), want);
   assert.deepEqual(await editorTags(), want);
   await set(before);
-  await sleep(1500);
+  await waitFor(() => api(`/api/items/${ITEM}`).then((it) => JSON.stringify([...it.tags].sort()) === JSON.stringify([...before].sort())), {
+    what: "the tags back on the server",
+  });
   await app.close();
 });
 
@@ -1556,7 +1577,7 @@ test("Settings → Bandcamp requests: the three values round-trip, and both coll
   // Out of range: the server refuses it and nothing changes.
   await page.fill("#f_bandcamp_browser_concurrency", "9");
   await page.click("#saveBtn");
-  await page.waitForTimeout(800);
+  await page.waitForFunction(() => /Not saved/.test(document.getElementById("saveState").textContent));
   assert.equal((await api("/api/settings").then((d) => d.settings || d)).bandcamp_browser_concurrency, 1);
   await put({ bandcamp_request_interval_s: 1, bandcamp_browser_concurrency: 2, bandcamp_browser_spacing_ms: 400 });
   await page.close();
@@ -1657,8 +1678,7 @@ test("import preview: Locate again finds a file added later; Set file by search;
     await page.check("#locateAllRows");
     await page.click("#locateAgain");
     await page.waitForFunction(() => /^Locate again: /.test(document.getElementById("refreshStatus").textContent) && !document.getElementById("locateAgain").disabled, null, { timeout: 60000 });
-    await page.waitForTimeout(300);
-    assert.equal(await loc("r1"), "located-manual");
+    await page.waitForFunction(() => document.querySelector("tr[data-key='r1'] .located-cell .chip").dataset.status === "located-manual");
     const row1 = (await api(`/api/import/${batchId}`)).rows[1];
     assert.equal(row1.located.best.path, late);
     assert.equal(row1.located.manual, true);

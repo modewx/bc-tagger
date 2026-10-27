@@ -98,6 +98,17 @@ Runs the extension, server and local app together in a Playwright Chromium with 
   real server (mapping, linking, browser lookups, downloads, re-locate, browse), settings, and rekordbox dry runs
   and a sandbox write.
 
+A full run (62 tests) takes about 110 s (2026-10-26, three runs: 110–112 s). For a quick check, run a subset by
+name. Include `Import \(replace\)`, which loads the test collection the others use:
+
+```bash
+node --test --test-concurrency=1 --test-name-pattern="Import \(replace\)|Import from Files" scripts/e2e/extension.e2e.mjs
+```
+
+Some tests rely on earlier ones (e.g. Import from Files needs an item the Locate tests located), so a subset
+can fail where the full run passes. Tests wait for conditions rather than fixed delays; the few short fixed
+waits check that something does *not* happen.
+
 First time only: `npx playwright install chromium`.
 
 Other helpers: `node scripts/ext-page-harness.js --build extension/build --data <export.json>` serves a
