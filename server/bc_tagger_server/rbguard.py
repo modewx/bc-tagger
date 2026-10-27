@@ -14,8 +14,10 @@ Test mode (default; see LOCAL_COLLECTION_PLAN.md, "Hard safety rules"):
 
 Main mode (Phase 2: the user's own collection, switched on in settings only):
 
-* Writes only when ``allow_main_writes`` is on (re-read at every check) and the path is the
-  configured ``rekordbox_main_db_path``; there is no per-request override.
+* ``rekordbox_target: "main"`` is a free choice: reads (the playlist tree, dry runs) use a snapshot of the
+  main library either way. Writes only when ``allow_main_writes`` is also on (re-read at every check; else
+  the dry run shows the ``main_writes_locked`` blocker) and the path is the configured
+  ``rekordbox_main_db_path``; there is no per-request override.
 * Refuses while any rekordbox process runs (no bypass) and when the folder holds the test
   marker (the test library is switched in).
 * Backs up ``master.db`` (+ -wal/-shm) and ``masterPlaylists6.xml`` to
@@ -52,6 +54,9 @@ BACKUP_DIRNAME = "backups"
 KEEP_BACKUPS = 50
 KEEP_MAIN_BACKUPS = 5
 PLAYLIST_XML = "masterPlaylists6.xml"
+
+MAIN_WRITES_LOCKED = ("Writing to your main collection is locked: tick 'Allow bc-tagger to write to my main "
+                      "collection' in Settings → Rekordbox")
 
 _UNSET: Any = object()
 _commit_lock = threading.Lock()
@@ -269,7 +274,7 @@ def check_write_main(
         return GuardDecision(False, f"refusing: {reason}", t, mode="main", code=code, **kw)
 
     if not _allowed(allow):
-        return refuse("main_writes_off", "writing to the main collection is turned off (Settings → Rekordbox)")
+        return refuse("main_writes_locked", MAIN_WRITES_LOCKED)
     configured_path = resolve(configured() if callable(configured) else configured)
     if target != configured_path:
         return refuse("not_configured_path", f"{t} is not the configured main collection ({configured_path})")

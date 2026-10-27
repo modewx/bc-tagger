@@ -64,7 +64,8 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     "extra_roots": [],
     # The test library (needs the marker file). Exports go here while rekordbox_target is "test".
     "rekordbox_db_path": str(TEST_LIBRARY_DIR / "master.db"),
-    # "test" | "main". "main" requires allow_main_writes; turning that off resets this to "test".
+    # "test" | "main": the library exports and transfers use (reads: the playlist tree, dry runs). A free choice;
+    # writing to "main" additionally needs allow_main_writes (else the dry run shows it locked).
     "rekordbox_target": "test",
     "allow_main_writes": False,
     "rekordbox_main_db_path": str(MAIN_LIBRARY_DIR / "master.db"),
@@ -298,8 +299,6 @@ def _validate(merged: dict[str, Any]) -> dict[str, Any]:
         raise SettingsError("rekordbox_target must be 'test' or 'main'")
     if not isinstance(out.get("allow_main_writes"), bool):
         raise SettingsError("allow_main_writes must be true or false")
-    if out["rekordbox_target"] == "main" and not out["allow_main_writes"]:
-        raise SettingsError("rekordbox_target 'main' requires allow_main_writes")
     if not isinstance(out.get("rekordbox_main_db_path"), str) or not out["rekordbox_main_db_path"].strip():
         raise SettingsError("rekordbox_main_db_path must be a path")
     if out.get("tag_playlist_mode") not in ("auto", "custom"):
@@ -380,8 +379,6 @@ class Settings:
             raise SettingsError(f"read-only settings: {sorted(blocked)}")
         with self._lock:
             changes = dict(changes)
-            if changes.get("allow_main_writes") is False and "rekordbox_target" not in changes:
-                changes["rekordbox_target"] = "test"  # unticking the checkbox returns to test
             merged = _validate({**self._fresh(), **changes})
             if "downloads_dir" in changes:
                 _check_downloads_dir(merged)

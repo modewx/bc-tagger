@@ -232,5 +232,5 @@ def test_refusals_carry_codes(tmp_path):
     assert check_write(db, running=False).code == "not_test_library"
     assert check_write(tmp_path / "nope" / "master.db", running=False).code == "db_missing"
     main = fake_db(tmp_path / "main", marker=False)
-    assert rbguard.check_write_main(main, allow=False, configured=main, running=False).code == "main_writes_off"
+    assert rbguard.check_write_main(main, allow=False, configured=main, running=False).code == "main_writes_locked"
     assert rbguard.check_write_main(main, allow=True, configured=main, running=True).code == "rekordbox_running"
