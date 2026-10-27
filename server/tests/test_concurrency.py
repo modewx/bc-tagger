@@ -78,6 +78,19 @@ def test_a_stalled_request_names_its_threads(make_service, tmp_path, monkeypatch
     assert any(re.search(r"GET /api/dev/build-id 200 \d+\.\d{3}s 1\dB \(started \d\d:\d\d:\d\d\.\d{3}\)", m) for m in lines)
 
 
+def test_open_streams_are_not_stalls(monkeypatch):
+    """An event or audio stream starts its response at once and stays open: never reported."""
+    stream = {"start": 0.0, "method": "GET", "path": "/api/events", "reported": False, "extra": None,
+              "responding": True}
+    monkeypatch.setattr(reqlog, "_running", {1: stream})
+    monkeypatch.setattr(reqlog, "_last_dump", 0.0)
+    assert reqlog.check(now=600.0) is None
+    stuck = {**stream, "path": "/api/items", "responding": False}
+    monkeypatch.setattr(reqlog, "_running", {1: stream, 2: stuck})
+    dump = reqlog.check(now=600.0)
+    assert "slow requests: 1 over" in dump and "/api/events (responding)" in dump
+
+
 @pytest.mark.skipif(sys.platform != "darwin", reason="getfsstat is the macOS mount table")
 def test_getfsstat_lists_what_mount_lists():
     out = subprocess.run(["/sbin/mount"], capture_output=True, text=True, timeout=10).stdout

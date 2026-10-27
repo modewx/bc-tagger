@@ -41,9 +41,10 @@ cd server
   `transcode-cache/`.
 - Until the extension pushes its data, the items mirror is seeded from the export JSON
   (setting `seed_export_json`). `./bct seed --force` reloads it.
-- The log (stderr) has one timed line per request: when it ended, port, method, path, status, duration, size
-  and when it started. A request running longer than 5 s logs every thread's stack once, plus who holds the
-  Store's write lock (`slow requests: …`), so a stall names its cause.
+- The log (stderr) has one timed line per request: when it ended, port, method, path, status, the time until
+  its response started, size, when it started, and for a stream (events, audio) how long it stayed open. A
+  request with no response after 5 s logs every thread's stack once, plus who holds the Store's write lock
+  (`slow requests: …`), so a stall names its cause. Open streams never count.
 - Reads use their own pooled SQLite connections (WAL), so a page load never waits for another request's
   queries or for a write.
 

@@ -135,8 +135,9 @@ Tests never touch Bandcamp, the music drive or a real rekordbox library: Bandcam
     - The mount table comes from `getfsstat(MNT_NOWAIT)` (0.1 ms, no process spawned); `mount` is the fallback.
   - After the fixes, the same load finishes in 3–5 s, all of it CPU, with light requests under 1 s. A
     normal reload (6 tabs, 15 `link-candidates`, unchanged sync) finishes in 1.2 s.
-  - To catch the next one: every request is logged with its time and duration. A request over 5 s dumps
-    every thread's stack and the Store lock's owner.
+  - To catch the next one: every request is logged with its time and duration. A request with no response
+    after 5 s dumps every thread's stack and the Store lock's owner. Event and audio streams have started
+    their response, so they never count.
 
 ## App and extension (`app/`, `extension/`, `shared/`, branch `claude/local-collection-ui-e8f6f6`)
 

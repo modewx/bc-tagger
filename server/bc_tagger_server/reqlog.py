@@ -1,8 +1,9 @@
 """Request log and slow-request watchdog, so a stalled server names its cause.
 
-Every request is logged when it ends with its start time (the log line's), method, path, status, duration and
-response size. A request still running after ``SLOW_AFTER_S`` makes the watchdog log every thread's stack once
-(plus who holds the Store lock), at most once per ``DUMP_EVERY_S``.
+Every request is logged when it ends: client port, method, path, status, the time until its response started,
+size, when it started, and for a stream (events, audio) how long it stayed open. A request whose response hasn't
+started after ``SLOW_AFTER_S`` makes the watchdog log every thread's stack once (plus who holds the Store lock),
+at most once per ``DUMP_EVERY_S``. An open stream has started its response, so it never counts as stalled.
 """
 
 from __future__ import annotations
@@ -23,7 +24,7 @@ WATCH_EVERY_S = 1.0
 
 _ids = itertools.count(1)
 _lock = threading.Lock()
-_running: dict[int, dict[str, Any]] = {}  # request id → {start, method, path, reported, extra}
+_running: dict[int, dict[str, Any]] = {}  # request id → {start, method, path, reported, extra, responding}
 _watchdog: threading.Thread | None = None
 _last_dump = 0.0
 
@@ -52,11 +53,14 @@ class RequestLog:
         info = {"status": 0, "bytes": 0}
         with _lock:
             _running[rid] = {"start": start, "method": scope["method"], "path": _target(scope), "reported": False,
-                             "extra": self.extra}
+                             "extra": self.extra, "responding": False}
 
         async def timed_send(message):
             if message["type"] == "http.response.start":
-                info["status"] = message["status"]
+                info["status"], info["first"] = message["status"], time.monotonic() - start
+                with _lock:
+                    if rid in _running:
+                        _running[rid]["responding"] = True
             elif message["type"] == "http.response.body":
                 info["bytes"] += len(message.get("body", b""))
             await send(message)
@@ -66,11 +70,13 @@ class RequestLog:
         finally:
             with _lock:
                 entry = _running.pop(rid, None)
-            took = time.monotonic() - start
+            total = time.monotonic() - start
+            took = info.get("first", total)  # until the response started: a stream's open time isn't a stall
             level = logging.WARNING if took >= SLOW_AFTER_S else logging.INFO
-            log.log(level, "%s %s %s %s %.3fs %s (started %s)", (scope.get("client") or ("?", "?"))[1], scope["method"],
-                    entry["path"] if entry else _target(scope), info["status"] or "-", took, _size(info["bytes"]),
-                    time.strftime("%H:%M:%S", time.localtime(wall)) + f".{int(wall % 1 * 1000):03d}")
+            log.log(level, "%s %s %s %s %.3fs %s (started %s)%s", (scope.get("client") or ("?", "?"))[1],
+                    scope["method"], entry["path"] if entry else _target(scope), info["status"] or "-", took,
+                    _size(info["bytes"]), time.strftime("%H:%M:%S", time.localtime(wall)) + f".{int(wall % 1 * 1000):03d}",
+                    f", open {total:.1f}s" if total - took >= 1 else "")
 
 
 def _size(n: int) -> str:
@@ -97,16 +103,17 @@ def check(now: float | None = None) -> str | None:
     global _last_dump
     now = time.monotonic() if now is None else now
     with _lock:
-        slow = [r for r in _running.values() if now - r["start"] >= SLOW_AFTER_S and not r["reported"]]
+        slow = [r for r in _running.values()
+                if now - r["start"] >= SLOW_AFTER_S and not r["reported"] and not r["responding"]]
         if not slow or now - _last_dump < DUMP_EVERY_S and _last_dump:
             return None
-        for r in _running.values():
-            if now - r["start"] >= SLOW_AFTER_S:
-                r["reported"] = True
+        for r in slow:
+            r["reported"] = True
         running = sorted(_running.values(), key=lambda r: r["start"])
         _last_dump = now
     lines = [f"slow requests: {len(slow)} over {SLOW_AFTER_S:g}s; {len(running)} running:"]
-    lines += [f"  {now - r['start']:7.2f}s {r['method']} {r['path']}" for r in running]
+    lines += [f"  {now - r['start']:7.2f}s {r['method']} {r['path']}{' (responding)' if r['responding'] else ''}"
+              for r in running]
     for extra in dict.fromkeys(r["extra"] for r in running if r["extra"] is not None):
         try:
             lines.append(extra())
