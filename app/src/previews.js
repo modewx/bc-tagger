@@ -1,9 +1,15 @@
 // "Use previews" (on by default): the local players stream the server's preview
-// of a file when it has one (Opus 96k, made by the server); off, the original
-// (`preview=0`), to hear the difference. Kept in this browser. Next to it, what
-// the track that's playing (or last played) is heard from.
+// of a file when it has one (Opus 96k, made by the server); off, the original,
+// to hear the difference. Kept in this browser. Next to it, what the track
+// that's playing (or last played) is heard from.
+//
+// A stream URL says which of the two it plays (`src=preview` / `src=original`),
+// decided when its player is made (or the toggle swaps it): the server serves
+// exactly that, so a preview built meanwhile never changes what a playing
+// player's URL returns (a seek past the preview's size would fail).
 
 const KEY = "bc_use_previews";
+const STREAM = "/api/files/stream";
 
 export function usePreviews() {
   try {
@@ -13,12 +19,40 @@ export function usePreviews() {
   }
 }
 
+/** The stream URL of a local file: its preview, or the original. */
+export function streamUrl(path, preview) {
+  return `${STREAM}?path=${encodeURIComponent(path)}&src=${preview ? "preview" : "original"}`;
+}
+
+const parse = (url) => {
+  try {
+    return new URL(url, location.href);
+  } catch (e) {
+    return null;
+  }
+};
+
+/** A preview that can't be played (the server no longer has it): the original of the same file; else null. */
+export function originalOf(url) {
+  const u = parse(url);
+  if (!u || u.pathname !== STREAM || u.searchParams.get("src") !== "preview") return null;
+  // (Not searchParams.set: it would encode the path another way, so the same file's url wouldn't compare equal.)
+  return u.pathname + u.search.replace(/([?&])src=preview(?=&|$)/, "$1src=original");
+}
+
+// What a player's URL plays.
+function heardFrom(url) {
+  const u = parse(url);
+  if (!u) return null;
+  if (u.pathname !== STREAM) return "Bandcamp stream";
+  return u.searchParams.get("src") === "preview" ? "preview" : "original";
+}
+
 /**
  * @param {object} o
- * @param {() => void} o.onChange                the setting changed (players take the new source)
- * @param {(key: string) => string|null} o.sourceOf  what a row's player is heard from ("preview", "original", ...)
+ * @param {() => void} o.onChange  the setting changed (players take the new source)
  */
-export function previewToggle({ onChange, sourceOf }) {
+export function previewToggle({ onChange }) {
   const box = document.createElement("input");
   box.type = "checkbox";
   box.id = "usePreviews";
@@ -34,9 +68,9 @@ export function previewToggle({ onChange, sourceOf }) {
   el.className = "previews";
   el.append(label, playing);
 
-  let lastKey = null;
+  let last = null; // the player playing, or last played
   const show = () => {
-    const what = lastKey ? sourceOf(lastKey) : null;
+    const what = last ? heardFrom(last.getAttribute("src") || "") : null;
     playing.textContent = what ? `▶ ${what}` : "";
     playing.title = what ? `The track playing (or last played) is heard from: ${what}` : "";
   };
@@ -49,16 +83,17 @@ export function previewToggle({ onChange, sourceOf }) {
     onChange();
     show();
   });
-  // Any player starting (rows, the docked player).
+  // Any player starting (rows, the docked player); and its source changing (the toggle, or a preview's fallback).
   document.addEventListener(
     "play",
     (e) => {
       if (e.target && e.target.tagName === "AUDIO" && e.target.dataset.key) {
-        lastKey = e.target.dataset.key;
+        last = e.target;
         show();
       }
     },
     true
   );
+  document.addEventListener("loadstart", (e) => e.target === last && show(), true);
   return { el };
 }

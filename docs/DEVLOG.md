@@ -191,6 +191,16 @@ npm run test:e2e                         # Playwright e2e: own profile, server :
   that has started swaps its source at the same moment and keeps playing (`swapSource`), the others when they
   next load. "▶ preview / original / Bandcamp stream" says what the track playing is heard from (the toggle and
   `local.best.preview`). Play/pause are SVG icons (the text glyphs rendered as a square in the docked player).
+- **Stream URLs pin the preview or the original** (user: playback froze after a seek): the first play had the server
+  make an Opus preview, and then the same URL served it instead of the ~50 MB WAV; the next seek asked past the
+  preview's 4 MB (416) and the player was dead. Local stream URLs now say `src=preview` (previews on and the file's
+  `preview` flag, the track's for a release) or `src=original`, decided when a player is made or the toggle swaps
+  it; A's server serves exactly that. Nothing else changes a player's URL: an items reload that flips the flag
+  re-renders the rows not in use (their new players take the preview) and keeps the one playing. A `src=preview`
+  that fails (404, a media error) swaps to the original at the same moment and keeps playing (`localFallbackUrl`;
+  `originalOf` keeps the path's encoding, so the url compares equal to `localPlayUrl`'s). The ▶ pill reads the
+  player's own `src`. e2e: a two-version stream double (chunked, 416 past the end, 404 for a missing preview);
+  with the old bare URLs the seek test times out (the user's freeze).
 - **Cached lengths** (user: faster playback): when the server sends a located file's cached `duration`
   (`local.best.duration`, A), the player shows it before anything loads (`0:00 / 5:12`), and a click shows the time
   it'll start at; the file's own length wins once it's in. Without it (Bandcamp streams, an older server), as above.

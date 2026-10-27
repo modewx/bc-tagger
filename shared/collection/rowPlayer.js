@@ -125,6 +125,9 @@ export function attachRowPlayer(audio, { duration: known = null } = {}) {
   let target = null; // a fraction of the track to start at, once its length is known
   let resumeAt = null; // seconds to go back to once a swapped source's length is known
   let dragging = null; // the fraction under the pointer while dragging
+  let wanted = false; // asked to play and not paused since (a source that fails leaves it: its replacement plays on)
+  audio.addEventListener("play", () => (wanted = true));
+  audio.addEventListener("pause", () => (wanted = false));
 
   const duration = () => (audio.readyState >= HTMLMediaElement.HAVE_METADATA && Number.isFinite(audio.duration) && audio.duration > 0 ? audio.duration : 0);
   const length = () => duration() || (known > 0 ? known : 0); // for showing; seeks wait for the file's own
@@ -136,7 +139,8 @@ export function attachRowPlayer(audio, { duration: known = null } = {}) {
     const pct = `${clamp(shown) * 100}%`;
     fill.style.width = pct;
     thumb.style.left = pct;
-    const loading = target != null || resumeAt != null || (!audio.paused && audio.readyState < HTMLMediaElement.HAVE_FUTURE_DATA);
+    // (A paused player waiting for a length isn't loading: it loads when played.)
+    const loading = !audio.paused && (target != null || resumeAt != null || audio.readyState < HTMLMediaElement.HAVE_FUTURE_DATA);
     wrap.classList.toggle("loading", loading);
     const at = dragging != null ? dragging : target;
     time.textContent = loading && !d ? "loading…" : `${fmt(at != null && d ? at * d : now)} / ${d ? fmt(d) : "–:––"}`;
@@ -247,20 +251,22 @@ export function attachRowPlayer(audio, { duration: known = null } = {}) {
   wrap.addEventListener("pointerleave", () => clearTimeout(dwell));
   bar.addEventListener("focus", loadMetadata);
 
-  // Another source for the same track (e.g. the original instead of the preview): a player that has started
-  // carries on from the same moment (playing if it was); one that hasn't loads the new one when asked.
-  wrap.swapSource = (url) => {
+  // Another source for the same track: the "Use previews" toggle, or the original of a preview that failed
+  // (keepLoading: a player not started yet goes on loading as it was; else it loads the new one when asked).
+  // A player that has started carries on from the same moment, playing if it was (or was about to).
+  wrap.swapSource = (url, { keepLoading = false } = {}) => {
     if (audio.src === new URL(url, location.href).href) return;
-    const started = !audio.paused || audio.currentTime > 0;
-    if (!started) {
-      audio.preload = "none";
+    const at = resumeAt != null ? resumeAt : audio.currentTime;
+    const resume = !audio.paused || wanted;
+    if (!resume && !(at > 0)) {
+      if (!keepLoading) audio.preload = "none";
       audio.src = url;
+      paint();
       return;
     }
-    const playing = !audio.paused;
-    resumeAt = audio.currentTime;
+    resumeAt = at > 0 ? at : null; // a click's target (not loaded yet) stays, for the new source
     audio.src = url;
-    if (playing) audio.play().catch(() => {});
+    if (resume) audio.play().catch(() => {});
     paint();
   };
 

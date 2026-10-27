@@ -1685,10 +1685,11 @@ function slowWav(wav, delayMs, reads = []) {
       .catch(() => {}); // the page may have moved on
   };
 }
-// Answers a page's /api/files/stream requests with a `seconds` silent WAV after `delayMs`; marks `count` tracks
-// located (local players), with the server's cached `duration` and `preview` flag if given. Nothing on the server
-// changes and no file is read. Returns the requests seen.
-async function slowLocalStreams(page, { delayMs = 1500, count = 12, duration = null, preview = null, seconds = 3 } = {}) {
+// Answers a page's /api/files/stream requests with a `seconds` silent WAV after `delayMs` (or with `stream`, a route
+// handler); marks `count` tracks located (local players), with the server's cached `duration` and `preview` flag if
+// given (`preview` may be a function: asked at each items request). Nothing on the server changes and no file is
+// read. Returns the requests seen (not with `stream`).
+async function slowLocalStreams(page, { delayMs = 1500, count = 12, duration = null, preview = null, seconds = 3, stream = null } = {}) {
   // Right after an import the items are still getting their "#" (each re-renders the table): start after.
   await waitFor(
     () => api("/api/items").then((d) => (Array.isArray(d) ? d : d.items).every((i) => i.source === "other" || Number.isFinite(i.order))),
@@ -1701,15 +1702,67 @@ async function slowLocalStreams(page, { delayMs = 1500, count = 12, duration = n
       .filter((i) => i.tralbum_type === "t" && i.source !== "other")
       .slice(0, count)
       .forEach((it) => {
-        const best = { path: `/e2e/not-a-real-folder/${it.id}.wav`, ...(duration ? { duration } : {}), ...(preview != null ? { preview } : {}) };
+        const pv = typeof preview === "function" ? preview() : preview;
+        const best = { path: `/e2e/not-a-real-folder/${it.id}.wav`, ...(duration ? { duration } : {}), ...(pv != null ? { preview: pv } : {}) };
         it.local = { status: "located", best, candidates: [] };
       });
     await route.fulfill({ response: res, json: data });
   });
   const reads = [];
-  await page.route("**/api/files/stream**", slowWav(silentWav(seconds), delayMs, reads));
+  await page.route("**/api/files/stream**", stream || slowWav(silentWav(seconds), delayMs, reads));
   return reads;
 }
+// A stand-in for the server's stream of a local file, in its two versions: the original (`src=original`, 8 kHz) and
+// the preview (`src=preview`, 4 kHz: half the size; 404 until `built`, and once `gone`). A URL without `src` is the
+// server from before: the original until the preview is built, then the preview (a seek past its size: 416). Answers
+// in chunks, so a seek asks again; `log` gets each request ({path, src, from, status}).
+const STREAM_CHUNK = 64 * 1024;
+function streamDouble({ seconds = 600 } = {}) {
+  const original = silentWav(seconds);
+  const preview = silentWav(seconds, 4000); // (Chrome plays nothing under 3 kHz)
+  const d = { built: false, gone: false, log: [], size: original.length };
+  d.handler = async (route) => {
+    const u = new URL(route.request().url());
+    const src = u.searchParams.get("src");
+    const m = /bytes=(\d+)-(\d*)/.exec(route.request().headers().range || "");
+    const from = m ? Number(m[1]) : 0;
+    const entry = { path: u.searchParams.get("path"), src, from, status: 0 };
+    d.log.push(entry);
+    await sleep(40);
+    const usePreview = src === "preview" || (!src && d.built);
+    if (usePreview && (!d.built || d.gone)) {
+      entry.status = 404;
+      return route.fulfill({ status: 404, contentType: "application/json", body: '{"detail":"no preview"}' }).catch(() => {});
+    }
+    const body = usePreview ? preview : original;
+    if (from >= body.length) {
+      entry.status = 416;
+      return route.fulfill({ status: 416, headers: { "Content-Range": `bytes */${body.length}` } }).catch(() => {});
+    }
+    const to = Math.min(m && m[2] ? Number(m[2]) : body.length - 1, from + STREAM_CHUNK - 1, body.length - 1);
+    entry.status = 206;
+    return route
+      .fulfill({
+        status: 206,
+        contentType: "audio/wav",
+        headers: { "Accept-Ranges": "bytes", "Content-Range": `bytes ${from}-${to}/${body.length}` },
+        body: body.subarray(from, to + 1),
+      })
+      .catch(() => {});
+  };
+  return d;
+}
+// A row's player is playing, past `t` seconds (and has what it needs to go on).
+const playingPast = (page, key, t) =>
+  page.waitForFunction(
+    ([k, t]) => {
+      const au = document.querySelector(`tr[data-key="${k}"] audio`);
+      return au && !au.paused && au.readyState >= 3 && au.currentTime > t;
+    },
+    [key, t],
+    { timeout: 15000 }
+  );
+const srcOf = (page, key) => page.getAttribute(`tr[data-key="${key}"] audio`, "src");
 // The local players shown, in order.
 const localPlayers = async (page) => {
   await page.waitForFunction(() => document.querySelectorAll("#collectionTable tbody tr[data-key] audio.local-audio").length > 3);
@@ -1776,7 +1829,7 @@ test("local app: a player shows the file's cached length before anything is load
   }
 });
 
-test("local app: \"Use previews\" off asks for the originals (preview=0), and a track playing carries on from the same moment on the new source", async () => {
+test("local app: \"Use previews\" off asks for the originals (src=original), and a track playing carries on from the same moment on the new source", async () => {
   const app = await context.newPage();
   const reads = await slowLocalStreams(app, { delayMs: 0, seconds: 10, preview: true });
   const rest = async (key) => {
@@ -1791,7 +1844,7 @@ test("local app: \"Use previews\" off asks for the originals (preview=0), and a 
     assert.equal(await app.isChecked("#usePreviews"), true, "on by default");
     await app.locator(`tr[data-key="${key}"]`).scrollIntoViewIfNeeded();
     await rest(key);
-    assert.ok(reads.length >= 1 && reads.every((u) => !/[?&]preview=0/.test(u)), `previews on: ${reads.join(", ")}`);
+    assert.ok(reads.length >= 1 && reads.every((u) => /&src=preview$/.test(u)), `previews on: ${reads.join(", ")}`);
     // Play, then turn previews off mid-play: the same moment, on the original.
     await clickBar(app, key, 0.3);
     await app.waitForFunction((k) => {
@@ -1805,20 +1858,88 @@ test("local app: \"Use previews\" off asks for the originals (preview=0), and a 
     await app.uncheck("#usePreviews");
     const s = await started(app, key);
     assert.ok(Math.abs(s.at - before) < 0.5 && !s.paused, `went on at ${s.at} (was at ${before})`);
-    assert.match(await app.getAttribute(`tr[data-key="${key}"] audio`, "src"), /[?&]preview=0$/);
-    assert.ok(reads.length >= 1 && reads.every((u) => /[?&]preview=0/.test(u)), `previews off: ${reads.join(", ")}`);
+    assert.match(await srcOf(app, key), /&src=original$/);
+    assert.ok(reads.length >= 1 && reads.every((u) => /&src=original$/.test(u)), `previews off: ${reads.join(", ")}`);
     assert.equal(await app.textContent("#playingSource"), "▶ original");
     await app.$eval(`tr[data-key="${key}"] audio`, (au) => au.pause());
     // The others take it when they next load; and it's kept in this browser.
     reads.length = 0;
     await app.locator(`tr[data-key="${other}"]`).scrollIntoViewIfNeeded();
     await rest(other);
-    assert.ok(reads.length >= 1 && reads.every((u) => /[?&]preview=0/.test(u)), `another player: ${reads.join(", ")}`);
+    assert.ok(reads.length >= 1 && reads.every((u) => /&src=original$/.test(u)), `another player: ${reads.join(", ")}`);
     await app.reload();
     await app.waitForSelector("#usePreviews", { state: "attached" });
     assert.equal(await app.isChecked("#usePreviews"), false, "kept");
   } finally {
     await app.evaluate(() => localStorage.removeItem("bc_use_previews")).catch(() => {});
+    await app.evaluate(() => document.querySelectorAll("audio").forEach((au) => au.pause())).catch(() => {});
+    await app.close();
+  }
+});
+
+test("local app: a preview made while a track plays never changes what its player streams (a seek far on still plays); players made after use it", async () => {
+  const app = await context.newPage();
+  const double = streamDouble();
+  let built = false;
+  await slowLocalStreams(app, { preview: () => built, stream: double.handler });
+  const mine = (key) => double.log.filter((r) => r.path === `/e2e/not-a-real-folder/${key}.wav`);
+  try {
+    await app.goto(SERVER + "/");
+    const [key, other] = await localPlayers(app);
+    assert.match(await srcOf(app, key), /&src=original$/, "no preview yet: the original, previews on or not");
+    await app.locator(`tr[data-key="${key}"]`).scrollIntoViewIfNeeded();
+    await clickBar(app, key, 0.05);
+    await playingPast(app, key, 31);
+    const player = await app.$(`tr[data-key="${key}"] audio`);
+    // The first play has the server make the preview; the page hears of it (here: shown again, so it reloads).
+    double.built = built = true;
+    await setHidden(app, true);
+    await setHidden(app, false);
+    await app.waitForFunction((k) => /&src=preview$/.test(document.querySelector(`tr[data-key="${k}"] audio`).getAttribute("src")), other, { timeout: 10000 });
+    assert.match(await srcOf(app, key), /&src=original$/, "the one playing keeps its source");
+    // A seek far past the preview's size: asked again, of the original; still playing.
+    const asked = mine(key).length;
+    await clickBar(app, key, 0.9);
+    await playingPast(app, key, 541);
+    const t = await player.evaluate((au) => au.currentTime);
+    await sleep(600);
+    assert.ok((await player.evaluate((au) => au.currentTime)) > t + 0.3, "and goes on");
+    assert.ok(await player.evaluate((au, k) => au.isConnected && au.closest("tr").dataset.key === k, key), "the same player");
+    const after = mine(key).slice(asked);
+    assert.ok(after.some((r) => r.from > 0.8 * double.size), `the seek asked the server: ${JSON.stringify(after)}`);
+    assert.deepEqual(mine(key).filter((r) => r.src !== "original"), [], "only ever the original");
+    assert.deepEqual(double.log.filter((r) => r.status === 416), [], "no 416");
+    assert.equal(await app.textContent("#playingSource"), "▶ original");
+  } finally {
+    await app.evaluate(() => document.querySelectorAll("audio").forEach((au) => au.pause())).catch(() => {});
+    await app.close();
+  }
+});
+
+test("local app: a preview the server no longer has (404) plays on from the original, at the same moment", async () => {
+  const app = await context.newPage();
+  const double = streamDouble();
+  double.built = true;
+  await slowLocalStreams(app, { preview: true, stream: double.handler });
+  try {
+    await app.goto(SERVER + "/");
+    const [key] = await localPlayers(app);
+    assert.match(await srcOf(app, key), /&src=preview$/);
+    await app.locator(`tr[data-key="${key}"]`).scrollIntoViewIfNeeded();
+    await clickBar(app, key, 0.05);
+    await playingPast(app, key, 31);
+    assert.equal(await app.textContent("#playingSource"), "▶ preview");
+    // Evicted meanwhile: the seek's request gets a 404.
+    double.gone = true;
+    await clickBar(app, key, 0.6);
+    await app.waitForFunction((k) => /&src=original$/.test(document.querySelector(`tr[data-key="${k}"] audio`).getAttribute("src")), key, { timeout: 15000 });
+    await playingPast(app, key, 359);
+    const at = await app.$eval(`tr[data-key="${key}"] audio`, (au) => au.currentTime);
+    assert.ok(at < 366, `from the same moment: ${at}`);
+    assert.ok(double.log.some((r) => r.src === "preview" && r.status === 404), "the preview was asked for, and gone");
+    assert.equal(await app.textContent("#playingSource"), "▶ original");
+    assert.equal(await app.$(`tr[data-key="${key}"] iframe`), null, "not the Bandcamp player");
+  } finally {
     await app.evaluate(() => document.querySelectorAll("audio").forEach((au) => au.pause())).catch(() => {});
     await app.close();
   }
@@ -3146,6 +3267,47 @@ test("import preview: the Notes icons open a popover with the flags in plain wor
 });
 
 // --- An open import survives navigation and reloads ---------------------------------
+
+test("import preview: its players stream the preview or the original like the collection's (a missing preview plays the original from the click; the toggle swaps a playing one) (stubbed API)", async () => {
+  const stub = importStub(JSON.parse(fs.readFileSync(IMPORT_SAMPLE, "utf8")), { located: [1, 2] });
+  const [withPreview, without] = [1, 2].map((line) => stub.rows.find((r) => r.line === line));
+  withPreview.located.best.preview = true;
+  const double = streamDouble(); // the preview isn't there: 404
+  const page = await context.newPage();
+  await stub.install(page);
+  await page.route("**/api/files/stream**", double.handler);
+  const [a, b] = [`r${withPreview.n}`, `r${without.n}`];
+  const now = () => page.$eval(`tr[data-key="${a}"] audio`, (au) => au.currentTime);
+  try {
+    await page.goto(SERVER + "/import/?batch=e2e-b1");
+    await page.waitForFunction(() => document.querySelectorAll("#collectionTable tbody tr[data-key] audio.local-audio").length === 2);
+    assert.match(await srcOf(page, a), /&src=preview$/);
+    assert.match(await srcOf(page, b), /&src=original$/);
+    // A click at half: the preview 404s, so the original, from the click.
+    await clickBar(page, a, 0.5);
+    await playingPast(page, a, 299);
+    assert.match(await srcOf(page, a), /&src=original$/);
+    assert.ok((await now()) < 306, `from the click: ${await now()}`);
+    assert.equal(await page.textContent("#playingSource"), "▶ original");
+    // The preview is made meanwhile: only the toggle changes a playing player's source (off: nothing to change;
+    // on again: the preview, from the same moment).
+    double.built = true;
+    await page.uncheck("#usePreviews");
+    assert.match(await srcOf(page, a), /&src=original$/);
+    const before = await now();
+    await page.check("#usePreviews");
+    assert.match(await srcOf(page, a), /&src=preview$/);
+    await playingPast(page, a, before);
+    assert.ok((await now()) - before < 2, `went on at ${await now()} (was at ${before})`);
+    assert.equal(await page.textContent("#playingSource"), "▶ preview");
+    assert.match(await srcOf(page, b), /&src=original$/, "no preview flag: the original");
+    assert.deepEqual(double.log.filter((r) => r.status === 416), []);
+  } finally {
+    await page.evaluate(() => localStorage.removeItem("bc_use_previews")).catch(() => {});
+    await page.evaluate(() => document.querySelectorAll("audio").forEach((au) => au.pause())).catch(() => {});
+    await page.close();
+  }
+});
 
 test("import: a reload during lookups follows the same job on to the mapping step (stubbed API)", async () => {
   // The job runs until the test lets it finish: the tab and the header's pill both poll it.

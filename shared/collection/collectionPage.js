@@ -71,6 +71,8 @@ const SHELL_HTML = `
  * @param {Array}  [opts.extraToolbarButtons] [{id, label, run(statusEl, button), group?: "tools", sepBefore?}]:
  *   on the toolbar, or (group "tools") in the Tools ▾ menu with the base maintenance buttons
  * @param {function} [opts.localPlayUrl]    (item, key) -> url of a local file to play, or null
+ * @param {function} [opts.localFallbackUrl] (url) -> another url for a local file whose url can't be played (e.g. the
+ *                                          original of a preview the server no longer has), or null
  * @param {function} [opts.localDuration]   (item, key) -> that file's length in seconds, if known (shown before loading)
  * @param {function} [opts.filterItem]      (item) -> false hides the row (extra filters, e.g. statuses)
  * @param {function} [opts.onView]          (shown, total) after each filter/search
@@ -295,12 +297,18 @@ export function createCollectionPage(opts) {
     return audio;
   }
 
-  // A local-file <audio> (local app). If the file can't be decoded/streamed,
-  // fall back to the Bandcamp player for this row and stop trying local.
+  // A local-file <audio> (local app). If the file can't be decoded/streamed: its
+  // other url if there is one (opts.localFallbackUrl), from the same moment;
+  // else the Bandcamp player for this row, and no more local tries.
   function makeLocalAudio(url, item, key) {
     const audio = makeRowAudio(url, item, key, opts.localDuration ? opts.localDuration(item, key) : null);
     audio.classList.add("local-audio");
     audio.addEventListener("error", () => {
+      const other = opts.localFallbackUrl ? opts.localFallbackUrl(audio.getAttribute("src") || "") : null;
+      if (other && audio.bctPlayer) {
+        audio.bctPlayer.swapSource(other, { keepLoading: true });
+        return;
+      }
       item._localFailed = true;
       const wasCurrent = playingAudio === audio;
       if (wasCurrent) playingAudio = null;
@@ -1603,7 +1611,8 @@ export function createCollectionPage(opts) {
   }
 
   // The local players' sources again (opts.localPlayUrl changed, e.g. "Use previews"): one that's playing
-  // carries on from the same moment on the new source.
+  // carries on from the same moment on the new source. Nothing else changes a player's url: new items (e.g. a
+  // preview made meanwhile) only reach the players made after (rows re-rendered), not one in use.
   function refreshLocalSources() {
     if (!opts.localPlayUrl) return;
     document.querySelectorAll("audio.local-audio").forEach((audio) => {

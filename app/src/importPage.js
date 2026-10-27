@@ -11,8 +11,8 @@ import { ExtensionBridge } from "../../shared/datasource/extensionBridge";
 import { pageEvents } from "../../shared/datasource/serverEvents";
 import { Jobs, progressText, resultText } from "./jobs";
 import { buildNav } from "./nav";
-import { sourceColumn, localPlayUrl, localDuration, playSource } from "./columns";
-import { previewToggle } from "./previews";
+import { sourceColumn, localPlayUrl, localDuration } from "./columns";
+import { originalOf, previewToggle } from "./previews";
 import { openPopover, closePopover } from "./popover";
 import { createTags, mapTagsUrl, getBatch, updateRow, commitBatch, discardBatch, resumeLookups, setDefaultTags, relocateRows, relocateRow, searchFiles, listFolder, rowToItem, matchSource, bandcampSearchUrl, openOnBandcampUrl, cleanBandcampUrl } from "./importApi";
 import { statsLine } from "./importTab";
@@ -1151,6 +1151,7 @@ async function discard(statusEl) {
       { id: "discardImport", label: "Discard", run: discard },
     ],
     localPlayUrl,
+    localFallbackUrl: originalOf,
     localDuration,
     playable: playableItem,
     rowClass: (item) => {
@@ -1173,7 +1174,7 @@ async function discard(statusEl) {
   allRows.title = "Locate every row again, not only the ones not found (files you set by hand stay)";
   document.getElementById("locateAgain").after(allRows);
   // Use previews (top bar, by the player), as on the collection.
-  const previews = previewToggle({ onChange: () => page.refreshLocalSources(), sourceOf: (key) => playSource(page.getItems()[key]) });
+  const previews = previewToggle({ onChange: () => page.refreshLocalSources() });
   document.getElementById("playerArea").appendChild(previews.el);
   const table = document.getElementById("collectionTable");
   const scroller = el("div");

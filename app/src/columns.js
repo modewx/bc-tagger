@@ -7,7 +7,7 @@ import { progressText, resultText } from "./jobs";
 import { runExport } from "./exportFlow";
 import { sourceOf } from "./statusFilter";
 import { downloadFileTitle, downloadFlow, fullReleaseOf, stateLabel, trackDownloads, troubled } from "./downloads";
-import { usePreviews } from "./previews";
+import { streamUrl, usePreviews } from "./previews";
 
 const LOCAL_RANK = { located: 0, candidates: 1, missing: 2, unknown: 3 };
 const OWNED_RANK = { owned: 0, not_owned: 1, unknown: 2 };
@@ -384,18 +384,11 @@ function playableFile(item) {
   return localOf(item).status === "located" && files.length === 1 ? files[0] : null;
 }
 
-// With "Use previews" off, the original file instead of the server's preview (`preview=0`).
+// The server's preview of the file only when it has one (the track's own flag for a release) and previews are on;
+// else the original. Decided now, for the player being made (previews.js).
 export function localPlayUrl(item) {
   const f = playableFile(item);
-  return f ? `/api/files/stream?path=${encodeURIComponent(f.path)}${usePreviews() ? "" : "&preview=0"}` : null;
-}
-
-// What a row's player is heard from: the server's preview (when it has one and previews are on), the original
-// file, or Bandcamp's stream (not located here).
-export function playSource(item) {
-  const f = item && playableFile(item);
-  if (!f) return "Bandcamp stream";
-  return usePreviews() && f.preview === true ? "preview" : "original";
+  return f ? streamUrl(f.path, usePreviews() && f.preview === true) : null;
 }
 
 // The file's length the server has cached (no file read), so the player shows it before loading anything.

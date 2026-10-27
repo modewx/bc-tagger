@@ -42,8 +42,12 @@ reachable, edits are queued on the server and applied by the extension on its ne
     The speaker mutes, and its slider (on hover) sets the volume; ↑/↓ on the bar too. One volume for all players,
     kept in this browser.
   - **Use previews** (by the player, on by default): local players stream the server's preview of a file when it
-    has one; off, the original (`preview=0`), to hear the difference. Switching while a track plays carries on from
-    the same moment. Next to it, what the track playing is heard from (preview / original / Bandcamp stream).
+    has one; off, the original, to hear the difference. Switching while a track plays carries on from the same
+    moment. Each player's URL says which it plays (`src=preview` / `src=original`), fixed when the player is made:
+    a preview the server makes while a track plays reaches only players made after, never the one playing (a seek
+    on it keeps working). A preview that can't be played (the server no longer has it) plays on from the original,
+    at the same moment. Next to the toggle, what the track playing is heard from (preview / original / Bandcamp
+    stream), from its player's URL.
   - Test-only actions (Locate / Export latest 10) are in **Settings → Test**.
   - **Nothing runs unasked:** the app reads the music drive or Bandcamp only when you click (Play, Locate, Tools,
     Refresh ownership) or rest on a player: passing over players loads nothing, resting on one for a moment loads
@@ -137,7 +141,7 @@ Runs the extension, server and local app together in a Playwright Chromium with 
   real server (mapping, linking, browser lookups, downloads, re-locate, browse), settings, and rekordbox dry runs
   and a sandbox write.
 
-A full run (85 tests) takes about 2.5 minutes (2026-10-26: 110–147 s). For a quick check, run a subset by
+A full run (88 tests) takes about 2.5 minutes (2026-10-26: 110–147 s). For a quick check, run a subset by
 name. Include `Import \(replace\)`, which loads the test collection the others use:
 
 ```bash
