@@ -50,6 +50,21 @@ CREATE TABLE IF NOT EXISTS files (
 CREATE INDEX IF NOT EXISTS files_root ON files(root);
 CREATE INDEX IF NOT EXISTS files_release_dir ON files(release_dir);
 
+-- Files per root, kept by triggers on every write to files, so the index status never counts them.
+CREATE TABLE IF NOT EXISTS file_counts (root TEXT PRIMARY KEY, n INTEGER NOT NULL);
+CREATE TRIGGER IF NOT EXISTS file_counts_insert AFTER INSERT ON files BEGIN
+    INSERT INTO file_counts(root, n) VALUES(new.root, 1) ON CONFLICT(root) DO UPDATE SET n = n + 1;
+END;
+CREATE TRIGGER IF NOT EXISTS file_counts_delete AFTER DELETE ON files BEGIN
+    UPDATE file_counts SET n = n - 1 WHERE root = old.root;
+    DELETE FROM file_counts WHERE root = old.root AND n <= 0;
+END;
+CREATE TRIGGER IF NOT EXISTS file_counts_move AFTER UPDATE OF root ON files WHEN old.root IS NOT new.root BEGIN
+    UPDATE file_counts SET n = n - 1 WHERE root = old.root;
+    DELETE FROM file_counts WHERE root = old.root AND n <= 0;
+    INSERT INTO file_counts(root, n) VALUES(new.root, 1) ON CONFLICT(root) DO UPDATE SET n = n + 1;
+END;
+
 CREATE TABLE IF NOT EXISTS locate_results (
     item_id TEXT PRIMARY KEY,
     status TEXT NOT NULL,
@@ -198,6 +213,12 @@ class Store:
         cols = {r[1] for r in self._conn.execute("PRAGMA table_info(files)")}
         if "created" not in cols:  # file creation time (st_birthtime), added for date matching
             self._conn.execute("ALTER TABLE files ADD COLUMN created REAL")
+        if self._conn.execute("SELECT 1 FROM meta WHERE key = 'file_counts_v1'").fetchone() is None:
+            # the triggers keep file_counts from now on; count what's there once
+            with self.tx() as c:
+                c.execute("DELETE FROM file_counts")
+                c.execute("INSERT INTO file_counts(root, n) SELECT root, COUNT(*) FROM files GROUP BY root")
+                c.execute("INSERT INTO meta(key, value) VALUES('file_counts_v1', 'true')")
 
     def close(self) -> None:
         with self._lock:
@@ -240,31 +261,40 @@ class Store:
     # -- items mirror -----------------------------------------------------------------
 
     def upsert_items(self, items: dict[str, dict], deleted: Iterable[str] = (), full: bool = False) -> dict:
+        """Write the items whose data changed (an unchanged one is left alone) and remove ``deleted`` (with
+        ``full``: every item not in ``items``). ``{upserted, changed, removed, changed_ids, removed_ids}``."""
         ts = now_iso()
         deleted = list(deleted)
+        changed_ids: list[str] = []
+        removed_ids: list[str] = []
         with self.tx() as c:
-            removed = 0
             if full:
                 keep = set(items)
                 existing = [r["id"] for r in c.execute("SELECT id FROM items")]
                 gone = [i for i in existing if i not in keep]
                 for i in gone:
                     c.execute("DELETE FROM items WHERE id = ?", (i,))
-                removed += len(gone)
+                removed_ids += gone
             for item_id in deleted:
-                removed += c.execute("DELETE FROM items WHERE id = ?", (item_id,)).rowcount
+                if c.execute("DELETE FROM items WHERE id = ?", (item_id,)).rowcount:
+                    removed_ids.append(item_id)
             for item_id, item in items.items():
                 if not isinstance(item, dict):
                     continue
-                item = {**item, "id": item_id}
+                data = json.dumps({**item, "id": item_id})
+                row = c.execute("SELECT data FROM items WHERE id = ?", (item_id,)).fetchone()
+                if row is not None and json.loads(row["data"]) == json.loads(data):
+                    continue
                 date_added = item.get("date_added") if isinstance(item.get("date_added"), str) else None
                 c.execute(
                     "INSERT INTO items(id, data, date_added, updated_at) VALUES(?, ?, ?, ?) "
                     "ON CONFLICT(id) DO UPDATE SET data = excluded.data, "
                     "date_added = excluded.date_added, updated_at = excluded.updated_at",
-                    (item_id, json.dumps(item), date_added, ts),
+                    (item_id, data, date_added, ts),
                 )
-        return {"upserted": len(items), "removed": removed}
+                changed_ids.append(item_id)
+        return {"upserted": len(items), "changed": len(changed_ids), "removed": len(removed_ids),
+                "changed_ids": changed_ids, "removed_ids": removed_ids}
 
     def set_tags(self, tags: list[str]) -> None:
         with self.tx() as c:
@@ -274,6 +304,10 @@ class Store:
 
     def get_tags(self) -> list[str]:
         return [r["name"] for r in self.query("SELECT name FROM tags ORDER BY pos")]
+
+    def file_counts(self) -> dict[str, int]:
+        """Indexed files per root (kept by triggers: no count over the files table)."""
+        return {r["root"]: r["n"] for r in self.query("SELECT root, n FROM file_counts")}
 
     def count_items(self) -> int:
         return self.query_one("SELECT COUNT(*) AS n FROM items")["n"]

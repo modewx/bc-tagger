@@ -107,6 +107,22 @@ def new_store(tmp_path):
         store.close()
 
 
+@pytest.fixture
+def mount_table(monkeypatch):
+    """Set what the kernel's mount table says (``mount_table("/Volumes/X")``): ``fsguard.is_mounted`` then
+    reads only that. ``/`` is always there."""
+    from bc_tagger_server import fsguard
+
+    def set_mounts(*points: str) -> None:
+        table = fsguard.parse_mount_output("".join(f"/dev/disk9s{i} on {p} (apfs, local)\n"
+                                                   for i, p in enumerate(("/", *points))))
+        monkeypatch.setattr(fsguard, "_read_mount_table", lambda: table)
+        monkeypatch.setattr(fsguard, "_mounts", None)
+
+    set_mounts()
+    return set_mounts
+
+
 def pytest_collection_finish(session):
     """Freeze what's alive after collection (the imported modules): the full collections the rekordbox code runs
     (``rbguard.close_database``) and the leak check then only look at objects the tests make."""

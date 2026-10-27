@@ -104,6 +104,19 @@ Tests never touch Bandcamp, the music drive or a real rekordbox library: Bandcam
   - Tests close every `Store` and fail if a rekordbox connection is left open.
   - Before, the full suite crashed on nearly every run; after, 9/9 runs passed (`-q` and `-v`).
 
+### 2026-10-27
+
+- **Page loads no longer wake the music drive (user report: Collection empty for about a minute while the drive
+  spun up).** The rule: no drive or online work runs unless the user clicked for it.
+  - "Mounted" now comes from the kernel's mount table (`mount`, cached 10 s), not from looking at the folder.
+    This covers `GET /api/index/status`, the Import from Files folder list, and the import-logs folder check.
+    Whether a root folder exists is checked only by work the user starts (scan, locate, download, import).
+  - Files per root are kept in a `file_counts` table that triggers update on every write to the index. The
+    status no longer counts 41k rows on each call (about 230 ms).
+  - The extension's periodic full sync rewrites and announces only items that changed (it returns `changed`).
+    Before, every open tab re-read all items every 15 minutes. The tag list announces only a real change too.
+  - The build id (asked every few seconds by each tab) is cached for 2 s.
+
 ## App and extension (`app/`, `extension/`, `shared/`, branch `claude/local-collection-ui-e8f6f6`)
 
 *(Session B's notes go here.)*

@@ -26,7 +26,7 @@ from typing import Any
 
 from . import bandcamp, importer
 from .collection import DuplicateIndex, all_items
-from .fsguard import NotMounted, require_mounted
+from .fsguard import NotMounted, is_mounted, require_mounted
 from .importer import ImportError_
 from .indexer import quick_scan
 from .matcher import format_rank
@@ -86,18 +86,17 @@ def check_folders(folders: Any) -> list[dict[str, str]]:
 def _folder_row(path: str, kind: str, runs: dict[str, str]) -> dict[str, Any]:
     last = runs.get(path)
     since = datetime.fromisoformat(last) if last else datetime.now().astimezone() - timedelta(days=FIRST_RUN_DAYS)
-    try:
-        require_mounted(path)
-        mounted = True
-    except NotMounted:
-        mounted = False
+    mounted = is_mounted(path)
+    # "exists" is no longer checked here (it would wake the drive): a missing folder is reported when the
+    # import starts
     return {"path": path, "kind": kind, "since": since.astimezone().date().isoformat(), "last_run": last,
-            "mounted": mounted, "exists": mounted and Path(path).is_dir()}
+            "mounted": mounted, "exists": mounted}
 
 
 def defaults(svc) -> dict[str, Any]:
     """The two default folders (the owned root, the not-owned "complete" root), each with "since" = the last
-    files-import of it (7 days ago the first time). Reads only."""
+    files-import of it (7 days ago the first time). Reads only the settings, the database and the mount
+    table: opening the page never touches the music drive."""
     s = svc.settings.all()
     runs = svc.store.get_meta(RUNS_META) or {}
     folders = [_folder_row(s["owned_root"], "owned", runs)] if s.get("owned_root") else []

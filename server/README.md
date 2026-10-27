@@ -78,6 +78,8 @@ for `export` and `xml`.
   off or hasn't indexed them yet), and old files that were never indexed. `./bct index-status` (or
   `GET /api/index/status`) says when a full rescan is worth it: never scanned, a root missing or interrupted
   at the last full scan, or the last full scan older than `full_rescan_hint_days` (default 30).
+  The status never touches the music drive: a root's `mounted` comes from the kernel's mount table (a root on
+  the boot disk always counts as mounted), and its `files` count is kept by triggers on the index.
 - When several copies match equally well, the one created closest after the item was tagged wins.
 - **Opt-in file watcher** (`watch_roots`, default off): while `bct serve` runs, file events from the roots
   update the index within seconds (debounced until the size is stable; a file leaves the index only when its
@@ -406,7 +408,9 @@ import: rows, review, commit, log (`source: "files"`), `modified_at` and "#".
 
 `GET /api/import/files/defaults` → `{folders: [{path, kind, since, last_run, mounted, exists}], remembered,
 default_tags: ["pool"], lookup}`: the owned root and the not-owned `complete` root. Each `since` is the date of
-that folder's last files-import (remembered when one is created), else 7 days ago. It only reads.
+that folder's last files-import (remembered when one is created), else 7 days ago. It only reads, and never
+touches the music drive: `mounted` comes from the mount table and `exists` is the same value. A missing folder
+is reported when the import starts.
 
 ### Import rows straight to rekordbox
 
