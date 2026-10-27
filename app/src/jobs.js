@@ -7,7 +7,16 @@ export class Jobs {
   constructor(events) {
     this.events = events;
     this.watchers = new Map(); // job id -> {onProgress, resolve, timer}
-    events.on("job", (job) => this._update(job));
+    // A job's events can arrive before its start call has answered: keep the
+    // latest of jobs nobody watches yet, for watch() to start from.
+    this.early = new Map();
+    events.on("job", (job) => {
+      if (job && job.id && !this.watchers.has(job.id)) {
+        this.early.set(job.id, job);
+        if (this.early.size > 20) this.early.delete(this.early.keys().next().value);
+      }
+      this._update(job);
+    });
   }
 
   // POST `path` (which answers {job_id}) and resolve with the finished job.
@@ -20,6 +29,9 @@ export class Jobs {
     return new Promise((resolve) => {
       const w = { onProgress, resolve, timer: null };
       this.watchers.set(id, w);
+      const early = this.early.get(id);
+      this.early.delete(id);
+      if (early) this._update(early);
       const poll = async () => {
         if (!this.watchers.has(id)) return;
         try {

@@ -188,10 +188,10 @@ const FIELDS = {
   download_timeout_s: {
     section: "downloads",
     type: "number",
-    min: 10,
+    min: 30,
     step: 10,
     label: "Download timeout (s)",
-    help: "How long a download may go without data before it's retried (the reason shows in its row). Default 180.",
+    help: "How long a download may go without data before it's retried (the reason shows in its row). At least 30; default 180.",
   },
   downloader_dir: { section: "advanced", type: "path", label: "Downloader folder" },
   dev_extension_build_dir: { section: "advanced", type: "path", label: "Dev extension build folder" },

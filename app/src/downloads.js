@@ -70,15 +70,18 @@ const LABELS = {
   failed: "download failed",
 };
 
-// "download failed: not in your Bandcamp collection", "downloading 42 %",
-// "retrying 1/3 after: SocketTimeoutException: Read timed out", …
+// "download failed: not in your Bandcamp collection", "waiting to download …",
+// "downloading 42 %", "retry 1/3: read timed out", "downloaded (after 1 retry: …)", …
 export function stateLabel(d) {
-  if (d.state === "downloading" && d.message) return d.message; // the server's plain progress
+  if ((d.state === "downloading" || d.state === "queued") && d.message) return d.message; // the server's plain progress
   if (d.state === "downloading" && d.percent != null) return `downloading ${Math.round(d.percent)} %`;
   if (d.state === "done" && /^downloaded/.test(d.message || "")) return d.message; // "downloaded again: …"
   const label = LABELS[d.state] || d.state;
   return d.message && !["downloading", "queued"].includes(d.state) && d.message !== label ? `${label}: ${d.message}` : label;
 }
+
+// A download that's having trouble (Bandcamp errors, retries): its note is amber.
+export const troubled = (d) => !!d && d.state === "downloading" && /^(retry \d|Bandcamp error)/.test(d.message || "");
 
 // Live state per ref, from the server's events; onChange(d) for each one.
 export function trackDownloads(events, onChange) {

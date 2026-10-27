@@ -1538,6 +1538,30 @@ test("Settings → Import: import_log_dir round-trips; a folder inside a music f
   }
 });
 
+test("Settings → Downloads: Parallel downloads (4) and Download timeout (180 s) round-trip; out of range is refused", async () => {
+  const page = await context.newPage();
+  try {
+    await page.goto(SERVER + "/settings/");
+    await page.waitForSelector("#f_download_parallel");
+    assert.equal(await page.inputValue("#f_download_parallel"), "4");
+    assert.equal(await page.inputValue("#f_download_timeout_s"), "180");
+    await page.fill("#f_download_parallel", "2");
+    await page.fill("#f_download_timeout_s", "240");
+    await page.click("#saveBtn");
+    await page.waitForFunction(() => /Saved/.test(document.getElementById("saveState").textContent));
+    let s = await settingsNow();
+    assert.deepEqual([s.download_parallel, s.download_timeout_s], [2, 240]);
+    await page.fill("#f_download_parallel", "9");
+    await page.click("#saveBtn");
+    await page.waitForFunction(() => /Not saved/.test(document.getElementById("saveState").textContent));
+    s = await settingsNow();
+    assert.equal(s.download_parallel, 2, "unchanged");
+  } finally {
+    await put({ download_parallel: 4, download_timeout_s: 180 });
+    await page.close();
+  }
+});
+
 test("Settings → Import lookups: lookup_source (bandcamp by default) round-trips", async () => {
   const page = await context.newPage();
   try {
@@ -1917,7 +1941,9 @@ async function downloadSetup({ releases = [], owned = [] } = {}) {
       [DL.collection.id]: release(DL.collection),
       [DL.import.id]: release(DL.import),
       [DL.refused.id]: release(DL.refused, { fail: "not_in_collection" }),
-      ...Object.fromEntries(releases.map((r) => [r.id, release(r, { tracks: r.tracks })])),
+      ...Object.fromEntries(
+        releases.map((r) => [r.id, release(r, { tracks: r.tracks || ["One", "Two"], ...(r.retry_error ? { retry_error: r.retry_error, retry_wait: r.retry_wait } : {}) })])
+      ),
     })
   );
   const before = await api("/api/settings").then((d) => d.settings || d);
@@ -2009,6 +2035,52 @@ test("Download owned missing (import): the selected rows are downloaded and loca
     await api(`/api/import/${batchId}`, { method: "DELETE" });
     await restore();
     await page.close();
+  }
+});
+
+test("Download owned missing: releases download together, each row with its own percent; a retry shows its reason in its row and the status line", async () => {
+  const A = { id: "a2027456636", artist: "TÉNÈBRE", title: "WNCL041" };
+  const B = { id: "a2153449172", artist: "INSTINCT", title: "Interplanetary Criminal", retry_error: "java.net.SocketTimeoutException: Read timed out", retry_wait: 1 };
+  const restore = await downloadSetup({ releases: [A, B], owned: [A.id, B.id] });
+  const app = await context.newPage();
+  try {
+    await app.goto(SERVER + "/");
+    await app.waitForFunction(() => document.querySelectorAll("#collectionTable tbody tr").length > 0);
+    for (const r of [A, B]) {
+      await app.fill("#searchInput", r.title);
+      await app.waitForFunction((id) => document.querySelector(`tr[data-key="${id}"]`), r.id);
+      await app.check(`tr[data-key="${r.id}"] .row-check`);
+    }
+    await app.fill("#searchInput", "");
+    await app.waitForFunction(([a, b]) => document.querySelector(`tr[data-key="${a}"]`) && document.querySelector(`tr[data-key="${b}"]`), [A.id, B.id]);
+    // Everything each row and the status line show while it runs.
+    await app.evaluate(([a, b]) => {
+      const seen = (window.__seen = { [a]: [], [b]: [], status: [], warn: [] });
+      const note = (list, t) => t && !list.includes(t) && list.push(t);
+      new MutationObserver(() => {
+        [a, b].forEach((id) => {
+          const cell = document.querySelector(`tr[data-key="${id}"] .col-located`);
+          if (!cell) return;
+          note(seen[id], cell.textContent);
+          if (cell.querySelector(".warn-note")) note(seen.warn, id);
+        });
+        note(seen.status, document.getElementById("refreshStatus").textContent);
+      }).observe(document.body, { childList: true, subtree: true, characterData: true });
+    }, [A.id, B.id]);
+    await app.click("#downloadOwnedMissing");
+    await app.waitForFunction(() => /^Download: 2 of 2 releases downloaded/.test(document.getElementById("refreshStatus").textContent), null, { timeout: 60000 });
+    const seen = await app.evaluate(() => window.__seen);
+    const has = (list, re) => list.some((t) => re.test(t));
+    assert.ok(has(seen[A.id], /downloading \d+ %/), `A's percent: ${JSON.stringify(seen[A.id])}`);
+    assert.ok(has(seen[B.id], /retry 1\/3: read timed out/), `B's retry: ${JSON.stringify(seen[B.id])}`);
+    assert.deepEqual(seen.warn, [B.id], "only the retrying row is amber");
+    assert.ok(has(seen.status, /retry 1\/3: read timed out/), `status: ${JSON.stringify(seen.status)}`);
+    for (const r of [A, B]) {
+      await waitFor(() => api(`/api/items/${r.id}`).then((it) => it.local && it.local.status === "located"), { what: `${r.title} located` });
+    }
+  } finally {
+    await restore();
+    await app.close();
   }
 });
 

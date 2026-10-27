@@ -16,7 +16,7 @@ import { openPopover, closePopover } from "./popover";
 import { createTags, mapTagsUrl, getBatch, updateRow, commitBatch, discardBatch, resumeLookups, setDefaultTags, relocateRows, relocateRow, searchFiles, listFolder, rowToItem, matchSource, bandcampSearchUrl, openOnBandcampUrl, cleanBandcampUrl } from "./importApi";
 import { statsLine } from "./importTab";
 import { rememberImport } from "./openImport";
-import { downloadFileTitle, downloadFlow, fullReleaseOf, fullReleasesToggle, stateLabel, trackDownloads } from "./downloads";
+import { downloadFileTitle, downloadFlow, fullReleaseOf, fullReleasesToggle, stateLabel, trackDownloads, troubled } from "./downloads";
 import { playableItem } from "./statusFilter";
 import { logNote } from "./importLogs";
 import { runExport } from "./exportFlow";
@@ -845,7 +845,11 @@ function locatedColumn() {
       chip.addEventListener("click", () => locatedPopover(chip, rowNow(item)));
       cell.appendChild(chip);
       const d = dlState[refOf(rowOf(item))];
-      if (d && d.state !== "done") cell.appendChild(el("span", `busy-note${d.state === "failed" ? " err-note" : ""}`, stateLabel(d)));
+      if (d && d.state !== "done") {
+        const note = el("span", `busy-note${d.state === "failed" ? " err-note" : troubled(d) ? " warn-note" : ""}`, stateLabel(d));
+        note.title = stateLabel(d);
+        cell.appendChild(note);
+      }
     },
   };
 }

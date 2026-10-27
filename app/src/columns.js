@@ -6,7 +6,7 @@ import { openPopover, closePopover } from "./popover";
 import { progressText, resultText } from "./jobs";
 import { runExport } from "./exportFlow";
 import { sourceOf } from "./statusFilter";
-import { downloadFileTitle, downloadFlow, fullReleaseOf, stateLabel, trackDownloads } from "./downloads";
+import { downloadFileTitle, downloadFlow, fullReleaseOf, stateLabel, trackDownloads, troubled } from "./downloads";
 
 const LOCAL_RANK = { located: 0, candidates: 1, missing: 2, unknown: 3 };
 const OWNED_RANK = { owned: 0, not_owned: 1, unknown: 2 };
@@ -112,6 +112,7 @@ export const downloadable = (item) =>
  */
 export function appColumns(ctx) {
   const busy = {}; // item id -> label while a per-item job runs
+  const trouble = {}; // item id -> true while its download is retrying
   const failedDownload = {}; // item id -> why its download failed (until the next one)
 
   // Downloads: each item's state, live in its row (the server locates it after).
@@ -121,6 +122,7 @@ export function appColumns(ctx) {
       if (!ctx.page() || !ctx.page().getItems()[key]) return;
       if (d.state === "queued" || d.state === "downloading") busy[key] = stateLabel(d);
       else delete busy[key];
+      trouble[key] = troubled(d);
       if (d.state === "failed") failedDownload[key] = stateLabel(d);
       else delete failedDownload[key];
       ctx.page().refreshRow(key);
@@ -180,7 +182,9 @@ export function appColumns(ctx) {
 
   function busyNote(cell, key) {
     if (!busy[key]) return false;
-    cell.appendChild(el("span", "busy-note", busy[key]));
+    const note = el("span", trouble[key] ? "busy-note warn-note" : "busy-note", busy[key]);
+    note.title = busy[key];
+    cell.appendChild(note);
     return true;
   }
 
