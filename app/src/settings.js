@@ -176,6 +176,23 @@ const FIELDS = {
     label: "Audio format",
     options: ["aiff-lossless", "flac", "wav", "alac", "mp3-320", "mp3-v0", "aac-hi", "vorbis"],
   },
+  download_parallel: {
+    section: "downloads",
+    type: "number",
+    min: 1,
+    max: 8,
+    step: 1,
+    label: "Parallel downloads",
+    help: "How many releases download at once. Default 4. More is faster, but Bandcamp can slow down or refuse them.",
+  },
+  download_timeout_s: {
+    section: "downloads",
+    type: "number",
+    min: 10,
+    step: 10,
+    label: "Download timeout (s)",
+    help: "How long a download may go without data before it's retried (the reason shows in its row). Default 180.",
+  },
   downloader_dir: { section: "advanced", type: "path", label: "Downloader folder" },
   dev_extension_build_dir: { section: "advanced", type: "path", label: "Dev extension build folder" },
 };
