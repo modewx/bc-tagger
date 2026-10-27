@@ -55,8 +55,11 @@ cd server
 `Content-Range: bytes */N`). `X-Bc-Source` says what was served: `preview`, `wav`, `flac` or `native`.
 
 An AIFF or ALAC file with a preview (below) plays the preview: it starts at once and needs no music drive, even
-unplugged. `preview=0` always plays the original and makes or uses no preview (for comparing the two). Without a
-preview, Chrome can't play AIFF or ALAC, so:
+unplugged. `preview=0` always plays the original and makes or uses no preview (for comparing the two). A play
+stays on what it started on: `bytes=0-` starts a play (the preview if there is one), and its later ranges get the
+same source even if a preview is made meanwhile (a first play makes one). A request without a Range is a
+whole-file fetch, not a player: it gets the preview and doesn't change what a play uses. Without a preview,
+Chrome can't play AIFF or ALAC, so:
 
 1. Uncompressed AIFF (big-endian PCM; AIFF-C `sowt`, `fl32`, `fl64`; 1–32 bits, mono or stereo) is served as a
    WAV made on the fly (`audio/wav`). Its 44-byte header comes from the layout the index keeps

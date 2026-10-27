@@ -23,6 +23,7 @@ import shutil
 import subprocess
 import threading
 import time
+from collections import OrderedDict
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Iterable
@@ -41,6 +42,7 @@ PLAY_DELAY_S = 3.0  # a play's preview waits this long, so the player's first re
 TOUCH_EVERY_S = 60.0  # how often a played preview's last-played time is written (each seek is a request)
 ENCODE_TIMEOUT_S = 900
 UNKNOWN_LENGTH_S = 600.0  # the free-space estimate for a file whose length the index doesn't know
+PLAYS_KEPT = 512  # how many paths remember what their current play started on
 
 
 def previews_dir() -> Path:
@@ -94,6 +96,7 @@ class Previews:
         self._seq = 0
         self._closed = False
         self._cancelled_owners: set[str] = set()
+        self._plays: OrderedDict[str, str] = OrderedDict()  # path -> "preview" | "original", by the stream
         self.skipped_low_space = 0
         self.last_skip: dict | None = None
 
@@ -122,6 +125,19 @@ class Previews:
                                 (path, now - TOUCH_EVERY_S)):
             with self.store.tx() as c:
                 c.execute("UPDATE previews SET played_at = ? WHERE path = ?", (now, path))
+
+    def playing(self, path: str) -> str | None:
+        """What the current play of ``path`` started on ("preview" or "original"), if this process saw it start."""
+        with self._cv:
+            return self._plays.get(path)
+
+    def started(self, path: str, source: str) -> None:
+        """A play of ``path`` started on ``source``: its later ranges stay on it, even if a preview appears."""
+        with self._cv:
+            self._plays[path] = source
+            self._plays.move_to_end(path)
+            while len(self._plays) > PLAYS_KEPT:
+                self._plays.popitem(last=False)
 
     def status(self) -> dict[str, Any]:
         row = self.store.query_one("SELECT COUNT(*) AS n, COALESCE(SUM(bytes), 0) AS b FROM previews")

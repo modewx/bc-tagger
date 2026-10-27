@@ -199,6 +199,12 @@ Tests never touch Bandcamp, the music drive or a real rekordbox library: Bandcam
     drop below 2 GB free; that's skipped and counted in the status.
   - `preview=0` on the stream always plays the original and builds nothing, so the app can compare the two.
     `X-Bc-Source` says what was served (`preview`, `wav`, `flac`, `native`).
+  - Found live right after: a first play's preview was ready 3 s in, and that play's next ranges got the
+    preview's bytes (a 200, then 416s past its end), so the track stopped. Now a play stays on what it started
+    on: `bytes=0-` starts a play; later ranges keep its source.
+  - Live: a preview's first 64 KB of audio in 2–25 ms with nothing read from the drive, against 0.26 s for WAV
+    from the awake drive. Encodes take 0.6–3.3 s per track (0.7–5.4 MB). The sleeping-drive case wasn't
+    captured: the drive never stayed idle for 11 minutes.
 
 ## App and extension (`app/`, `extension/`, `shared/`, branch `claude/local-collection-ui-e8f6f6`)
 

@@ -104,6 +104,24 @@ def test_preview_0_serves_the_original_and_never_queues(lib):
         assert get(c, without, "bytes=0-99").headers["x-bc-source"] == "preview"
 
 
+def test_a_play_stays_on_what_it_started_on(lib):
+    """A first play makes a preview a moment later; the rest of that play must still get the original's bytes."""
+    svc, _, add = lib
+    src = add("song", seconds=1.0)
+    with TestClient(create_app(svc)) as c:
+        whole = get(c, src, preview=0).content
+        assert get(c, src, "bytes=0-").headers["x-bc-source"] == "wav"  # the play starts
+        assert [r["status"] for r in svc.previews.run_pending()] == ["built"]  # its preview, meanwhile
+        r = get(c, src, "bytes=5000-")
+        assert r.headers["x-bc-source"] == "wav" and r.content == whole[5000:]  # the same play goes on
+        assert get(c, src).headers["x-bc-source"] == "preview"  # a whole-file fetch isn't a player
+        assert get(c, src, "bytes=-100").content == whole[-100:]  # still the play that started on WAV
+        assert get(c, src, "bytes=0-").headers["x-bc-source"] == "preview"  # the next play
+        preview = get(c, src).content
+        r = get(c, src, "bytes=100-")
+        assert r.headers["x-bc-source"] == "preview" and r.content == preview[100:]
+
+
 def test_the_least_recently_played_go_at_the_cap(lib, monkeypatch):
     svc, _, add = lib
     monkeypatch.setattr(previews, "TOUCH_EVERY_S", 0.0)

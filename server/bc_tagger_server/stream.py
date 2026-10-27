@@ -115,7 +115,16 @@ def stream_response(store: Store, path: str, range_header: str | None = None,
         raise HTTPException(404, "not an indexed audio file")
     wants_preview = previews is not None and row["format"] in PREVIEW_FORMATS
     if wants_preview:
-        out = previews.lookup(row)
+        # A player asks for "bytes=0-" to start a play and for later ranges as it goes. A play stays on what it
+        # started on: a preview made meanwhile (a first play makes one) would change the bytes under it.
+        start = _range_start(range_header)
+        if start == 0 or (start is not None and previews.playing(row["path"]) is None):
+            out = previews.lookup(row)  # a new play: the preview, if there is one
+            previews.started(row["path"], "preview" if out is not None else "original")
+        elif start is None:  # no Range: a whole-file fetch, not a player; it doesn't change what a play uses
+            out = previews.lookup(row)
+        else:
+            out = previews.lookup(row) if previews.playing(row["path"]) == "preview" else None
         if out is not None:  # the internal disk only: no music drive needed
             previews.touch(row["path"])
             return FileResponse(out, media_type="audio/webm",
@@ -254,6 +263,14 @@ def _read_at(f: BinaryIO, at: int, n: int) -> bytes:
         parts.append(part)
         got += len(part)
     return b"".join(parts)
+
+
+def _range_start(value: str | None) -> int | None:
+    """Where a single ``bytes=`` range starts (-1 for a suffix range), or None without one."""
+    m = _RANGE.fullmatch((value or "").strip())
+    if not m or not (m[1] or m[2]):
+        return None
+    return int(m[1]) if m[1] else -1
 
 
 class RangeNotSatisfiable(Exception):
