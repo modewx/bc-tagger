@@ -341,6 +341,37 @@ More import options:
   **reopen** a batch after a restart (`GET /api/import` gives each batch's `step`, `progress`, `job`,
   `resumable`; a batch caught mid-lookup becomes `interrupted` and `resume` finishes it from the cache).
 
+### Import from Files
+
+`POST /api/import/files {folders: [{path, since}], lookup, default_tags, default_tags_all, name?}` makes a batch
+(`kind: "files"`) from the audio files added to folders since a date. It's the same kind of batch as a JSON
+import: rows, review, commit, log (`source: "files"`), `modified_at` and "#".
+
+- **Checks first:** folders must be existing, readable directories. A missing folder, or one on an unplugged
+  drive, is refused (400) before anything is written.
+- **Scanning (the job):** each folder gets a quick scan, recorded under the configured root that holds it. Then
+  it takes the indexed audio files under the folder created (birthtime, else mtime) on or after `since` (a
+  `YYYY-MM-DD` local date or an ISO date-time).
+- **One row per track:** files in the same release folder with the same name, or the same disc, track and
+  title, are one track; the row uses the file `format_preference` ranks first and lists the others in
+  `file.formats`.
+- **Order:** folders as given, then releases oldest first, then disc and track. Rows are numbered (`line`) in
+  that order, and so are the new items' "#".
+- **What each row holds:**
+  - artist, title, album, track # and year from the tags, else from the file and folder names;
+  - `raw`: the file path; `folder` and `folder_index`;
+  - `located` already set to the file (`source: "file"`; later locates leave it alone).
+- **Matching:** a Bandcamp track/album page URL in the tags is the row's page, read directly with no search.
+  Otherwise the chosen lookup runs (server or browser).
+- **Already in the collection:** a file located for a collection item (or an album item), a Bandcamp URL of a
+  collection item, or the same artist + title makes the row a duplicate, and it starts unchecked.
+- **On commit:** the file is confirmed for each new item. When the same track came from two folders, the item
+  keeps the better format.
+
+`GET /api/import/files/defaults` → `{folders: [{path, kind, since, last_run, mounted, exists}], remembered,
+default_tags: ["pool"], lookup}`: the owned root and the not-owned `complete` root. Each `since` is the date of
+that folder's last files-import (remembered when one is created), else 7 days ago. It only reads.
+
 ### Import logs
 
 Every commit writes a log to `import_log_dir`: `YYYY-MM-DD_HHMMSS_<batch name>_<batch_id>.json` (local time),

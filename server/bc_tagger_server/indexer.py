@@ -284,7 +284,8 @@ def quick_scan(
     cutoff: datetime,
     progress: Callable[[int, int, str], None] | None = None,
 ) -> dict[str, Any]:
-    """Index audio files created or modified since ``cutoff`` in the mounted roots."""
+    """Index audio files created or modified since ``cutoff`` in the mounted roots. A root's ``walk``
+    (a folder inside it) limits the walk to that folder; files are still recorded under the root."""
     cutoff_ts = cutoff.timestamp()
     stats: dict[str, Any] = {
         "mode": "quick", "cutoff": cutoff.astimezone(timezone.utc).isoformat(timespec="seconds"),
@@ -292,14 +293,15 @@ def quick_scan(
     }
     for root in roots:
         root_path = Path(root["path"]).expanduser()
+        walk_path = Path(root.get("walk") or root_path).expanduser()
         root_key = str(root_path)
-        rstats: dict[str, Any] = {"path": root_key, "kind": root["kind"], "mounted": root_path.is_dir()}
+        rstats: dict[str, Any] = {"path": str(walk_path), "kind": root["kind"], "mounted": walk_path.is_dir()}
         stats["roots"].append(rstats)
         if not rstats["mounted"]:
             rstats["method"] = "skipped (not mounted)"
             continue
-        spot = spotlight_recent(root_path, cutoff)
-        paths = set(walk_recent(root_path, cutoff_ts))
+        spot = spotlight_recent(walk_path, cutoff)
+        paths = set(walk_recent(walk_path, cutoff_ts))
         rstats["method"] = "walk" if spot is None else "spotlight+walk"
         if spot is not None:
             paths |= set(spot)

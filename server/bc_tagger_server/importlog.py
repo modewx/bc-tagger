@@ -119,7 +119,8 @@ def build(svc, batch: dict, rows: list[dict], result: dict | None, earlier: set[
         "status": "partial" if error else "complete",
         "error": error,
         "batch": {
-            "id": batch["batch_id"], "name": batch.get("name"), "source_file": batch.get("source_file"),
+            "id": batch["batch_id"], "name": batch.get("name"), "source": batch.get("kind") or "json",
+            "folders": batch.get("folders"), "source_file": batch.get("source_file"),
             "revision": batch.get("revision"), "created_at": batch.get("created_at"),
             "committed_at": batch.get("committed_at"), "default_tags": batch.get("default_tags") or [],
             "default_tags_all": bool(batch.get("default_tags_all")), "lookup": batch.get("lookup") or "server",
@@ -146,6 +147,7 @@ def markdown(log: dict) -> str:
     when = _local(b.get("committed_at") or log["logged_at"]).strftime("%Y-%m-%d %H:%M")
     lines = [f"# Import: {b['name']} ({when})", ""]
     lines.append(f"Batch `{b['id']}`" + (f" · file `{b['source_file']}`" if b.get("source_file") else "")
+                 + "".join(f" · folder `{f['path']}` since {f['since'][:10]}" for f in b.get("folders") or [])
                  + f" · lookups: {b['lookup']}" + (f", {b['lookup_source']}" if b.get("lookup_source") else ""))
     if b["default_tags"]:
         lines.append(f"Default tags: {', '.join(b['default_tags'])} "

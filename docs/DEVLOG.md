@@ -71,6 +71,17 @@ Tests never touch Bandcamp, the music drive or a real rekordbox library: Bandcam
   - Import commits number their new items after everything else, in import order. Merges keep their number.
   - `GET /api/items` sorts by it by default, and `/api/health` gives `max_order` so the extension numbers new
     tags after the import's Other items.
+- **Import from Files (Phase 7):**
+  - A batch made from the audio files added to folders since a date: by default the Collection and the
+    soulseek `complete` folder, each since its last run.
+  - One row per track; a FLAC + AIFF pair becomes one row, using the preferred format.
+  - Rows are already located to their file; a Bandcamp URL in the tags is read directly. Files already in the
+    collection start unchecked.
+  - Ordered by folder, then release (oldest first), then track, so new "#" numbers follow.
+  - Checked end to end on a dev server with clones of `test-tracks/` and `test-downloads/`:
+    - 94 files gave 94 rows; 33 were already in the collection and stayed unchecked;
+    - the commit gave the new items "#" 947–998 and wrote the log;
+    - an album present as MP3 and as AIFF kept the AIFFs.
 
 ## App and extension (`app/`, `extension/`, `shared/`, branch `claude/local-collection-ui-e8f6f6`)
 
