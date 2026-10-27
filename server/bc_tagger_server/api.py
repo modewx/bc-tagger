@@ -275,6 +275,11 @@ def create_app(service: Service | None = None) -> FastAPI:
     def import_open_rows() -> list[dict]:
         return imp.open_rows(svc)
 
+    @app.get("/api/import/last-committed")
+    def import_last_committed() -> dict:
+        """The most recently committed batch and every item it added or merged ("Select last import")."""
+        return imp.last_committed(svc)
+
     @app.get("/api/import/files/defaults")
     def import_files_defaults() -> dict:
         """Import from Files: the default folders, each with "since" = its last run (7 days ago at first)."""

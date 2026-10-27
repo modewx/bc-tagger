@@ -1400,7 +1400,9 @@ def _commit(svc, batch: dict, earlier: set[int] = frozenset()) -> dict:
     for item_id in dict.fromkeys(located_now):
         svc.jobs.bus.publish("item", {"id": item_id})
     result["items_located"] = len(set(located_now))
-    # what the collection page selects afterwards (sorted by modified_at, newest first)
+    # what the collection page selects afterwards (sorted by modified_at, newest first): every committed row's
+    # item, also those an earlier attempt committed before it stopped
+    ids = committed_item_ids(rows)
     result["item_ids"] = ids
     result["selected"] = list(dict.fromkeys(ids["added"] + ids["merged"] + ids["other_added"] + ids["other_merged"]))
     result["modified_at"] = stamp
@@ -1411,6 +1413,51 @@ def _commit(svc, batch: dict, earlier: set[int] = frozenset()) -> dict:
     _refresh_stats(store, batch, rows)
     svc.jobs.bus.publish("import", {"batch_id": batch_id, "phase": "committed", "current": len(rows), "total": len(rows)})
     return result
+
+
+_ID_KEYS = {"pending_add": "added", "tag_merge": "merged", "other": "other_added", "other_merge": "other_merged"}
+
+
+def _committed_items(rows: list[dict]) -> list[tuple[str, str]]:
+    """(outcome key, item id) of every committed row, in row order: also rows an earlier (stopped) attempt
+    committed. Rows from before ``commit_info`` existed get the id the commit used (the duplicate, else the
+    row's item)."""
+    out = []
+    for row in rows:
+        kind = row.get("committed")
+        if kind in _ID_KEYS:
+            item_id = (row.get("commit_info") or {}).get("item_id") or (
+                (row.get("duplicate") or {}).get("of") if kind in ("tag_merge", "other_merge") else row_item(row)["id"])
+            if item_id:
+                out.append((_ID_KEYS[kind], item_id))
+    return out
+
+
+def committed_item_ids(rows: list[dict]) -> dict[str, list[str]]:
+    """Every committed row's item by outcome (``added``, ``merged``, ``other_added``, ``other_merged``)."""
+    ids: dict[str, list[str]] = {k: [] for k in _ID_KEYS.values()}
+    for kind, item_id in _committed_items(rows):
+        if item_id not in ids[kind]:
+            ids[kind].append(item_id)
+    return ids
+
+
+def last_committed(svc) -> dict[str, Any]:
+    """The most recently committed batch (JSON or files): ``{batch_id, name, kind, committed_at, item_ids,
+    by_outcome}``; ``item_ids`` is every committed row's item in row order. Nulls if none yet."""
+    def when(b: dict) -> tuple[str, str]:  # committed_at has whole seconds; the commit's stamp has milliseconds
+        return b["committed_at"], (b.get("commit_result") or {}).get("modified_at") or ""
+
+    committed = [b for b in (json.loads(r["data"]) for r in svc.store.query("SELECT data FROM import_batches"))
+                 if b.get("status") == "committed" and b.get("committed_at")]
+    best = max(committed, key=when, default=None)
+    if best is None:
+        return {"batch_id": None, "name": None, "kind": None, "committed_at": None, "item_ids": [], "by_outcome": {}}
+    rows = load_rows(svc.store, best["batch_id"])
+    return {"batch_id": best["batch_id"], "name": best.get("name"), "kind": best.get("kind") or "json",
+            "committed_at": best["committed_at"],
+            "item_ids": list(dict.fromkeys(item_id for _, item_id in _committed_items(rows))),
+            "by_outcome": committed_item_ids(rows)}
 
 
 def discard(svc, batch_id: str) -> dict:
