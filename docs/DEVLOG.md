@@ -217,6 +217,16 @@ Tests never touch Bandcamp, the music drive or a real rekordbox library: Bandcam
   `preview_bitrate_kbps` 96. A stored 3 (the old default) becomes 3.5 (settings version 3).
 - The sleeping-drive measurement was dropped: the drive never idled while the user played, and it's unplugged
   now. Nothing here was measured from a sleeping drive.
+- **Build all previews (user: a button that converts all tracks, "parallelized for max speed"):**
+  `POST /api/previews/build {all: true}` (or `{ids}`), planned first (`dry_run`): what fits the cap and the 2 GB
+  guard, in collection order, and what's left out.
+  - One reader reads each file once, whole, in path order, into a queue of 3 files / 300 MB; `preview_build_parallel`
+    encoders (cores − 2 = 10 here) take them through stdin. The drive sees one sequential reader, never several.
+  - Found while measuring: `subprocess.communicate()` feeds stdin 512 bytes per step, holding the GIL each time, so
+    10 encoders were slower than 2 (20 files in 49 s vs 33 s). Writing 1 MB blocks: 10.6 s.
+  - On 20 local AIFFs (1.47 GB, 137 min; the SSD, not the HDD): 138 MB/s with 10 encoders, 83 with 4, 44 with 2.
+    All 800 files (52.7 GB) would take 6.3 min if the drive kept up; from the HDD the drive sets the pace (about
+    7 min at 120 MB/s).
 
 ## App and extension (`app/`, `extension/`, `shared/`, branch `claude/local-collection-ui-e8f6f6`)
 

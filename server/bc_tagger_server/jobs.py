@@ -81,8 +81,11 @@ class JobContext:
         self._m = manager
         self.job = job
 
-    def progress(self, current: int | None = None, total: int | None = None, message: str | None = None) -> None:
+    def progress(self, current: int | None = None, total: int | None = None, message: str | None = None,
+                 **extra: Any) -> None:
+        """``extra``: more fields for this job's progress (a preview build's rate, ETA, current file)."""
         p = self.job.progress
+        p.update(extra)
         if current is not None:
             p["current"] = current
         if total is not None:

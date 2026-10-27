@@ -117,6 +117,8 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     # played dropped first; 0 turns them off. The user chose 3.5 GB at 96 kbps (about 850 tracks).
     "preview_cache_gb": 3.5,
     "preview_bitrate_kbps": 96,
+    # A preview build's encoders (the build's single reader feeds them): the cores but two.
+    "preview_build_parallel": max(1, (os.cpu_count() or 4) - 2),
     # Opt-in file watcher (docs/fsevents-watcher.md): keeps the index current while the server runs.
     "watch_roots": False,
     "watch_debounce_seconds": 3,
@@ -230,6 +232,9 @@ def _validate(merged: dict[str, Any]) -> dict[str, Any]:
     cap = out.get("preview_cache_gb")
     if isinstance(cap, bool) or not isinstance(cap, (int, float)) or not 0 <= cap <= 1000:
         raise SettingsError("preview_cache_gb must be a number of GB from 0 to 1000")
+    parallel = out.get("preview_build_parallel")
+    if isinstance(parallel, bool) or not isinstance(parallel, int) or not 1 <= parallel <= 32:
+        raise SettingsError("preview_build_parallel must be a whole number from 1 to 32")
     kbps = out.get("preview_bitrate_kbps")
     if isinstance(kbps, bool) or not isinstance(kbps, int) or not 32 <= kbps <= 256:
         raise SettingsError("preview_bitrate_kbps must be a whole number from 32 to 256")

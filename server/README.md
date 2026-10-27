@@ -88,21 +88,34 @@ file is (re)indexed, or for AIFF when first played.
 Opus 96 kbps in WebM (cues at the front, so it seeks) under `<data dir>/previews/`, one per AIFF/ALAC file, for
 the version (size, mtime) it was made from. About 4 MB for 5 minutes, so 3.5 GB holds about 850 tracks.
 
-- **Made only by work you started**, which is also the only time they read the drive: an import commit (the
-  files its rows are located to), a finished download, a first play (in the background, 3 s after the stream
-  starts, not with `preview=0`), and `POST /api/previews/build {ids}`. Page loads and timers only read the
-  `previews` table. At most two encodes run at a time, under `nice`, on their own workers (other jobs don't
-  wait for them).
+- **Made only by work you started**, which is also the only time they read the drive:
+  - in the background, at most two encodes at a time, each reading its file: an import commit (the files its rows
+    are located to), a finished download, a first play (3 s after the stream starts; not with `preview=0`);
+  - a **build** (`POST /api/previews/build`), everything or a selection, as a pipeline made for a hard disk: one
+    reader reads each file once, whole, in path order (a release's files together, so the head barely seeks) into a
+    queue of at most 3 files / 300 MB; `preview_build_parallel` encoders (default: the cores but two) take them
+    through stdin (ALAC, which needs seeking, through a copy on the internal disk). Only the reader touches the
+    drive, and background encodes wait while a build runs.
+  - Page loads and timers only read the `previews` table. Encodes run under `nice`.
 - **Kept to `preview_cache_gb`** (default 3.5; 0 turns them off), at `preview_bitrate_kbps` (default 96; new
-  previews only): the least recently played go first, at once when the setting is lowered. **Never written when the internal disk would drop below 2 GB free**: that
-  preview is skipped and the status counts it.
-- `GET /api/previews/status` → `{count, bytes, cap_bytes, free_bytes, min_free_bytes, building, queued, jobs,
-  skipped_low_space, last_skip}`.
-- `POST /api/previews/build {ids}` → `{job_id}`: a `previews` job (progress on SSE `job`) for the items' located
-  AIFF/ALAC files. Its result: `{items, files, native, already, built, exists, skipped, failed, cancelled, left,
-  off, problems}`. `POST /api/previews/build/<job_id>/cancel` → `{job_id, cancelled}` stops what only that job
-  asked for (`left`: still queued for a play or an import).
-- `DELETE /api/previews` → `{deleted, bytes}` deletes them all.
+  previews only): the least recently played go first, at once when the setting is lowered. **Never written when the
+  internal disk would drop below 2 GB free**: that preview is skipped and the status counts it.
+- `GET /api/previews/status` → `{count, bytes, cap_bytes, free_bytes, min_free_bytes, kbps, building, queued, batch,
+  skipped_low_space, last_skip}`; `batch` is null or the running build's progress (below) with its `job_id`.
+- `POST /api/previews/build {all: true}` or `{ids: [...]}`, plus `dry_run: true` for only the plan → `{plan}` or
+  `{job_id, plan}`; 409 while a build runs, 400 without exactly one of `all`/`ids`.
+  - `plan`: `{files, native, already, missing, needed, planned, left_out, needed_bytes, planned_bytes,
+    left_out_bytes, source_bytes, audio_hours, fits_cap, fits_space, cap_bytes, used_bytes, free_bytes,
+    min_free_bytes, kbps, parallel}`. Files that need a preview are taken in collection ("#") order up to the cap and
+    the free-space guard; the rest are `left_out`. Ones with a preview are skipped, so a build resumes.
+  - Progress (SSE `job`, kind `previews`): `{current, total, message, built, failed, skipped, bytes_read,
+    bytes_total, read_mb_s, eta_s, current_file, encoding, queued, elapsed_s}`.
+  - Result: the plan plus `{built, failed, skipped, cancelled, not_built, dropped, stopped, errors: [{path, status,
+    reason|error}], bytes_read, read_mb_s, elapsed_s}`. A file that fails is listed and the build goes on;
+    `stopped` says why reading stopped early (e.g. "music drive not mounted").
+  - `POST /api/previews/build/<job_id>/cancel` → `{job_id, cancelled}`: the files being encoded finish, nothing new
+    is read or started.
+- `DELETE /api/previews` → `{deleted, bytes}` deletes them all (and stops a build).
 - SSE `preview` `{path, preview: true, bytes}` when one is made, `{path, preview: false}` when one is dropped
   (`skipped: "low_space"` when it wasn't made), `{cleared: true}` after a delete.
 

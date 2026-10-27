@@ -329,7 +329,9 @@ class Store:
 
         Python's sqlite3 lets go of the GIL for every row it steps through and has to take it back for the next.
         While another thread is busy in Python (scoring, say), each take-back waits its turn, so reading a few
-        thousand rows can take seconds. One aggregated row takes it back once."""
+        thousand rows can take seconds. One aggregated row takes it back once.
+
+        JSON keeps 15 significant digits of a REAL: don't use it for values compared exactly later (an mtime)."""
         cols = ", ".join(columns)
         row = self.query_one(f"SELECT json_group_array(json_array({cols})) AS j FROM ({sql})", params)
         return [dict(zip(columns, values)) for values in json.loads(row["j"])]

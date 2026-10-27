@@ -84,7 +84,9 @@ class ExportBody(SelectionBody):
 
 
 class PreviewBuildBody(BaseModel):
-    ids: list[str] = Field(max_length=10000)
+    ids: Optional[list[str]] = Field(default=None, max_length=20000)
+    all: bool = False  # the whole collection, in "#" order
+    dry_run: bool = False  # only the plan
 
 
 class NamesBody(BaseModel):
@@ -639,7 +641,14 @@ def create_app(service: Service | None = None) -> FastAPI:
 
     @app.post("/api/previews/build")
     def previews_build(body: PreviewBuildBody) -> dict:
-        return {"job_id": svc.start_preview_build(body.ids).id}
+        from .previews import BuildRunning
+
+        if body.all == (body.ids is not None):
+            raise HTTPException(400, "send either all: true or ids")
+        try:
+            return svc.preview_build(body.ids, body.all, body.dry_run)
+        except BuildRunning as e:
+            raise HTTPException(409, f"a preview build is running ({e})") from None
 
     @app.post("/api/previews/build/{job_id}/cancel")
     def previews_cancel(job_id: str) -> dict:

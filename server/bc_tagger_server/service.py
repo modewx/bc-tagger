@@ -807,47 +807,36 @@ class Service:
 
     # -- previews ---------------------------------------------------------------------------
 
-    def start_preview_build(self, ids: list[str]):
-        """Make previews for the located AIFF/ALAC files of these items, alongside other jobs (previews have
-        their own two encoders). Progress over SSE ``job``; ``cancel_preview_build`` stops it."""
-        from collections import Counter
+    def preview_build(self, ids: list[str] | None = None, everything: bool = False,
+                      dry_run: bool = False) -> dict[str, Any]:
+        """Previews for the located AIFF/ALAC files of these items (``everything``: the whole collection, in "#"
+        order): ``{plan}`` for a dry run, else ``{job_id, plan}``. The build runs alongside other jobs; progress
+        on SSE ``job``. Raises ``BuildRunning`` while another build runs."""
+        from .collection import all_items, by_order
+        from .previews import located_paths
 
-        from .previews import PREVIEW_FORMATS, located_paths
+        if everything:
+            ids = [it["id"] for it in by_order(all_items(self.store))]
+        plan = self.previews.plan(located_paths(self.store, ids or []))
+        public = {k: v for k, v in plan.items() if not k.startswith("_")}
+        if dry_run:
+            return {"plan": public}
+        running = self.previews.batch_job()
+        if running:
+            from .previews import BuildRunning
 
-        paths = located_paths(self.store, ids)
-        formats = {r["path"]: r["format"] for r in self.store.query_all(
-            "SELECT path, format FROM files WHERE path IN (SELECT value FROM json_each(?))", ["path", "format"],
-            (json.dumps(paths),))}
+            raise BuildRunning(running)
         ctx = self.jobs.track("previews")
-        tasks = self.previews.enqueue(paths, owner=ctx.job.id)
-        total = len(tasks)
-        base = {"items": len(ids), "files": len(paths),
-                "native": sum(formats.get(p) not in PREVIEW_FORMATS for p in paths)}
-        base["already"] = len(paths) - base["native"] - total if self.previews.cap_bytes() > 0 else 0
-        ctx.progress(0, total, f"previews 0/{total}")
-
-        def watch() -> None:
-            try:
-                self.previews.wait(tasks, lambda done: ctx.progress(done, total, f"previews {done}/{total}"),
-                                   owner=ctx.job.id)
-                # cancelled: "left" are still queued because something else (a play, an import) asked for them too
-                counts = Counter(t.result["status"] if t.done.is_set() else "left" for t in tasks)
-                skips = [t.result for t in tasks if t.done.is_set() and t.result["status"] in ("skipped", "failed")]
-                ctx.finish({**base, **{k: counts.get(k, 0) for k in ("built", "exists", "skipped", "failed",
-                                                                      "cancelled", "left")},
-                            "off": self.previews.cap_bytes() <= 0, "problems": skips[:20]})
-            except Exception as e:  # noqa: BLE001 - surfaced on the job
-                log.exception("preview build failed")
-                ctx.finish(error=f"{type(e).__name__}: {e}")
-
-        threading.Thread(target=watch, name=f"bct-{ctx.job.id}", daemon=True).start()
-        return ctx.job
+        ctx.progress(0, plan["planned"], f"previews 0/{plan['planned']}")
+        self.previews.start_batch(ctx.job.id, plan, lambda fields: ctx.progress(**fields),
+                                  lambda result, error: ctx.finish(result, error))
+        return {"job_id": ctx.job.id, "plan": public}
 
     def cancel_preview_build(self, job_id: str) -> dict[str, Any]:
         job = self.jobs.get(job_id)
         if job is None or job.kind != "previews":
             raise KeyError(job_id)
-        return {"job_id": job_id, "cancelled": self.previews.cancel(job_id)}
+        return {"job_id": job_id, "cancelled": self.previews.cancel_batch(job_id)}
 
     # -- imports (Phase 3) --------------------------------------------------------------
 

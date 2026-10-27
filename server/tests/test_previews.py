@@ -6,6 +6,8 @@ import builtins
 import json
 import os
 import subprocess
+import sys
+import threading
 import time
 from pathlib import Path
 
@@ -34,7 +36,8 @@ def lib(make_service, tmp_path):
     with ``item``, locates that item to it."""
     root = tmp_path / "music"
     root.mkdir()
-    svc = make_service(root, items={f"t{i}": {"title": f"Song {i}", "artist": "A", "tags": []} for i in range(1, 6)})
+    svc = make_service(root, items={f"t{i}": {"title": f"Song {i}", "artist": "A", "tags": [], "order": i}
+                                    for i in range(1, 13)})
 
     def add(name: str, seconds: float = 2.0, item: str | None = None) -> str:
         path = make_aiff(root / f"{name}.aiff", "pcm_s24be", 2, seconds)
@@ -208,55 +211,6 @@ def test_page_loads_do_no_preview_work(make_service, tmp_path, mount_table, monk
     assert [t["preview"] for t in items["a2"]["tracks"]] == [True, False] and items["a2"]["preview"] is False
 
 
-def test_a_build_job_reports_progress_and_can_be_cancelled(lib):
-    svc, _, add = lib
-    paths = [add(f"s{i}", seconds=0.5, item=f"t{i}") for i in (1, 2, 3)]
-    svc.previews.build(paths[0])  # already there
-    events = []
-    svc.jobs.bus.publish = svc.previews.publish = lambda event, data: events.append((event, data))
-    with TestClient(create_app(svc)) as c:
-        job_id = c.post("/api/previews/build", json={"ids": ["t1", "t2", "t3", "t4"]}).json()["job_id"]
-        assert svc.previews.queued() == paths[1:] and svc.previews.status()["jobs"] == [job_id]
-        assert svc.jobs.get(job_id).status == "running"  # alongside other jobs, not on their worker
-        svc.previews.run_pending()
-        job = svc.jobs.wait(job_id, timeout=10)
-        assert job.status == "done" and job.progress["current"] == job.progress["total"] == 2
-        assert {k: job.result[k] for k in ("items", "files", "already", "native", "built", "cancelled")} == {
-            "items": 4, "files": 3, "already": 1, "native": 0, "built": 2, "cancelled": 0}
-        assert [d["progress"]["current"] for e, d in events if e == "job" and d["id"] == job_id][-1] == 2
-        assert sorted(d["path"] for e, d in events if e == "preview") == paths[1:]
-        # cancelled before anything ran: the queue empties
-        more = [add(f"m{i}", seconds=0.5, item=f"t{i}") for i in (4, 5)]
-        job_id = c.post("/api/previews/build", json={"ids": ["t4", "t5"]}).json()["job_id"]
-        svc.previews.enqueue([more[1]])  # also asked for by something else: stays
-        assert c.post(f"/api/previews/build/{job_id}/cancel").json() == {"job_id": job_id, "cancelled": 1}
-        job = svc.jobs.wait(job_id, timeout=10)
-        assert (job.result["cancelled"], job.result["left"]) == (1, 1) and svc.previews.queued() == [more[1]]
-        assert c.post("/api/previews/build/locate-1/cancel").status_code == 404
-
-
-def test_cancel_stops_a_running_encode(lib, tmp_path, monkeypatch):
-    svc, _, add = lib
-    src = add("slow", seconds=0.5, item="t1")
-    slow = tmp_path / "slow-ffmpeg"
-    slow.write_text("#!/bin/sh\nexec sleep 30\n")
-    slow.chmod(0o755)
-    monkeypatch.setattr(previews, "ffmpeg_bin", lambda: str(slow))
-    svc.previews.autostart = True
-    job = svc.start_preview_build(["t1"])
-    deadline = time.monotonic() + 10
-    while svc.previews.status()["building"] == 0 and time.monotonic() < deadline:
-        time.sleep(0.02)
-    assert svc.previews.status()["building"] == 1
-    started = time.monotonic()
-    assert svc.cancel_preview_build(job.id)["cancelled"] == 1
-    done = svc.jobs.wait(job.id, timeout=10)
-    assert done.result["cancelled"] == 1 and time.monotonic() - started < 5
-    assert list(previews.previews_dir().iterdir()) == [] and svc.previews.status()["building"] == 0
-    svc.previews.close()
-    assert Path(src).is_file()
-
-
 def test_src_original_keeps_its_bytes_while_a_preview_appears(lib):
     """The freeze the user hit: a first play's preview was ready mid-play and the same URL changed to it. A URL's
     bytes must never change under a player."""
@@ -358,3 +312,178 @@ def test_preview_defaults_and_the_old_default_moving_to_3_5(tmp_path):
     assert Settings(path=old).get("preview_cache_gb") == 3
     with pytest.raises(SettingsError):
         fresh.update({"preview_bitrate_kbps": 8})
+
+
+
+FAKE_FFMPEG = """#!{python}
+# Stands in for ffmpeg in build tests: logs when it ran and how it got its input; fails on a file marked BADFILE.
+import json, os, sys, time
+args = sys.argv[1:]
+start = time.time()
+source = args[args.index("-i") + 1]
+data = sys.stdin.buffer.read() if source == "pipe:0" else open(source, "rb").read()
+time.sleep(float(os.environ.get("FAKE_FFMPEG_S", "0.3")))
+with open(os.environ["FAKE_FFMPEG_LOG"], "a") as log:
+    log.write(json.dumps({{"start": start, "end": time.time(), "source": source, "bytes": len(data)}}) + "\\n")
+if b"BADFILE" in data:
+    sys.stderr.write("Invalid data found when processing input")
+    sys.exit(1)
+open(args[-1], "wb").write(bytes.fromhex("1a45dfa3") + b"x" * 1000)
+"""
+
+
+@pytest.fixture
+def fake_ffmpeg(tmp_path, monkeypatch):
+    """ffmpeg replaced by FAKE_FFMPEG; returns a function reading its log."""
+    script, log = tmp_path / "fake-ffmpeg", tmp_path / "fake-ffmpeg.log"
+    script.write_text(FAKE_FFMPEG.format(python=sys.executable))
+    script.chmod(0o755)
+    log.write_text("")
+    monkeypatch.setattr(previews, "ffmpeg_bin", lambda: str(script))
+    monkeypatch.setenv("FAKE_FFMPEG_LOG", str(log))
+    return lambda: [json.loads(line) for line in log.read_text().splitlines()]
+
+
+def most_at_once(spans) -> int:
+    edges = sorted([(a, 1) for a, _ in spans] + [(b, -1) for _, b in spans])
+    now = top = 0
+    for _, step in edges:
+        now += step
+        top = max(top, now)
+    return top
+
+
+def test_a_build_reads_each_file_once_in_one_thread_and_encodes_in_parallel(lib, fake_ffmpeg, monkeypatch):
+    svc, root, add = lib
+    paths = [add(f"{i:02d} song", seconds=1.0, item=f"t{i}") for i in range(1, 9)]
+    with open(paths[4], "ab") as f:  # past the AIFF's end: still indexed and read, but the encoder fails on it
+        f.write(b"BADFILE")
+    indexer.index_file(svc.store, paths[4], svc.settings.roots())
+    svc.settings.update({"preview_build_parallel": 4})
+    reads, real = [], previews._read_source
+
+    def spy(path, counted):
+        start = time.monotonic()
+        data = real(path, counted)
+        time.sleep(0.02)  # a slower drive: overlapping reads would show
+        reads.append((threading.current_thread().name, path, start, time.monotonic()))
+        return data
+
+    monkeypatch.setattr(previews, "_read_source", spy)
+    events = []
+    svc.jobs.bus.publish = lambda event, data: events.append((event, data))
+    with TestClient(create_app(svc)) as c:
+        r = c.post("/api/previews/build", json={"all": True}).json()
+        plan = r["plan"]
+        assert (plan["files"], plan["needed"], plan["planned"], plan["left_out"], plan["parallel"]) == (8, 8, 8, 0, 4)
+        assert plan["fits_cap"] and plan["fits_space"] and plan["kbps"] == 96 and "_rows" not in plan
+        assert c.post("/api/previews/build", json={"all": True}).status_code == 409  # one build at a time
+        job = svc.jobs.wait(r["job_id"], timeout=30)
+    assert job.status == "done", job.error
+    # one reader, each file once, start to finish, one after another, in path order
+    assert {name for name, *_ in reads} == {f"bct-{job.id}-reader"}
+    assert [p for _, p, *_ in reads] == sorted(paths)
+    assert all(b[2] >= a[3] for a, b in zip(reads, reads[1:]))
+    # the encoders got the files through stdin, several at once
+    runs = fake_ffmpeg()
+    piped = [r for r in runs if r["source"] == "pipe:0"]
+    assert len(piped) == 8 and all(r["bytes"] > 100_000 for r in piped)
+    assert [r["source"] for r in runs if r["source"] != "pipe:0"] == [  # the bad one, again from a local copy
+        str(previews.previews_dir() / (previews._key(paths[4], *(lambda r: (r["size"], r["mtime"]))(
+            svc.store.query_one("SELECT size, mtime FROM files WHERE path = ?", (paths[4],)))) + ".src.aiff"))]
+    assert 3 <= most_at_once([(r["start"], r["end"]) for r in piped]) <= 4
+    res = job.result
+    assert (res["built"], res["failed"], res["skipped"], res["cancelled"], res["not_built"]) == (7, 1, 0, False, 0)
+    assert res["errors"] == [{"path": paths[4], "status": "failed", "error": "Invalid data found when processing input"}]
+    assert res["bytes_read"] == sum(os.path.getsize(p) for p in paths) and res["read_mb_s"] > 0
+    progress = [d["progress"] for e, d in events if e == "job" and d["id"] == job.id]
+    assert {"read_mb_s", "eta_s", "current_file", "bytes_read", "bytes_total", "built", "failed"} <= set(progress[-1])
+    assert any(p.get("current_file") in paths for p in progress) and progress[-1]["current"] == 8
+    assert svc.previews.status()["count"] == 7 and svc.previews.status()["batch"] is None
+    assert not list(previews.previews_dir().glob("*.src.*")) and not list(previews.previews_dir().glob("*.part.*"))
+
+
+def test_a_build_resumes_and_skips_what_is_done(lib):
+    svc, _, add = lib
+    paths = [add(f"{i:02d}", seconds=0.5, item=f"t{i}") for i in range(1, 6)]
+    first = svc.preview_build(["t1", "t2"])
+    assert svc.jobs.wait(first["job_id"], timeout=30).result["built"] == 2
+    again = svc.preview_build(everything=True)
+    assert (again["plan"]["already"], again["plan"]["planned"]) == (2, 3)
+    assert svc.jobs.wait(again["job_id"], timeout=30).result["built"] == 3
+    done = svc.preview_build(everything=True)
+    assert (done["plan"]["already"], done["plan"]["planned"]) == (5, 0)
+    assert svc.jobs.wait(done["job_id"], timeout=30).result["built"] == 0
+    assert sorted(r["path"] for r in svc.store.query("SELECT path FROM previews")) == paths
+
+
+def test_a_build_keeps_to_the_cap_and_the_free_space(lib, monkeypatch):
+    svc, _, add = lib
+    for i in range(1, 6):
+        add(f"{i:02d}", seconds=1.0, item=f"t{i}")
+    one = previews.estimate_bytes(1.0, 96_000)
+    svc.settings.update({"preview_cache_gb": (3 * one + 100) / 1024**3})
+    with TestClient(create_app(svc)) as c:
+        plan = c.post("/api/previews/build", json={"all": True, "dry_run": True}).json()
+        assert "job_id" not in plan and svc.jobs.list() == []  # a dry run only plans
+        plan = plan["plan"]
+        assert (plan["needed"], plan["planned"], plan["left_out"], plan["fits_cap"], plan["fits_space"]) == (
+            5, 3, 2, False, True)
+        assert plan["planned_bytes"] == 3 * one and plan["left_out_bytes"] == 2 * one
+        monkeypatch.setattr(previews.Previews, "_free_bytes", lambda self: previews.MIN_FREE_BYTES + 2 * one + 100)
+        plan = c.post("/api/previews/build", json={"ids": ["t1", "t2", "t3", "t4", "t5"]}).json()
+        assert (plan["plan"]["planned"], plan["plan"]["fits_space"]) == (2, False)
+        result = svc.jobs.wait(plan["job_id"], timeout=30).result
+        assert result["built"] == 2 and result["left_out"] == 3  # in collection order: t1 and t2
+        assert c.post("/api/previews/build", json={"ids": ["t1"], "all": True}).status_code == 400
+
+
+def test_cancel_stops_after_the_files_being_encoded(lib, fake_ffmpeg, monkeypatch):
+    svc, _, add = lib
+    for i in range(1, 7):
+        add(f"{i:02d}", seconds=0.5, item=f"t{i}")
+    monkeypatch.setenv("FAKE_FFMPEG_S", "1.0")
+    svc.settings.update({"preview_build_parallel": 2})
+    with TestClient(create_app(svc)) as c:
+        job_id = c.post("/api/previews/build", json={"all": True}).json()["job_id"]
+        deadline = time.monotonic() + 10
+        while (svc.previews.status()["batch"] or {}).get("encoding") != 2 and time.monotonic() < deadline:
+            time.sleep(0.02)
+        assert c.post(f"/api/previews/build/{job_id}/cancel").json() == {"job_id": job_id, "cancelled": True}
+        started = time.monotonic()
+        job = svc.jobs.wait(job_id, timeout=10)
+        assert time.monotonic() - started < 2  # the two in flight finish; nothing else starts
+        res = job.result
+        assert res["cancelled"] and res["built"] == 2 and res["not_built"] == 4 and len(fake_ffmpeg()) == 2
+        assert c.post(f"/api/previews/build/{job_id}/cancel").json()["cancelled"] is False  # over
+        assert c.post("/api/previews/build/locate-1/cancel").status_code == 404
+
+
+def test_background_encodes_wait_while_a_build_reads_the_drive(lib, fake_ffmpeg, monkeypatch):
+    svc, _, add = lib
+    built = add("built", seconds=0.5, item="t1")
+    later = add("later", seconds=0.5)
+    monkeypatch.setenv("FAKE_FFMPEG_S", "0.6")
+    svc.previews.autostart = True
+    job = svc.preview_build(["t1"])
+    svc.previews.enqueue([later])  # e.g. an import commit, mid-build
+    time.sleep(0.3)
+    assert [r["source"] for r in fake_ffmpeg()] == [] and svc.previews.status()["building"] == 0
+    svc.jobs.wait(job["job_id"], timeout=10)
+    deadline = time.monotonic() + 10
+    while svc.previews.status()["count"] < 2 and time.monotonic() < deadline:
+        time.sleep(0.05)
+    runs = fake_ffmpeg()
+    assert [r["source"] for r in runs] == ["pipe:0", later]  # the build first, then the background one
+    assert runs[1]["start"] >= runs[0]["end"] and built != later
+
+
+def test_a_stuck_encode_times_out(lib, fake_ffmpeg, monkeypatch):
+    svc, _, add = lib
+    src = add("stuck", seconds=0.5)
+    monkeypatch.setenv("FAKE_FFMPEG_S", "5")
+    monkeypatch.setattr(previews, "ENCODE_TIMEOUT_S", 0.5)
+    started = time.monotonic()
+    result = svc.previews.build(src)
+    assert result == {"path": src, "status": "failed", "error": "took over 0.5 s"} and time.monotonic() - started < 3
+    assert not list(previews.previews_dir().glob("*.part.*"))
