@@ -29,6 +29,8 @@ def test_max_order_counts_every_kind_and_never_goes_below_the_mirror_size(svc): 
     with svc.store.tx() as c:  # acked adds are in the mirror by then (or deleted there): not counted
         c.execute("UPDATE pending_adds SET acked_at = 'x'")
     other_put(svc.store, {"id": "o0000000001", "kind": "track", "title": "E", "tags": [], "order": 0})
+    assert max_order(svc.store) == 15  # its "#" is gone, but it still holds 15 in "Collection"
+    svc.collection_remove(0, ["o0000000001"])
     assert max_order(svc.store) == 10
     with TestClient(create_app(svc)) as c:
         assert c.get("/api/health").json()["max_order"] == 10

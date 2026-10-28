@@ -300,3 +300,22 @@ def test_the_version_goes_up_on_every_change_and_only_then(svc, monkeypatch):  #
         moved("an import commit")
         c.delete(f"/api/collections/{sets}")
         moved("delete")
+
+
+
+def test_max_order_counts_collection_0s_numbers(svc):  # noqa: F811
+    """An item the extension starred into another collection has no "#"; copied into "Collection" on the server it's
+    numbered there after the last. The extension numbers its next item max_order + 1: that must not collide."""
+    with TestClient(create_app(svc)) as c:
+        sets = c.post("/api/collections", json={"name": "Sets"}).json()["id"]
+        sync(c, {"t1": {"title": "one", "tags": [], "order": 10}, "t2": {"title": "two", "tags": [], "order": 11}})
+        sync(c, {"t3": {"title": "elsewhere", "tags": [], "order": None}},
+             membership=[{"op": "add", "collection_id": sets, "ids": ["t3"]}])
+        assert c.get("/api/health").json()["max_order"] == 11
+        c.post("/api/collections/0/items", json={"ids": ["t3"]})  # Import to Collection
+        assert members(svc.store, 0)["t3"] == 12
+        nxt = c.get("/api/health").json()["max_order"] + 1
+        assert nxt == 13  # before: 12, the number t3 just got in "Collection"
+        sync(c, {"t4": {"title": "starred in Collection", "tags": [], "order": nxt}})
+        numbers = [p for p in members(svc.store, 0).values() if p is not None]
+        assert len(numbers) == len(set(numbers))  # no two items share a "#"

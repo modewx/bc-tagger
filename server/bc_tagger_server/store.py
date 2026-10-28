@@ -48,6 +48,8 @@ CREATE TABLE IF NOT EXISTS collection_items (
     PRIMARY KEY (collection_id, item_id)
 );
 CREATE INDEX IF NOT EXISTS collection_items_item ON collection_items(item_id);
+-- collection 0's highest "#" for max_order (GET /api/health, every 30 s): a covering index, not a scan
+CREATE INDEX IF NOT EXISTS collection_items_pos ON collection_items(collection_id, pos);
 
 CREATE TABLE IF NOT EXISTS files (
     path TEXT PRIMARY KEY,

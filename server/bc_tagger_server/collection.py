@@ -173,14 +173,17 @@ def item_order(item: dict) -> int | None:
 
 
 def max_order(store: Store) -> int:
-    """The highest "#" in use (mirror items, unacked pending adds, Other items), and never less than the number
-    of Bandcamp items in the mirror, so numbers the extension gives its own items (1..N) stay free."""
+    """The highest "#" in use (mirror items, unacked pending adds, Other items, and collection 0's positions), and
+    never less than the number of Bandcamp items in the mirror, so numbers the extension gives its own items (1..N)
+    stay free. Collection 0's positions count because an item without a "#" (starred into another collection) that
+    joins "Collection" on the server is numbered there after the last one."""
     valid = "json_type({col}, '{path}') = 'integer' AND json_extract({col}, '{path}') >= 1"
     queries = (
         f"SELECT MAX(json_extract(data, '$.order')) AS n FROM items WHERE {valid.format(col='data', path='$.order')}",
         f"SELECT MAX(json_extract(payload, '$.item.order')) AS n FROM pending_adds WHERE acked_at IS NULL "
         f"AND {valid.format(col='payload', path='$.item.order')}",
         f"SELECT MAX(json_extract(data, '$.order')) AS n FROM other_items WHERE {valid.format(col='data', path='$.order')}",
+        "SELECT MAX(pos) AS n FROM collection_items WHERE collection_id = 0",  # covering index: collection_items_pos
     )
     return max([store.count_items()] + [store.query_one(q)["n"] or 0 for q in queries])
 
