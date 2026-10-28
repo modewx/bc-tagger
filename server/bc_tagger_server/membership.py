@@ -113,43 +113,103 @@ def add_items(store: Store, collection_id: int, items: Iterable[dict]) -> dict[s
     what's there ("#" = the last one's + 1; in collection 0, the item's own "#" when it has one). Idempotent:
     ``{added: [ids], already: [ids]}``."""
     get(store, collection_id)
-    items = list({it["id"]: it for it in items}.values())
+    with store.tx() as c:
+        return add_rows(c, collection_id, [(it["id"], _order(it)) for it in items], now_iso())
+
+
+def add_rows(c, collection_id: int, items: list[tuple[str, int | None]], ts: str,
+             follow_order: bool = False) -> dict[str, list[str]]:
+    """``add_items`` inside a transaction ``c``: ``items`` are ``(id, "#" or None)``. ``follow_order``: in collection
+    0 the item's "#" even when it has none (the extension's items: their "#" is the extension's to give)."""
+    items = list(dict(items).items())
     if not items:
         return {"added": [], "already": []}
-    ts = now_iso()
-    added, already = [], []
-    with store.tx() as c:
-        have = {r["item_id"] for r in c.execute(
-            "SELECT item_id FROM collection_items WHERE collection_id = ? AND item_id IN (SELECT value FROM "
-            "json_each(?))", (collection_id, json.dumps([it["id"] for it in items])))}
-        top = c.execute("SELECT COALESCE(MAX(pos), 0) AS pos FROM collection_items WHERE collection_id = ?",
-                        (collection_id,)).fetchone()["pos"]
-        rows = []
-        for it in items:
-            if it["id"] in have:
-                already.append(it["id"])
-                continue
-            pos = _order(it) if collection_id == MAIN else None
-            if pos is None:
-                top += 1
-                pos = top
-            rows.append((collection_id, it["id"], pos, ts))
-            added.append(it["id"])
-        c.executemany("INSERT INTO collection_items(collection_id, item_id, pos, added_at) VALUES(?, ?, ?, ?)", rows)
+    have = {r["item_id"] for r in c.execute(
+        "SELECT item_id FROM collection_items WHERE collection_id = ? AND item_id IN (SELECT value FROM "
+        "json_each(?))", (collection_id, json.dumps([i for i, _ in items])))}
+    top = c.execute("SELECT COALESCE(MAX(pos), 0) AS pos FROM collection_items WHERE collection_id = ?",
+                    (collection_id,)).fetchone()["pos"]
+    added, already, rows = [], [], []
+    for item_id, order in items:
+        if item_id in have:
+            already.append(item_id)
+            continue
+        pos = order if collection_id == MAIN else None
+        if pos is None and not (follow_order and collection_id == MAIN):
+            top += 1
+            pos = top
+        rows.append((collection_id, item_id, pos, ts))
+        added.append(item_id)
+    c.executemany("INSERT INTO collection_items(collection_id, item_id, pos, added_at) VALUES(?, ?, ?, ?)", rows)
     return {"added": added, "already": already}
 
 
 def remove_items(store: Store, collection_id: int, ids: Iterable[str]) -> list[str]:
     """Take ``ids`` out of the collection (membership only). Returns those that were in it."""
     get(store, collection_id)
-    ids = list(dict.fromkeys(ids))
     with store.tx() as c:
-        gone = [r["item_id"] for r in c.execute(
-            "SELECT item_id FROM collection_items WHERE collection_id = ? AND item_id IN (SELECT value FROM "
-            "json_each(?))", (collection_id, json.dumps(ids)))]
-        c.executemany("DELETE FROM collection_items WHERE collection_id = ? AND item_id = ?",
-                      [(collection_id, i) for i in gone])
+        return remove_rows(c, collection_id, ids)
+
+
+def remove_rows(c, collection_id: int, ids: Iterable[str]) -> list[str]:
+    """``remove_items`` inside a transaction ``c``."""
+    ids = list(dict.fromkeys(ids))
+    gone = [r["item_id"] for r in c.execute(
+        "SELECT item_id FROM collection_items WHERE collection_id = ? AND item_id IN (SELECT value FROM "
+        "json_each(?))", (collection_id, json.dumps(ids)))]
+    c.executemany("DELETE FROM collection_items WHERE collection_id = ? AND item_id = ?",
+                  [(collection_id, i) for i in gone])
     return gone
+
+
+FIRST_SQL = "SELECT id FROM collections ORDER BY pos IS NULL, pos, id LIMIT 1"
+
+
+def first_collection(store_or_conn) -> int:
+    """Where a new item with no membership goes ("All" adds to the first collection): the lowest ``pos``, then id.
+    Collection 0 can't be deleted, so there always is one."""
+    run = store_or_conn.query_one if isinstance(store_or_conn, Store) else (
+        lambda sql: store_or_conn.execute(sql).fetchone())
+    return run(FIRST_SQL)["id"]
+
+
+def apply_ops(c, ops: list[dict], orders: dict[str, int | None], known: set[str], ts: str) -> dict[str, Any]:
+    """The extension's membership changes (``[{op: "add"|"remove", collection_id, ids}]``), in order, inside the
+    sync's transaction ``c``. An op for a collection that's gone is skipped; ids that aren't items are left out of
+    adds. ``{added, removed, skipped: [{index, op, collection_id, reason}], unknown, changes: {cid: {added,
+    removed}}}``."""
+    exists = {r["id"] for r in c.execute("SELECT id FROM collections")}
+    out: dict[str, Any] = {"added": 0, "removed": 0, "skipped": [], "unknown": 0, "changes": {}}
+    for index, op in enumerate(ops):
+        cid = op["collection_id"]
+        if cid not in exists:
+            out["skipped"].append({"index": index, "op": op["op"], "collection_id": cid,
+                                   "reason": "no such collection"})
+            continue
+        change = out["changes"].setdefault(cid, {"added": [], "removed": []})
+        ids = list(dict.fromkeys(op["ids"]))
+        if op["op"] == "add":
+            wanted = [i for i in ids if i in known]
+            out["unknown"] += len(ids) - len(wanted)
+            done = add_rows(c, cid, [(i, orders.get(i)) for i in wanted], ts, follow_order=True)["added"]
+            change["added"] += done
+            out["added"] += len(done)
+        else:
+            done = remove_rows(c, cid, ids)
+            change["removed"] += done
+            out["removed"] += len(done)
+    return out
+
+
+def all_members(store: Store) -> dict[str, list[str]]:
+    """``{"<collection id>": [item ids by "#", then when they joined]}`` for every collection (empty ones too)."""
+    out: dict[str, list[str]] = {str(c["id"]): [] for c in all_collections(store)}
+    rows = store.query_all("SELECT collection_id, item_id, pos, added_at FROM collection_items",
+                           ["collection_id", "item_id", "pos", "added_at"])
+    rows.sort(key=lambda r: (r["collection_id"], r["pos"] is None, r["pos"] or 0, r["added_at"], r["item_id"]))
+    for r in rows:
+        out.setdefault(str(r["collection_id"]), []).append(r["item_id"])
+    return out
 
 
 def memberships(store: Store, ids: Iterable[str] | None = None) -> dict[str, list[int]]:

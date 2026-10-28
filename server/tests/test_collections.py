@@ -164,3 +164,139 @@ def test_all_sorts_by_collection_0_then_when_items_joined(svc):  # noqa: F811
         assert everything.index("o7") > everything.index("t1")  # then the rest, by when they joined
         assert listed(c, collection=0)[:2] == ["t2", "t1"] and "o7" not in listed(c, collection=0)
         assert listed(c, collection=sets) == ["o7"]
+
+
+# -- Phase 9: collections in the extension's tagger -------------------------------------------------------------
+
+
+def version(client) -> int:
+    return client.get("/api/health").json()["collections_version"]
+
+
+def sync(client, items=None, deleted=None, membership=None, full=False):
+    body = {"items": items or {}, "deleted": deleted or [], "full": full}
+    if membership is not None:
+        body["membership"] = membership
+    r = client.post("/api/sync/items", json=body)
+    assert r.status_code == 200, r.text
+    return r.json()
+
+
+def test_sync_membership_ops_apply_in_order_after_the_items(svc):  # noqa: F811
+    with TestClient(create_app(svc)) as c:
+        a = c.post("/api/collections", json={"name": "A"}).json()["id"]
+        b = c.post("/api/collections", json={"name": "B"}).json()["id"]
+        new = {"t50": {"title": "fifty", "tags": ["pool"]}, "t51": {"title": "fifty-one", "tags": ["pool"]}}
+        r = sync(c, new, membership=[{"op": "add", "collection_id": a, "ids": ["t50", "t51"]},
+                                     {"op": "remove", "collection_id": a, "ids": ["t51"]},
+                                     {"op": "add", "collection_id": b, "ids": ["t51"]}])
+        assert r["membership"] == {"added": 3, "removed": 1, "skipped": [], "unknown": 0, "auto_added": 0}
+        assert c.get("/api/items/t50").json()["collections"] == [a]  # starred in A: nowhere else
+        assert c.get("/api/items/t51").json()["collections"] == [b]
+        # an item tagged elsewhere, starred in A, then un-starred from "Collection"
+        old = "t3244411361"
+        r = sync(c, membership=[{"op": "add", "collection_id": a, "ids": [old]},
+                                {"op": "remove", "collection_id": 0, "ids": [old]}])
+        assert (r["membership"]["added"], r["membership"]["removed"]) == (1, 1)
+        assert c.get(f"/api/items/{old}").json()["collections"] == [a] and old in listed(c)  # tags kept, in All
+        # the other order of the same two ops ends elsewhere
+        sync(c, membership=[{"op": "remove", "collection_id": b, "ids": ["t51"]},
+                            {"op": "add", "collection_id": b, "ids": ["t51"]}])
+        assert c.get("/api/items/t51").json()["collections"] == [b]
+        # a collection deleted meanwhile: skipped and said so; the new item then goes into the first collection
+        c.delete(f"/api/collections/{b}")
+        r = sync(c, {"t52": {"title": "late", "tags": []}},
+                 membership=[{"op": "add", "collection_id": b, "ids": ["t52", "t9999"]},
+                             {"op": "add", "collection_id": a, "ids": ["t9999"]}])
+        assert r["membership"] == {"added": 0, "removed": 0, "unknown": 1, "auto_added": 1, "skipped": [
+            {"index": 0, "op": "add", "collection_id": b, "reason": "no such collection"}]}
+        assert c.get("/api/items/t52").json()["collections"] == [0]
+        # a bad op: nothing at all is written
+        bad = c.post("/api/sync/items", json={"items": {"t53": {"title": "x"}},
+                                              "membership": [{"op": "move", "collection_id": a, "ids": ["t53"]}]})
+        assert bad.status_code == 422 and c.get("/api/items/t53").status_code == 404
+
+
+def test_without_membership_a_new_item_goes_into_the_first_collection(svc):  # noqa: F811
+    with TestClient(create_app(svc)) as c:
+        sets = c.post("/api/collections", json={"name": "Sets"}).json()["id"]
+        sync(c, {"t60": {"title": "first", "tags": [], "order": 60}})
+        assert members(svc.store, 0)["t60"] == 60  # today: "Collection", with the item's "#"
+        c.patch(f"/api/collections/{sets}", json={"pos": 0})
+        c.patch("/api/collections/0", json={"pos": 5})
+        assert [col["id"] for col in c.get("/api/collections").json()] == [sets, 0]
+        r = sync(c, {"t61": {"title": "second", "tags": [], "order": 61}})  # an older extension: no membership
+        assert r["membership"]["auto_added"] == 1 and c.get("/api/items/t61").json()["collections"] == [sets]
+        assert members(svc.store, sets)["t61"] == 1  # numbered by Sets, not the item's "#"
+        other_put(svc.store, {"id": "o61", "title": "an Other item", "order": 62})
+        assert membership.memberships(svc.store, ["o61"]) == {"o61": [sets]}
+
+
+def test_the_membership_read_is_one_compact_answer(svc):  # noqa: F811
+    with TestClient(create_app(svc)) as c:
+        empty = c.post("/api/collections", json={"name": "Empty"}).json()["id"]
+        sets = c.post("/api/collections", json={"name": "Sets"}).json()["id"]
+        ids = sorted(members(svc.store, 0))
+        c.post(f"/api/collections/{sets}/items", json={"ids": [ids[1], ids[0]]})
+        r = c.get("/api/collections/membership").json()
+        assert r["version"] == version(c)
+        assert [(col["id"], col["name"], col["count"]) for col in r["collections"]] == [
+            (0, "Collection", len(ids)), (empty, "Empty", 0), (sets, "Sets", 2)]
+        assert r["members"][str(sets)] == [ids[1], ids[0]] and r["members"][str(empty)] == []
+        assert sorted(r["members"]["0"]) == ids
+
+
+def test_the_version_goes_up_on_every_change_and_only_then(svc, monkeypatch):  # noqa: F811
+    events = []
+    real = svc.jobs.bus.publish
+    monkeypatch.setattr(svc.jobs.bus, "publish", lambda e, d: (events.append((e, d)), real(e, d)))
+    with TestClient(create_app(svc)) as c:
+        seen = [version(c)]
+
+        def moved(note: str, event: bool = True) -> None:
+            now = version(c)
+            assert now > seen[-1], note
+            seen.append(now)
+            if event:  # the app's tabs hear of it at once, with the new version
+                last = [d for e, d in events if e == "collections"][-1]
+                assert last["version"] == now, note
+            events.clear()
+
+        def still(note: str) -> None:
+            assert version(c) == seen[-1], note
+
+        sets = c.post("/api/collections", json={"name": "Sets"}).json()["id"]
+        moved("create")
+        c.patch(f"/api/collections/{sets}", json={"name": "Warehouse"})
+        moved("rename")
+        c.patch(f"/api/collections/{sets}", json={"name": "Warehouse", "pos": 3})
+        moved("reorder")
+        c.patch(f"/api/collections/{sets}", json={"name": "Warehouse", "pos": 3})
+        still("the same name and place")
+        ids = sorted(members(svc.store, 0))
+        c.post(f"/api/collections/{sets}/items", json={"ids": ids[:1]})
+        moved("add")
+        c.post(f"/api/collections/{sets}/items", json={"ids": ids[:1]})
+        still("already there")
+        c.request("DELETE", f"/api/collections/{sets}/items", json={"ids": ids[:1]})
+        moved("remove")
+        sync(c, {"t70": {"title": "new", "tags": [], "order": 70}})
+        moved("a new item joins the first collection")
+        sync(c, {"t70": {"title": "new", "tags": ["x"], "order": 70}})
+        still("its tags changed, not its membership or '#'")
+        sync(c, {"t70": {"title": "new", "tags": ["x"], "order": 71}})
+        moved("collection 0's '#' follows the item's", event=False)
+        sync(c, membership=[{"op": "add", "collection_id": sets, "ids": ["t70"]}])
+        moved("a sync op")
+        sync(c, deleted=["t70"])
+        moved("an item deleted in the extension")
+        sync(c, membership=[{"op": "add", "collection_id": 99, "ids": ["t1"]}])
+        still("an op that was skipped")
+        batch = run(svc, recorded_rows())
+        importer.apply_tag_mapping(svc, batch["batch_id"], {}, "create")
+        still("making a batch touches no collection")
+        events.clear()
+        c.post(f"/api/import/{batch['batch_id']}/commit", json={"collection_id": sets})
+        moved("an import commit")
+        c.delete(f"/api/collections/{sets}")
+        moved("delete")

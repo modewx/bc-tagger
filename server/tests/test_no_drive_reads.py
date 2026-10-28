@@ -103,21 +103,27 @@ def test_a_full_sync_of_unchanged_items_announces_nothing(make_service, tmp_path
     monkeypatch.setattr(svc.jobs.bus, "publish", lambda event, data: events.append((event, data)))
     items = {"t1": {"title": "A", "tags": ["must"]},
              "t2": {"title": "B", "tags": ["pool"], "modified_at": "2026-10-20T10:00:00.000Z"}}
-    assert svc.sync_items(items, [], full=True) == {"upserted": 2, "changed": 2, "removed": 0}
+    first = svc.sync_items(items, [], full=True)
+    assert {k: first[k] for k in ("upserted", "changed", "removed")} == {"upserted": 2, "changed": 2, "removed": 0}
+    assert first["membership"]["auto_added"] == 2  # new: into the first collection
     assert svc.sync_tags(["must", "pool"]) == {"tags": 2, "changed": True}
     assert sorted(d["id"] for e, d in events if e == "item") == ["t1", "t2"] and ("tags", {"count": 2}) in events
+    assert [d["added"] for e, d in events if e == "collections"] == [2]
     events.clear()
     # the extension's next full sync: the same items and tags
-    assert svc.sync_items(json.loads(json.dumps(items)), [], full=True) == {"upserted": 2, "changed": 0, "removed": 0}
+    again = svc.sync_items(json.loads(json.dumps(items)), [], full=True)
+    assert {k: again[k] for k in ("upserted", "changed", "removed")} == {"upserted": 2, "changed": 0, "removed": 0}
+    assert again["membership"] == {"added": 0, "removed": 0, "skipped": [], "unknown": 0, "auto_added": 0}
     assert svc.sync_tags(["must", "pool"]) == {"tags": 2, "changed": False}
     assert events == []
     # one tag changed, then an item gone: only those are announced
     assert svc.sync_items({**items, "t1": {"title": "A", "tags": ["must", "dub"]}}, [], full=True)["changed"] == 1
     assert [d["id"] for e, d in events] == ["t1"]
     events.clear()
-    assert svc.sync_items({"t1": svc.store.get_item("t1")}, [], full=True) == {"upserted": 1, "changed": 0,
-                                                                               "removed": 1}
-    assert events == [("item", {"id": "t2"})]
+    gone = svc.sync_items({"t1": svc.store.get_item("t1")}, [], full=True)
+    assert {k: gone[k] for k in ("upserted", "changed", "removed")} == {"upserted": 1, "changed": 0, "removed": 1}
+    assert events[0] == ("item", {"id": "t2"})  # and its membership went: the collection's count changed
+    assert [(e, d["action"], d["removed"]) for e, d in events[1:]] == [("collections", "items", 1)]
 
 
 def test_file_counts_follow_every_write(new_store):

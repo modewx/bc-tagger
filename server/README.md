@@ -210,8 +210,12 @@ ownership, previews and rekordbox stay per item.
 
 - **Migration (once, at start):** every existing item (the Bandcamp mirror, unacked pending adds, Other items) joins
   collection 0 with its "#" as `pos`. Running it again adds nothing.
-- **Who joins where:** a new item from the extension joins 0, unless it's already in a collection (an import's
-  pending add carries its membership). An import commit (`POST /api/import/<id>/commit {collection_id}`, default 0,
+- **Who joins where:** the extension says where its items go: `POST /api/sync/items` takes `membership: [{op:
+  "add"|"remove", collection_id, ids}]`, applied in order in the sync's transaction after the items. A new item that's
+  then in no collection (no op named it, an op's collection was gone, or an older extension sent none) joins the
+  **first collection** (lowest `pos`, then id; today "Collection"); one an import's pending add put somewhere stays
+  there. The response's `membership: {added, removed, skipped: [{index, op, collection_id, reason}], unknown,
+  auto_added}` says what happened; skipped ops are done with (their collection is gone). An import commit (`POST /api/import/<id>/commit {collection_id}`, default 0,
   chosen at commit) puts every committed row's item into that collection only, in row order (merged items are
   copied; they stay where they were).
 - **"#":** collection 0's `pos` is the item's `order` (the extension's and imports' numbering); other collections
@@ -221,8 +225,12 @@ ownership, previews and rekordbox stay per item.
   `PATCH /api/collections/<id> {name?, pos?}`; `DELETE /api/collections/<id>` (memberships only; 409 for 0);
   `POST /api/collections/<id>/items {ids}` → `{added, already, unknown}` (a copy); `DELETE …/items {ids}` →
   `{removed}`. Every item view has `collections: [ids]`. Names are unique (any case), trimmed, up to 100 characters.
-- **Events:** SSE `collections` `{action: created|renamed|reordered|deleted|items, id, collection?, added?|removed?}`
-  and `item` `{id}` for each membership change.
+- **Events:** SSE `collections` `{action: created|renamed|reordered|deleted|items, id, collection?, added?, removed?,
+  version}` from every path that changes the list or membership (the API, import commits, the extension's sync), and
+  `item` `{id}` for each membership change.
+- **For the extension:** `GET /api/collections/membership` → `{version, collections, members: {"<id>": [item ids by
+  "#"]}}` in one read (15 KB for 1,090 members). `collections_version` (in `GET /api/health`, one row) goes up on any
+  change to the collections or their members, whatever the path (triggers), and only then.
 
 ## Items: "#", dates and sorting
 

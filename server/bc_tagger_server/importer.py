@@ -1536,7 +1536,7 @@ def _join_collection(svc, collection_id: int, item_ids: list[str], joined_before
     for item_id in joined:
         svc.jobs.bus.publish("item", {"id": item_id})
     if joined:
-        svc.jobs.bus.publish("collections", {"action": "items", "id": collection_id, "added": len(joined)})
+        svc.collections_event({"action": "items", "id": collection_id, "added": len(joined)})
     return len(joined)
 
 

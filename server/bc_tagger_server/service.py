@@ -178,7 +178,7 @@ class Service:
         from . import membership
 
         made = membership.create(self.store, name)
-        self.jobs.bus.publish("collections", {"action": "created", "id": made["id"], "collection": made})
+        self.collections_event({"action": "created", "id": made["id"], "collection": made})
         return made
 
     def collection_update(self, collection_id: int, name: str | None = None, pos: int | None = None) -> dict:
@@ -188,7 +188,7 @@ class Service:
         after = membership.update(self.store, collection_id, name, pos)
         action = "renamed" if after["name"] != before["name"] else "reordered" if after["pos"] != before["pos"] else None
         if action:
-            self.jobs.bus.publish("collections", {"action": action, "id": collection_id, "collection": after})
+            self.collections_event({"action": action, "id": collection_id, "collection": after})
         return after
 
     def collection_delete(self, collection_id: int) -> dict:
@@ -196,7 +196,7 @@ class Service:
         from . import membership
 
         ids = membership.delete(self.store, collection_id)
-        self.jobs.bus.publish("collections", {"action": "deleted", "id": collection_id})
+        self.collections_event({"action": "deleted", "id": collection_id})
         for item_id in ids:
             self.jobs.bus.publish("item", {"id": item_id})
         return {"deleted": collection_id, "items": len(ids)}
@@ -226,7 +226,7 @@ class Service:
         for item_id in ids:
             self.jobs.bus.publish("item", {"id": item_id})
         if ids:
-            self.jobs.bus.publish("collections", {"action": "items", "id": collection_id, what: len(ids)})
+            self.collections_event({"action": "items", "id": collection_id, what: len(ids)})
 
     def get_item_view(self, item_id: str) -> dict | None:
         from .collection import all_items
@@ -240,16 +240,28 @@ class Service:
 
         return all_items(self.store)
 
-    def sync_items(self, items: dict[str, dict], deleted: list[str], full: bool) -> dict[str, Any]:
+    def sync_items(self, items: dict[str, dict], deleted: list[str], full: bool,
+                   membership: list[dict] | None = None) -> dict[str, Any]:
         """Only items whose data changed are written and announced (an ``item`` event makes every open tab
-        re-read its items): the extension's full sync every 15 min mostly sends what's already here.
-        ``{upserted, changed, removed}``."""
+        re-read its items): the extension's full sync every 15 min mostly sends what's already here. Then the
+        extension's ``membership`` ops, in the same transaction (``Store.upsert_items``). ``{upserted, changed,
+        removed, membership: {added, removed, skipped, unknown, auto_added}}``."""
         items = self._keep_modified_at(items)
-        result = self.store.upsert_items(items, deleted, full=full)
+        result = self.store.upsert_items(items, deleted, full=full, membership=membership)
         self.store.set_meta("items_source", {"kind": "extension", "synced_at": now_iso(), "full": full})
-        for item_id in result.pop("changed_ids") + result.pop("removed_ids"):
+        announced = set(result.pop("changed_ids") + result.pop("removed_ids"))
+        for item_id in announced:
             self.jobs.bus.publish("item", {"id": item_id})
+        for collection_id, change in result.pop("collection_changes").items():
+            for item_id in set(change["added"] + change["removed"]) - announced:
+                self.jobs.bus.publish("item", {"id": item_id})
+            self.collections_event({"action": "items", "id": collection_id, "added": len(change["added"]),
+                                    "removed": len(change["removed"])})
         return result
+
+    def collections_event(self, data: dict) -> None:
+        """An SSE ``collections`` event, with the ``version`` the change made (``GET /api/health``)."""
+        self.jobs.bus.publish("collections", {**data, "version": self.store.version("collections")})
 
     def _keep_modified_at(self, items: dict[str, dict]) -> dict[str, dict]:
         """``modified_at`` on sync: tags changed and the extension's date isn't newer than ours → now
@@ -985,6 +997,7 @@ class Service:
             "items": self.store.count_items(),
             "max_order": __import__("bc_tagger_server.collection", fromlist=["x"]).max_order(self.store),
             "items_source": self.store.get_meta("items_source"),
+            "collections_version": self.store.version("collections"),  # one row: the extension asks every 30 s
             "build_id": self.build_id(),
         }
 
