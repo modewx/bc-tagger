@@ -79,9 +79,9 @@ def other_get(store: Store, item_id: str) -> dict | None:
     return json.loads(row["data"]) if row else None
 
 
-def other_put(store: Store, item: dict, collection_id: int = 0) -> dict:
-    """Save an Other item. A new one joins ``collection_id`` (an import's choice; else "Collection"), unless it's
-    in a collection already."""
+def other_put(store: Store, item: dict, collection_id: int | None = None) -> dict:
+    """Save an Other item. A new one joins ``collection_id`` (an import's choice; else the first collection),
+    unless it's in a collection already."""
     item = {**item, "source": "other"}
     item["album_title"] = item.get("album")
     item["links"] = links_for(item)
@@ -95,6 +95,10 @@ def other_put(store: Store, item: dict, collection_id: int = 0) -> dict:
             (item["id"], json.dumps(item), item.get("date_added"), ts),
         )
         if new:  # collection 0's "#" is the item's; elsewhere, after the last
+            if collection_id is None:
+                from .membership import FIRST_SQL
+
+                collection_id = c.execute(FIRST_SQL).fetchone()["id"]
             pos = item_order(item) if collection_id == 0 else None
             c.execute("INSERT INTO collection_items(collection_id, item_id, pos, added_at) SELECT ?, ?, "
                       "COALESCE(?, (SELECT COALESCE(MAX(pos), 0) + 1 FROM collection_items WHERE collection_id = ?)), "
@@ -169,14 +173,17 @@ def item_order(item: dict) -> int | None:
 
 
 def max_order(store: Store) -> int:
-    """The highest "#" in use (mirror items, unacked pending adds, Other items), and never less than the number
-    of Bandcamp items in the mirror, so numbers the extension gives its own items (1..N) stay free."""
+    """The highest "#" in use (mirror items, unacked pending adds, Other items, and collection 0's positions), and
+    never less than the number of Bandcamp items in the mirror, so numbers the extension gives its own items (1..N)
+    stay free. Collection 0's positions count because an item without a "#" (starred into another collection) that
+    joins "Collection" on the server is numbered there after the last one."""
     valid = "json_type({col}, '{path}') = 'integer' AND json_extract({col}, '{path}') >= 1"
     queries = (
         f"SELECT MAX(json_extract(data, '$.order')) AS n FROM items WHERE {valid.format(col='data', path='$.order')}",
         f"SELECT MAX(json_extract(payload, '$.item.order')) AS n FROM pending_adds WHERE acked_at IS NULL "
         f"AND {valid.format(col='payload', path='$.item.order')}",
         f"SELECT MAX(json_extract(data, '$.order')) AS n FROM other_items WHERE {valid.format(col='data', path='$.order')}",
+        "SELECT MAX(pos) AS n FROM collection_items WHERE collection_id = 0",  # covering index: collection_items_pos
     )
     return max([store.count_items()] + [store.query_one(q)["n"] or 0 for q in queries])
 

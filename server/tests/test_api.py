@@ -56,7 +56,8 @@ def test_health_items_tags(client):
 
 def test_sync_and_tag_edits(client):
     r = client.post("/api/sync/items", json={"items": {"t5": {"title": "New", "tags": ["pool"]}}, "deleted": ["undefined"]})
-    assert r.json() == {"upserted": 1, "changed": 1, "removed": 1}
+    assert r.json() == {"upserted": 1, "changed": 1, "removed": 1, "membership": {
+        "added": 0, "removed": 0, "skipped": [], "unknown": 0, "auto_added": 1}}  # t5: into the first collection
     client.post("/api/sync/tags", json={"tags": ["must", "pool"]})
     assert client.get("/api/tags").json() == ["must", "pool"]
     edit = client.post("/api/tag-edits", json={"id": "t5", "tags": ["pool", "dub"]}).json()

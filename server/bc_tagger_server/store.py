@@ -48,6 +48,8 @@ CREATE TABLE IF NOT EXISTS collection_items (
     PRIMARY KEY (collection_id, item_id)
 );
 CREATE INDEX IF NOT EXISTS collection_items_item ON collection_items(item_id);
+-- collection 0's highest "#" for max_order (GET /api/health, every 30 s): a covering index, not a scan
+CREATE INDEX IF NOT EXISTS collection_items_pos ON collection_items(collection_id, pos);
 
 CREATE TABLE IF NOT EXISTS files (
     path TEXT PRIMARY KEY,
@@ -195,6 +197,28 @@ CREATE TRIGGER IF NOT EXISTS import_rows_update AFTER UPDATE ON import_rows BEGI
 END;
 CREATE TRIGGER IF NOT EXISTS import_rows_delete AFTER DELETE ON import_rows BEGIN
     INSERT INTO data_versions(name, n) VALUES('import_rows', 1) ON CONFLICT(name) DO UPDATE SET n = n + 1;
+END;
+-- collections_version (GET /api/health): up on any change to the collections or their members, whatever the path
+-- (the extension re-reads its copy only when it moved). An update that changes nothing doesn't count.
+CREATE TRIGGER IF NOT EXISTS collections_insert AFTER INSERT ON collections BEGIN
+    INSERT INTO data_versions(name, n) VALUES('collections', 1) ON CONFLICT(name) DO UPDATE SET n = n + 1;
+END;
+CREATE TRIGGER IF NOT EXISTS collections_update AFTER UPDATE ON collections
+WHEN old.id IS NOT new.id OR old.name IS NOT new.name OR old.pos IS NOT new.pos BEGIN
+    INSERT INTO data_versions(name, n) VALUES('collections', 1) ON CONFLICT(name) DO UPDATE SET n = n + 1;
+END;
+CREATE TRIGGER IF NOT EXISTS collections_delete AFTER DELETE ON collections BEGIN
+    INSERT INTO data_versions(name, n) VALUES('collections', 1) ON CONFLICT(name) DO UPDATE SET n = n + 1;
+END;
+CREATE TRIGGER IF NOT EXISTS collection_items_insert AFTER INSERT ON collection_items BEGIN
+    INSERT INTO data_versions(name, n) VALUES('collections', 1) ON CONFLICT(name) DO UPDATE SET n = n + 1;
+END;
+CREATE TRIGGER IF NOT EXISTS collection_items_update AFTER UPDATE ON collection_items
+WHEN old.collection_id IS NOT new.collection_id OR old.item_id IS NOT new.item_id OR old.pos IS NOT new.pos BEGIN
+    INSERT INTO data_versions(name, n) VALUES('collections', 1) ON CONFLICT(name) DO UPDATE SET n = n + 1;
+END;
+CREATE TRIGGER IF NOT EXISTS collection_items_delete AFTER DELETE ON collection_items BEGIN
+    INSERT INTO data_versions(name, n) VALUES('collections', 1) ON CONFLICT(name) DO UPDATE SET n = n + 1;
 END;
 
 -- Items (and new vocabulary tags) for the extension to add to chrome.storage.
@@ -394,13 +418,21 @@ class Store:
 
     # -- items mirror -----------------------------------------------------------------
 
-    def upsert_items(self, items: dict[str, dict], deleted: Iterable[str] = (), full: bool = False) -> dict:
+    def upsert_items(self, items: dict[str, dict], deleted: Iterable[str] = (), full: bool = False,
+                     membership: list[dict] | None = None) -> dict:
         """Write the items whose data changed (an unchanged one is left alone) and remove ``deleted`` (with
-        ``full``: every item not in ``items``). ``{upserted, changed, removed, changed_ids, removed_ids}``."""
+        ``full``: every item not in ``items``); then, in the same transaction, the extension's ``membership`` ops
+        (``[{op: "add"|"remove", collection_id, ids}]``, in order). A new item that's in no collection after that
+        joins the first collection. ``{upserted, changed, removed, changed_ids, removed_ids, membership: {added,
+        removed, skipped, unknown, auto_added}, collection_changes: {cid: {added: [ids], removed: [ids]}}}``."""
+        from . import membership as m
+
         ts = now_iso()
         deleted = list(deleted)
         changed_ids: list[str] = []
         removed_ids: list[str] = []
+        new_ids: list[str] = []
+        orders: dict[str, int | None] = {}
         with self.tx() as c:
             if full:
                 keep = set(items)
@@ -412,6 +444,10 @@ class Store:
             for item_id in deleted:
                 if c.execute("DELETE FROM items WHERE id = ?", (item_id,)).rowcount:
                     removed_ids.append(item_id)
+            changes: dict[int, dict[str, list[str]]] = {}
+            for r in c.execute("SELECT collection_id, item_id FROM collection_items WHERE item_id IN "
+                               "(SELECT value FROM json_each(?))", (json.dumps(removed_ids),)).fetchall():
+                changes.setdefault(r["collection_id"], {"added": [], "removed": []})["removed"].append(r["item_id"])
             c.executemany("DELETE FROM collection_items WHERE item_id = ?", [(i,) for i in removed_ids])
             for item_id, item in items.items():
                 if not isinstance(item, dict):
@@ -429,17 +465,49 @@ class Store:
                 )
                 changed_ids.append(item_id)
                 order = item.get("order")
-                order = order if isinstance(order, int) and not isinstance(order, bool) and order >= 1 else None
-                if row is None:  # new from the extension, which tags into "Collection": collection 0, unless an
-                    # import already put it somewhere (its pending add carried that membership)
-                    c.execute("INSERT INTO collection_items(collection_id, item_id, pos, added_at) SELECT 0, ?, ?, ? "
-                              "WHERE NOT EXISTS (SELECT 1 FROM collection_items WHERE item_id = ?)",
-                              (item_id, order, ts, item_id))
+                order = orders[item_id] = (order if isinstance(order, int) and not isinstance(order, bool)
+                                           and order >= 1 else None)
+                if row is None:
+                    new_ids.append(item_id)
                 elif order is not None:  # collection 0's "#" is the item's
-                    c.execute("UPDATE collection_items SET pos = ? WHERE collection_id = 0 AND item_id = ?",
-                              (order, item_id))
+                    c.execute("UPDATE collection_items SET pos = ? WHERE collection_id = 0 AND item_id = ? "
+                              "AND pos IS NOT ?", (order, item_id, order))
+            ops = membership or []
+            named = list(dict.fromkeys(i for op in ops for i in op["ids"]))
+            known = self._known_items(c, named, orders)
+            result = m.apply_ops(c, ops, orders, known, ts)
+            for cid, change in result.pop("changes").items():
+                into = changes.setdefault(cid, {"added": [], "removed": []})
+                into["added"] += change["added"]
+                into["removed"] += change["removed"]
+            # new and still in no collection (no op put it anywhere; an import's pending add would have): the
+            # first collection, as "All" in the extension adds to
+            homeless = [i for i in new_ids if not c.execute(
+                "SELECT 1 FROM collection_items WHERE item_id = ?", (i,)).fetchone()]
+            if homeless:
+                first = m.first_collection(c)
+                joined = m.add_rows(c, first, [(i, orders.get(i)) for i in homeless], ts, follow_order=True)["added"]
+                changes.setdefault(first, {"added": [], "removed": []})["added"] += joined
+            result["auto_added"] = len(homeless)
         return {"upserted": len(items), "changed": len(changed_ids), "removed": len(removed_ids),
-                "changed_ids": changed_ids, "removed_ids": removed_ids}
+                "changed_ids": changed_ids, "removed_ids": removed_ids, "membership": result,
+                "collection_changes": {k: v for k, v in changes.items() if v["added"] or v["removed"]}}
+
+    @staticmethod
+    def _known_items(c, ids: list[str], orders: dict[str, int | None]) -> set[str]:
+        """Which of ``ids`` are items (the mirror, an unacked pending add, an Other item); fills in their "#"."""
+        if not ids:
+            return set()
+        valid = "CASE WHEN json_type({c}, '{p}') = 'integer' AND json_extract({c}, '{p}') >= 1 THEN json_extract({c}, '{p}') END"
+        rows = c.execute(
+            f"SELECT id, {valid.format(c='data', p='$.order')} AS o FROM items WHERE id IN (SELECT value FROM json_each(?)) "
+            f"UNION ALL SELECT item_id, {valid.format(c='payload', p='$.item.order')} FROM pending_adds "
+            "WHERE acked_at IS NULL AND item_id IN (SELECT value FROM json_each(?)) "
+            f"UNION ALL SELECT id, {valid.format(c='data', p='$.order')} FROM other_items "
+            "WHERE id IN (SELECT value FROM json_each(?))", (json.dumps(ids),) * 3).fetchall()
+        for r in rows:
+            orders.setdefault(r["id"], r["o"])
+        return {r["id"] for r in rows}
 
     def set_tags(self, tags: list[str]) -> None:
         with self.tx() as c:

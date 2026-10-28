@@ -237,6 +237,11 @@ Tests never touch Bandcamp, the music drive or a real rekordbox library: Bandcam
   both directions, `imp-45e20d7a` byte for byte unchanged). The extension's new items join 0; an import commit
   chooses its collection (`collection_id`) and adds there only. Collections API, `?collection=` on the item list,
   `collections: [ids]` on every item.
+- **Phase 9, collections in the extension's tagger (server side):** the extension's sync carries membership ops
+  (`add`/`remove`, in order, in the sync's transaction); a new item in no collection joins the first collection, not
+  a fixed 0; `GET /api/collections/membership` gives the extension its whole copy in one read; `collections_version`
+  (triggers) in `/api/health` tells it when to re-read; every membership change sends an SSE `collections` event with
+  the version.
 
 ## App and extension (`app/`, `extension/`, `shared/`, branch `claude/local-collection-ui-e8f6f6`)
 

@@ -28,10 +28,18 @@ LOOPBACK = {"127.0.0.1", "::1", "testclient"}  # testclient: FastAPI's TestClien
 LINK_CANDIDATE_SLOTS = 2
 
 
+class MembershipOp(BaseModel):
+    op: Literal["add", "remove"]
+    collection_id: int
+    ids: list[str] = Field(max_length=20000)
+
+
 class SyncItemsBody(BaseModel):
     items: dict[str, dict] = Field(default_factory=dict)
     deleted: list[str] = Field(default_factory=list)
     full: bool = False
+    # the extension's collection changes, applied in order after the items (Phase 9); none: as before
+    membership: Optional[list[MembershipOp]] = Field(default=None, max_length=1000)
 
 
 class SyncTagsBody(BaseModel):
@@ -272,6 +280,15 @@ def create_app(service: Service | None = None) -> FastAPI:
 
         return all_collections(svc.store)
 
+    @app.get("/api/collections/membership")
+    def collections_membership() -> dict:
+        """``{version, collections, members: {"<id>": [item ids]}}``: everything the extension keeps, in one read.
+        ``version`` is read first, so data newer than it can come back, never older."""
+        from .membership import all_members, all_collections
+
+        version = svc.store.version("collections")
+        return {"version": version, "collections": all_collections(svc.store), "members": all_members(svc.store)}
+
     @app.post("/api/collections")
     def collections_create(body: CollectionBody) -> dict:
         return _collection_call(svc.collection_create, body.name)
@@ -312,7 +329,8 @@ def create_app(service: Service | None = None) -> FastAPI:
 
     @app.post("/api/sync/items")
     def sync_items(body: SyncItemsBody) -> dict:
-        return svc.sync_items(body.items, body.deleted, body.full)
+        ops = [op.model_dump() for op in body.membership] if body.membership else None
+        return svc.sync_items(body.items, body.deleted, body.full, ops)
 
     @app.post("/api/sync/tags")
     def sync_tags(body: SyncTagsBody) -> dict:
