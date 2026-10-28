@@ -268,6 +268,9 @@ npm run test:e2e                         # Playwright e2e: own profile, server :
   that has started swaps its source at the same moment and keeps playing (`swapSource`), the others when they
   next load. "▶ preview / original / Bandcamp stream" says what the track playing is heard from (the toggle and
   `local.best.preview`). Play/pause are SVG icons (the text glyphs rendered as a square in the docked player).
+- **Phase 9 e2e under budget** (27.3 s → 19.2 s): one storage write (one push, one wait) to set tracks aside and
+  put them back, server checks by id, 100 ms polling in the Phase 9 waits, no fixed settles (popup, timing). The
+  "#" collision test still fails without A's max_order fix.
 - **Phase 9 merged with A's server** (`0d4791a`: max_order counts collection 0's positions): the extension reads
   `max_order` again when the app forwards a `collections` event that moved the version, so the next "#" it gives
   comes after a track numbered on the server at once. e2e: with a hole in Collection's "#", an unnumbered track

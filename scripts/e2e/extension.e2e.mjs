@@ -4948,6 +4948,9 @@ test("Collections: Import selected goes into the collection picked next to it (t
 
 // --- Phase 9: collections in the extension's tagger -------------------------------------------
 
+// What these tests wait for is quick to ask (a few items, the extension's storage): asked every 100 ms.
+const waitSoon = (fn, o = {}) => waitFor(fn, { interval: 100, ...o });
+
 // How long a Bandcamp page takes to draw its stars with `total` items in the extension's storage (copies of real
 // ones beyond the export, removed after): navigation start → the last star drawn, the median of `runs` loads.
 async function starTiming({ total = 1100, runs = 5 } = {}) {
@@ -4974,7 +4977,8 @@ async function starTiming({ total = 1100, runs = 5 } = {}) {
     for (let r = 0; r < runs; r++) {
       await page.goto("https://infiniteexpanse.bandcamp.com/album/synergy-trilogy");
       await page.waitForSelector("#tagger_a563830364", { state: "attached", timeout: 30000 });
-      await sleep(250); // the last stars
+      // The last stars: none added for 100 ms.
+      await page.waitForFunction(() => window.__stars.n > 1 && performance.now() - window.__stars.last > 100, null, { polling: 25 });
       const { n, last } = await page.evaluate(() => window.__stars);
       times.push({ n, ms: Math.round(last) });
     }
@@ -4985,7 +4989,7 @@ async function starTiming({ total = 1100, runs = 5 } = {}) {
       return chrome.storage.local.set({ taggedItems });
     }), extra);
     // The server too (the extension pushes the deletions), so later tests start from the same collection.
-    await waitFor(async () => (await api("/api/health")).items === serverBefore, { what: "the copies gone from the server" });
+    await waitSoon(async () => (await api("/api/health")).items === serverBefore, { what: "the copies gone from the server" });
   }
   const sorted = times.map((t) => t.ms).sort((a, b) => a - b);
   return { median: sorted[Math.floor(sorted.length / 2)], times, stars: times[0].n, items: total };
@@ -5006,7 +5010,7 @@ const send = (msg) => probe.evaluate((m) => new Promise((r) => chrome.runtime.se
 // The extension's copy of the collections is the server's version (nothing pending).
 const extensionCaughtUp = async () => {
   const want = (await api("/api/collections/membership")).version;
-  await waitFor(async () => {
+  await waitSoon(async () => {
     const { collectionsCache, pendingMembership } = await storage(["collectionsCache", "pendingMembership"]);
     if ((collectionsCache || {}).version !== want || (pendingMembership || []).length) {
       await send({ type: "popupState" }); // reads them (one request)
@@ -5015,22 +5019,30 @@ const extensionCaughtUp = async () => {
     return true;
   }, { what: "the extension's collections copy", timeout: 15000 });
 };
-const onServer = (id) => api("/api/items").then((d) => (Array.isArray(d) ? d : d.items).find((i) => i.id === id) || null);
-// The track starts unsaved (an earlier test may have saved it): set aside, here and on the server; the returned
-// function puts it back as it was.
-async function trackAside(id = TRACK) {
-  const copy = (await storage("taggedItems")).taggedItems[id] || null;
-  const drop = () =>
-    probe.evaluate((t) => chrome.storage.local.get("taggedItems").then(({ taggedItems }) => {
-      delete taggedItems[t];
-      return chrome.storage.local.set({ taggedItems });
-    }), id);
-  if (copy) await drop();
-  await waitFor(async () => !(await onServer(id)), { what: `${id} not on the server` });
-  return async () => {
-    if (!copy) return drop();
-    await probe.evaluate(([t, item]) => chrome.storage.local.get("taggedItems").then(({ taggedItems }) => chrome.storage.local.set({ taggedItems: { ...taggedItems, [t]: item } })), [id, copy]);
-    await waitFor(async () => !!(await onServer(id)), { what: `${id} back on the server` });
+const serverHas = (ids) => api(`/api/items?ids=${ids.join(",")}`).then((d) => new Set((Array.isArray(d) ? d : d.items).map((i) => i.id)));
+const onServer = (id) => serverHas([id]).then((have) => have.has(id));
+// The extension's items: these set (an item, or null to delete it), in one storage write (one push).
+const writeItems = (changes) =>
+  probe.evaluate((c) => chrome.storage.local.get("taggedItems").then(({ taggedItems }) => {
+    Object.entries(c).forEach(([id, item]) => (item ? (taggedItems[id] = item) : delete taggedItems[id]));
+    return chrome.storage.local.set({ taggedItems });
+  }), changes);
+// These tracks start unsaved (an earlier test may have saved one): set aside here and on the server, in one write.
+// The returned function puts them back as they were, with `also` (more items to put back), in one write.
+async function tracksAside(ids) {
+  const saved = (await storage("taggedItems")).taggedItems;
+  const copies = Object.fromEntries(ids.map((id) => [id, saved[id] || null]));
+  if (ids.some((id) => copies[id])) await writeItems(Object.fromEntries(ids.map((id) => [id, null])));
+  await waitSoon(async () => !(await serverHas(ids)).size, { what: `${ids.join(", ")} not on the server` });
+  return async (also = {}) => {
+    const back = { ...copies, ...also };
+    await writeItems(back);
+    const kept = Object.keys(back).filter((id) => back[id]);
+    const gone = Object.keys(back).filter((id) => !back[id]);
+    await waitSoon(async () => {
+      const have = await serverHas(Object.keys(back));
+      return kept.every((id) => have.has(id)) && gone.every((id) => !have.has(id));
+    }, { what: "the tracks as they were on the server" });
   };
 }
 const starOf = (page, id) => page.locator(`.tag-button[data-item-id="${id}"]`);
@@ -5048,7 +5060,6 @@ test("Collections in the extension: the popup lists All, the collections with co
   const inCollection = (await collectionsNow()).find((c) => c.id === 0).count;
   const { taggedItems } = await storage("taggedItems");
   const popup = await context.newPage();
-  await sleep(1500); // the extension's own pushes of earlier changes (debounced) done first
   const asked = [];
   const record = (r) => r.url().startsWith(SERVER) && asked.push(new URL(r.url()).pathname);
   context.on("request", record);
@@ -5057,8 +5068,8 @@ test("Collections in the extension: the popup lists All, the collections with co
     await popup.waitForFunction(() => document.querySelectorAll("#collectionPicker option").length > 2 && /synced|offline/.test(document.getElementById("serverText").textContent));
     await sleep(300);
     context.off("request", record);
-    // (The 30 s tick's own reads aside.)
-    const mine = asked.filter((p) => !["/api/health", "/api/tag-edits/pending", "/api/tagger/pending-adds"].includes(p));
+    // (The background's own work aside: the 30 s tick's reads, and pushes of earlier changes.)
+    const mine = asked.filter((p) => !["/api/health", "/api/tag-edits/pending", "/api/tagger/pending-adds", "/api/sync/items", "/api/sync/tags"].includes(p));
     assert.deepEqual(mine, ["/api/collections/membership"], `one request: ${asked.join(", ")}`);
     assert.deepEqual(await popup.$$eval("#collectionPicker option", (os) => os.map((o) => o.textContent)), [
       `All (${Object.keys(taggedItems).length})`,
@@ -5069,7 +5080,7 @@ test("Collections in the extension: the popup lists All, the collections with co
     assert.equal(await popup.inputValue("#collectionPicker"), "all", "All by default");
     if (process.env.E2E_SHOTS) await popup.screenshot({ path: path.join(process.env.E2E_SHOTS, "popup-collections.png") });
     await popup.selectOption("#collectionPicker", String(crates.id));
-    await waitFor(async () => (await storage("activeCollection")).activeCollection === crates.id, { what: "the choice stored" });
+    await waitSoon(async () => (await storage("activeCollection")).activeCollection === crates.id, { what: "the choice stored" });
     await popup.close();
     // Kept in chrome.storage.local, which an extension reload keeps: a new popup (fresh script) shows it.
     const again = await context.newPage();
@@ -5086,7 +5097,7 @@ test("Collections in the extension: the popup lists All, the collections with co
 test("Collections in the extension: a Bandcamp page's stars follow the popup's choice without a reload; star and un-star in a collection (membership only) and in All (a new item into the first collection; deleting asks when it's in two or more)", async () => {
   await dropCollections();
   const crates = await post("/api/collections", { name: "E2E Crates" });
-  const putBack = await trackAside();
+  const putBack = await tracksAside([TRACK]);
   await extensionCaughtUp();
   const albumCopy = (await storage("taggedItems")).taggedItems[ALBUM];
   assert.ok(albumCopy);
@@ -5108,7 +5119,7 @@ test("Collections in the extension: a Bandcamp page's stars follow the popup's c
     assert.equal(await isStarred(page, TRACK), false);
     await starOf(page, TRACK).click();
     await starIs(page, TRACK, true);
-    await waitFor(async () => (await membersOf(0)).includes(TRACK), { what: "the track in Collection (the first)" });
+    await waitSoon(async () => (await membersOf(0)).includes(TRACK), { what: "the track in Collection (the first)" });
     assert.ok(Number.isInteger((await storage("taggedItems")).taggedItems[TRACK].order), "numbered");
     // The popup's choice: the stars follow, with no reload.
     await setStorage({ activeCollection: crates.id });
@@ -5119,12 +5130,12 @@ test("Collections in the extension: a Bandcamp page's stars follow the popup's c
     await starOf(page, TRACK).click();
     await starIs(page, ALBUM, true);
     await starIs(page, TRACK, true);
-    await waitFor(async () => (await membersOf(crates.id)).sort().join() === [ALBUM, TRACK].sort().join(), { what: "both in E2E Crates" });
+    await waitSoon(async () => (await membersOf(crates.id)).sort().join() === [ALBUM, TRACK].sort().join(), { what: "both in E2E Crates" });
     assert.deepEqual((await storage("taggedItems")).taggedItems[ALBUM].tags, albumCopy.tags);
     // Un-starring in a collection: out of it only (still saved, still in Collection).
     await starOf(page, TRACK).click();
     await starIs(page, TRACK, false);
-    await waitFor(async () => !(await membersOf(crates.id)).includes(TRACK), { what: "the track out of E2E Crates" });
+    await waitSoon(async () => !(await membersOf(crates.id)).includes(TRACK), { what: "the track out of E2E Crates" });
     assert.ok(await saved(TRACK), "still saved");
     assert.ok((await membersOf(0)).includes(TRACK), "still in Collection");
     // Back to All: starred (saved), still no reload.
@@ -5133,27 +5144,23 @@ test("Collections in the extension: a Bandcamp page's stars follow the popup's c
     assert.equal(loads.length, 0, "no reload");
     // All: the album is in two collections: un-starring asks first (No: kept; Yes: deleted everywhere).
     await starOf(page, ALBUM).click();
-    await waitFor(() => dialogs.length === 1, { what: "the confirm" });
+    await waitSoon(() => dialogs.length === 1, { what: "the confirm" });
     assert.match(dialogs[0], /is in 2 collections \(Collection, E2E Crates\)\. Delete it and its tags from all of them\?$/);
     await starIs(page, ALBUM, true);
     assert.ok(await saved(ALBUM), "kept");
     answer = true;
     await starOf(page, ALBUM).click();
     await starIs(page, ALBUM, false);
-    await waitFor(async () => !(await onServer(ALBUM)), { what: "the album deleted on the server" });
+    await waitSoon(async () => !(await onServer(ALBUM)), { what: "the album deleted on the server" });
     assert.equal(await saved(ALBUM), false);
     assert.equal((await membersOf(crates.id)).includes(ALBUM), false);
     assert.equal(dialogs.length, 2);
   } finally {
     await page.close();
     // As it was: the album back (it rejoins Collection, the first), the track as it was, All shown.
-    await probe.evaluate(([id, item]) => chrome.storage.local.get("taggedItems").then(({ taggedItems }) => {
-      taggedItems[id] = item;
-      return chrome.storage.local.set({ taggedItems, activeCollection: "all" });
-    }), [ALBUM, albumCopy]);
+    await setStorage({ activeCollection: "all" });
     await dropCollections();
-    await putBack();
-    await waitFor(async () => !!(await onServer(ALBUM)), { what: "the album back on the server" });
+    await putBack({ [ALBUM]: albumCopy });
   }
 });
 
@@ -5176,7 +5183,7 @@ test("Collections in the extension: one made in the popup shows in the app at on
     await popup.selectOption("#collectionPicker", "new");
     await popup.fill("#newCollectionName", "E2E From Popup");
     await popup.press("#newCollectionName", "Enter");
-    const fromPopup = await waitFor(async () => (await collectionsNow()).find((c) => c.name === "E2E From Popup"), { what: "made on the server" });
+    const fromPopup = await waitSoon(async () => (await collectionsNow()).find((c) => c.name === "E2E From Popup"), { what: "made on the server" });
     await popup.waitForFunction((v) => document.getElementById("collectionPicker").value === v, String(fromPopup.id));
     assert.equal((await storage("activeCollection")).activeCollection, fromPopup.id);
     await app.waitForFunction(() => [...document.querySelectorAll("#collectionSelect option")].some((o) => o.textContent === "E2E From Popup (0)"), null, { timeout: 10000 });
@@ -5184,7 +5191,7 @@ test("Collections in the extension: one made in the popup shows in the app at on
     await app.click("#createCollection");
     await app.fill("#createCollectionDialogName", "E2E From App");
     await app.press("#createCollectionDialogName", "Enter");
-    await waitFor(async () => ((await storage("collectionsCache")).collectionsCache.list || []).some((c) => c.name === "E2E From App"), {
+    await waitSoon(async () => ((await storage("collectionsCache")).collectionsCache.list || []).some((c) => c.name === "E2E From App"), {
       what: "the extension's copy", timeout: 10000,
     });
     await popup.reload();
@@ -5201,7 +5208,7 @@ test("Collections in the extension: one made in the popup shows in the app at on
 test("Collections in the extension: starring while the server is off works at once and reaches the server when it's back; New collection… waits for the server", async () => {
   await dropCollections();
   const crates = await post("/api/collections", { name: "E2E Crates" });
-  const putBack = await trackAside();
+  const putBack = await tracksAside([TRACK]);
   await extensionCaughtUp();
   const page = await context.newPage();
   const popup = await context.newPage();
@@ -5212,7 +5219,7 @@ test("Collections in the extension: starring while the server is off works at on
     await page.waitForSelector(`.tag-button[data-item-id="${TRACK}"]`, { timeout: 30000 });
     await starOf(page, TRACK).click();
     await starIs(page, TRACK, true);
-    await waitFor(async () => ((await storage("pendingMembership")).pendingMembership || []).some((op) => op.ids.includes(TRACK)), { what: "the change queued" });
+    await waitSoon(async () => ((await storage("pendingMembership")).pendingMembership || []).some((op) => op.ids.includes(TRACK)), { what: "the change queued" });
     assert.equal((await membersOf(crates.id)).includes(TRACK), false, "not on the server yet");
     await popup.goto(extPage("popup.html"));
     await popup.waitForFunction(() => /offline/.test(document.getElementById("serverText").textContent));
@@ -5221,8 +5228,8 @@ test("Collections in the extension: starring while the server is off works at on
     assert.equal(await popup.inputValue("#collectionPicker"), String(crates.id), "the choice, from the extension's copy");
     // The server is back: the queued change is applied.
     await setStorage({ bcServer: { url: SERVER } });
-    await waitFor(async () => (await membersOf(crates.id)).includes(TRACK), { what: "the track in E2E Crates on the server", timeout: 30000 });
-    await waitFor(async () => !((await storage("pendingMembership")).pendingMembership || []).length, { what: "nothing left queued" });
+    await waitSoon(async () => (await membersOf(crates.id)).includes(TRACK), { what: "the track in E2E Crates on the server", timeout: 30000 });
+    await waitSoon(async () => !((await storage("pendingMembership")).pendingMembership || []).length, { what: "nothing left queued" });
     assert.equal((await membersOf(0)).includes(TRACK), false, "only there: a new item starred in a collection");
     assert.equal((await storage("taggedItems")).taggedItems[TRACK].order, null, "no number in Collection");
   } finally {
@@ -5245,12 +5252,11 @@ test("Collections in the extension: a track with no \"#\" that joins Collection 
     await page.waitForSelector(`.tag-button[data-item-id="${TRACK}"]`, { timeout: 30000 });
     const other = (await page.$$eval(".tag-button[data-item-id]", (bs) => bs.map((b) => b.dataset.itemId))).find((i) => i.startsWith("t") && i !== TRACK);
     assert.ok(other, "the album's other track");
-    putBack.push(await trackAside(TRACK), await trackAside(other));
-    // A hole in Collection's "#" (a low-numbered track deleted, as happens): its highest number is then above the
-    // number of tracks, which alone no longer covers a place given on the server.
+    // Both tracks unsaved, and a hole in Collection's "#" (a low-numbered track deleted, as happens): its highest
+    // number is then above the number of tracks, which alone no longer covers a place given on the server.
     const saved = (await storage("taggedItems")).taggedItems;
     const low = Object.values(saved).filter((i) => Number.isInteger(i.order) && i.id !== ALBUM).sort((a, b) => a.order - b.order)[0].id;
-    putBack.push(await trackAside(low));
+    putBack.push(await tracksAside([TRACK, other, low]));
     await extensionCaughtUp();
     // The app is open: it passes the server's collections events on to the extension.
     await app.goto(SERVER + "/");
@@ -5259,19 +5265,19 @@ test("Collections in the extension: a track with no \"#\" that joins Collection 
     await setStorage({ activeCollection: crates.id });
     await starIs(page, TRACK, false);
     await starOf(page, TRACK).click();
-    await waitFor(async () => (await membersOf(crates.id)).includes(TRACK), { what: "the track in E2E Crates" });
+    await waitSoon(async () => (await membersOf(crates.id)).includes(TRACK), { what: "the track in E2E Crates" });
     assert.equal((await storage("taggedItems")).taggedItems[TRACK].order, null);
     // It joins Collection on the server (the app's Import to Collection): numbered there, after the last.
     assert.equal((await post("/api/collections/0/items", { ids: [TRACK] })).added, 1);
     const numbered = (await api("/api/health")).max_order; // counts its place in Collection
-    await waitFor(async () => (await storage("orderFloor")).orderFloor >= numbered, { what: "the extension's highest \"#\"" });
+    await waitSoon(async () => (await storage("orderFloor")).orderFloor >= numbered, { what: "the extension's highest \"#\"" });
     // A new track starred in All (into Collection, the first) is numbered after it.
     await setStorage({ activeCollection: "all" });
     await starIs(page, other, false);
     await starOf(page, other).click();
-    const order = await waitFor(async () => ((await storage("taggedItems")).taggedItems[other] || {}).order, { what: "its \"#\"" });
+    const order = await waitSoon(async () => ((await storage("taggedItems")).taggedItems[other] || {}).order, { what: "its \"#\"" });
     assert.ok(order > numbered, `${order} after ${numbered}`);
-    await waitFor(async () => (await membersOf(0)).includes(other), { what: "the new track in Collection" });
+    await waitSoon(async () => (await membersOf(0)).includes(other), { what: "the new track in Collection" });
     const inCollection = await membersOf(0);
     assert.ok(inCollection.indexOf(TRACK) < inCollection.indexOf(other), "in that order in Collection");
   } finally {
