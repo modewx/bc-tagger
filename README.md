@@ -144,6 +144,14 @@ server/bct serve     # local server + app on http://127.0.0.1:8765
   new build.
 - The popup's **Checkout / PayPal automation** box (on by default) turns off the automatic steps on Bandcamp
   checkout and PayPal pages: with it off, `checkout.js` does nothing on those pages from their next load.
+- **Collections in the tagger** (Phase 9): the popup's **Collection** dropdown (All, then the collections with
+  their counts, then **New collection…**) says what the stars on Bandcamp pages show and where starring puts a
+  track; the choice is kept by the extension (default All) and open Bandcamp tabs redraw their stars at once. In a
+  collection, the star is membership (tags stay; the track stays in All). In All, starring a new track puts it into
+  the first collection, and un-starring deletes it everywhere (asking first when it's in two or more). New
+  collection… makes it on the server (the app shows it at once; one made in the app reaches the extension through
+  an open app tab, else at the next check). Starring works with the server off: the changes go when it's back.
+  The built-in See Collection page shows the chosen collection.
 - The popup shows the local server's status; "edit" changes its URL (default `http://127.0.0.1:8765`),
   "sync" pushes everything now. **See Collection** opens the local app when the server answers, else the
   built-in page (Shift-click: always the built-in page).
@@ -169,7 +177,7 @@ Runs the extension, server and local app together in a Playwright Chromium with 
   real server (mapping, linking, browser lookups, downloads, re-locate, browse), settings, and rekordbox dry runs
   and a sandbox write.
 
-A full run (97 tests) takes about 3 minutes (2026-10-26: 110–147 s). For a quick check, run a subset by
+A full run (102 tests) takes about 3.5 minutes (2026-10-26: 110–147 s). For a quick check, run a subset by
 name. Include `Import \(replace\)`, which loads the test collection the others use:
 
 ```bash

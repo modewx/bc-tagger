@@ -11,6 +11,14 @@
       padding: 12px;
       font-size: 13px;
     }
+    /* The collection the tagger shows and stars into (Phase 9) */
+    #collectionRow { display: flex; align-items: center; gap: 6px; margin-bottom: 10px; }
+    #collectionRow label { font-weight: 600; flex: none; }
+    #collectionPicker { flex: 1; min-width: 0; font-size: 13px; padding: 4px; }
+    #newCollectionRow { display: none; gap: 4px; margin: -4px 0 10px; }
+    #newCollectionRow.open { display: flex; }
+    #newCollectionRow input { flex: 1; min-width: 0; padding: 5px 6px; border: 1px solid #aaa; border-radius: 4px; font-size: 13px; }
+    #newCollectionRow button { font-size: 12px; padding: 4px 8px; }
     /* Create tag (always visible, at the top) */
     #createTagSection {
       margin-bottom: 12px;
@@ -217,6 +225,15 @@
   </style>
 </head>
 <body>
+  <div id="collectionRow">
+    <label for="collectionPicker">Collection</label>
+    <select id="collectionPicker" title="What the stars on Bandcamp pages show, and where starring puts a track"></select>
+  </div>
+  <div id="newCollectionRow">
+    <input type="text" id="newCollectionName" placeholder="Name of the new collection" autocomplete="off" maxlength="100" />
+    <button id="newCollectionCreate">Create</button>
+    <button id="newCollectionCancel" class="link-btn">Cancel</button>
+  </div>
   <div id="createTagSection">
     <div class="combo">
       <input type="text" id="tagName" placeholder="New tag (one word)" autocomplete="off" autofocus />

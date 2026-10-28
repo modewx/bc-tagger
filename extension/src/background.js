@@ -14,7 +14,12 @@ import {
   refreshOwnership,
   sameServerOrigin,
   syncTick,
+  scheduleMembershipPush,
+  refreshCollections,
+  popupState,
+  createCollection,
 } from "./serverSync";
+import { MAIN, queueMembership, forgetItem, setActive, readCollections } from "./collectionsStore";
 import { serialized, withItems, getStorage, setStorage, nowIso, sameTags, fillOrder, nextOrder, orderFloor } from "./itemsStore";
 import { isChallengePage } from "../../shared/bandcampChallenge";
 
@@ -156,6 +161,42 @@ function ensureOrder() {
   return withItems((items) => (fillOrder(items) ? { ok: true } : { ok: false, reason: "all numbered" }));
 }
 
+// Starring / tagging on a Bandcamp page: a new item, or new tags, is a modification. `collection`: the collection it
+// joins now (null: none named; the server puts a new one into the first collection). "#" is Collection's: a new
+// item gets the next number when it joins Collection (or no collection is named), none (`order: null`) when it's
+// starred into another one, until it joins Collection (setMembership); an item keeps its number.
+async function saveTaggedItem(incoming, collection = null) {
+  const floor = await orderFloor();
+  const numbered = collection == null || collection === MAIN;
+  const write = (items) => {
+    const prev = items[incoming.id];
+    const item = { ...incoming };
+    item.modified_at = !prev || !sameTags(prev.tags, item.tags) ? nowIso() : prev.modified_at || item.modified_at;
+    if (!item.modified_at) delete item.modified_at;
+    fillOrder(items); // older items first, should they still have none
+    if (prev && prev.order != null) item.order = prev.order;
+    else item.order = numbered ? nextOrder(items, floor) : null;
+    items[item.id] = item;
+  };
+  if (collection == null) return withItems(write);
+  return queueMembership([{ op: "add", collection_id: collection, ids: [incoming.id] }], write);
+}
+
+// An item joins or leaves a collection (tags kept). Joining Collection numbers it, if it has no "#" yet.
+async function setMembership(op, collection, id) {
+  const floor = await orderFloor();
+  const number =
+    op === "add" && collection === MAIN
+      ? (items) => {
+          const it = items[id];
+          if (!it || it.order != null) return false;
+          fillOrder(items);
+          it.order = nextOrder(items, floor);
+        }
+      : null;
+  return queueMembership([{ op, collection_id: collection, ids: [id] }], number);
+}
+
 function updateItemTags(id, tags) {
   return withItems((items) => {
     if (!items[id]) return { ok: false, reason: "not-found" };
@@ -246,6 +287,14 @@ async function handleAppBridge(op, payload, sender) {
     throw new Error("not the configured local server");
   }
   switch (op) {
+    case "collectionsChanged": {
+      // The app heard an SSE `collections` event: read the collections again (one request), unless this copy is
+      // that version already.
+      const { cache } = await readCollections();
+      if (payload.version != null && payload.version === cache.version) return { version: cache.version, read: false };
+      const fresh = await refreshCollections();
+      return { version: fresh ? fresh.version : null, read: true };
+    }
     case "setItemTags": {
       const res = await updateItemTags(payload.id, payload.tags);
       if (!res.ok) throw new Error(res.reason || "not saved");
@@ -310,6 +359,9 @@ chrome.storage.onChanged.addListener((changes, area) => {
   if (area !== "local") return;
   if (changes.taggedItems) queueItemsDiff(changes.taggedItems.oldValue, changes.taggedItems.newValue);
   if (changes.tags) queueTags();
+  // A membership change on its own (an item that exists already joins or leaves a collection).
+  const ops = changes.pendingMembership;
+  if (ops && ((ops.newValue || []).length > (ops.oldValue || []).length)) scheduleMembershipPush();
   if (changes.bcServer) syncTick("server changed");
 });
 
@@ -407,27 +459,43 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
   }
 
   if (request.type === "addTaggedItem") {
-    // Starring / tagging on a Bandcamp page: a new item, or new tags, is a modification.
-    // "#": an item keeps its place; a new one goes last.
-    orderFloor().then((floor) =>
-      withItems((items) => {
-        const prev = items[request.item.id];
-        const item = { ...request.item };
-        item.modified_at = !prev || !sameTags(prev.tags, item.tags) ? nowIso() : prev.modified_at || item.modified_at;
-        if (!item.modified_at) delete item.modified_at;
-        fillOrder(items); // older items first, should they still have none
-        item.order = prev ? prev.order : nextOrder(items, floor);
-        items[item.id] = item;
-      })
-    );
+    saveTaggedItem(request.item, Number.isInteger(request.collection) ? request.collection : null);
     return false;
   }
 
+  if (request.type === "setMembership") {
+    // Starring (or tagging) an item that exists, or un-starring it, while a collection is shown.
+    setMembership(request.op === "remove" ? "remove" : "add", Number(request.collection), request.id).then(
+      () => sendResponse({ ok: true }),
+      (e) => sendResponse({ ok: false, error: e.message })
+    );
+    return true;
+  }
+
   if (request.type === "removeTaggedItem") {
+    // Un-starring in All: the item and its tags go, from every collection.
     withItems((items) => {
       delete items[request.id];
-    });
+    }).then(() => forgetItem(request.id));
     return false;
+  }
+
+  if (request.type === "popupState") {
+    popupState().then(sendResponse, (e) => sendResponse({ up: false, error: e.message }));
+    return true;
+  }
+
+  if (request.type === "createCollection") {
+    createCollection(String(request.name || "").trim()).then(
+      (collection) => sendResponse({ ok: true, collection }),
+      (e) => sendResponse({ ok: false, error: e.message, status: e.status })
+    );
+    return true;
+  }
+
+  if (request.type === "setActiveCollection") {
+    setActive(request.collection).then(() => sendResponse({ ok: true }));
+    return true;
   }
 
   if (request.type === "updateTaggedItemFiles") {

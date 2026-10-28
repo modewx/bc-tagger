@@ -232,6 +232,86 @@ $(function () {
     chrome.runtime.sendMessage({ type: "serverStatus" }, renderServer);
   }
 
+  // --- The collection shown (Phase 9) -----------------------------------
+  // All, then the collections by `pos` with their counts, then "New collection…" (made on the server: the app shows
+  // it at once). The choice is kept in the extension's storage; Bandcamp tabs redraw their stars from it.
+  const picker = document.getElementById("collectionPicker");
+  const newRow = document.getElementById("newCollectionRow");
+  const newName = document.getElementById("newCollectionName");
+  let shown = { up: false, cache: { list: [] }, active: "all", allCount: 0 };
+  const NEW = "new";
+
+  function renderCollections() {
+    const { cache, active, allCount, up } = shown;
+    const list = (cache.list || []).slice().sort((a, b) => (a.pos ?? a.id) - (b.pos ?? b.id) || a.id - b.id);
+    picker.innerHTML = "";
+    picker.appendChild(new Option(`All (${allCount})`, "all"));
+    list.forEach((c) => picker.appendChild(new Option(`${c.name} (${c.count ?? 0})`, String(c.id))));
+    const add = new Option(up ? "New collection…" : "New collection… (the server isn't running)", NEW);
+    add.disabled = !up;
+    picker.appendChild(add);
+    picker.value = list.some((c) => c.id === active) ? String(active) : "all";
+  }
+
+  picker.addEventListener("change", () => {
+    if (picker.value === NEW) {
+      newRow.classList.add("open");
+      newName.focus();
+      picker.value = String(shown.active);
+      return;
+    }
+    shown.active = picker.value === "all" ? "all" : Number(picker.value);
+    chrome.runtime.sendMessage({ type: "setActiveCollection", collection: shown.active });
+  });
+
+  function closeNew() {
+    newRow.classList.remove("open");
+    newName.value = "";
+  }
+  function createCollection() {
+    const name = newName.value.replace(/\s+/g, " ").trim();
+    if (!name) {
+      showToast("Name the collection");
+      return;
+    }
+    if ((shown.cache.list || []).some((c) => c.name.toLowerCase() === name.toLowerCase())) {
+      showToast(`There's already a collection called “${name}”`);
+      return;
+    }
+    chrome.runtime.sendMessage({ type: "createCollection", name }, (res) => {
+      if (!res || !res.ok) {
+        showToast(res && res.status === 409 ? `There's already a collection called “${name}”` : `Not created: ${(res && res.error) || "the server isn't running"}`);
+        return;
+      }
+      closeNew();
+      showToast(`Created “${res.collection.name}”`, "success");
+      chrome.runtime.sendMessage({ type: "popupState" }, (st) => {
+        if (st) shown = { ...shown, ...st };
+        shown.active = res.collection.id;
+        renderCollections();
+      });
+    });
+  }
+  document.getElementById("newCollectionCreate").addEventListener("click", createCollection);
+  document.getElementById("newCollectionCancel").addEventListener("click", closeNew);
+  newName.addEventListener("keydown", (e) => {
+    if (e.key === "Enter") {
+      e.preventDefault();
+      createCollection();
+    } else if (e.key === "Escape") closeNew();
+  });
+
+  // Opening the popup: one localhost request (the collections, which also says whether the server answers).
+  function loadState() {
+    chrome.runtime.sendMessage({ type: "popupState" }, (st) => {
+      if (!st) return;
+      shown = { ...shown, ...st, cache: st.cache || { list: [] } };
+      renderCollections();
+      const status = st.status || {};
+      renderServer({ url: st.url, health: st.up ? { items: status.serverItems } : null, status });
+    });
+  }
+
   document.getElementById("serverEdit").addEventListener("click", () => {
     serverEditRow.classList.toggle("open");
     if (serverEditRow.classList.contains("open")) serverUrlInput.focus();
@@ -266,7 +346,7 @@ $(function () {
     });
   });
 
-  refreshServer();
+  loadState();
 
   // Export the full database (saved tracks + tag vocabulary) as a JSON backup.
   const exportLink = document.querySelector(".link-to-download");

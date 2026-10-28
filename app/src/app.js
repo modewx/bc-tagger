@@ -542,7 +542,15 @@ async function refreshHealth() {
 
   events.on("tags", () => refreshHealth());
   let counts = null;
-  events.on("collections", () => collectionsBar.refresh()); // made, renamed, deleted, reordered
+  let forward = null;
+  let version = null;
+  events.on("collections", (ev) => {
+    collectionsBar.refresh(); // made, renamed, deleted, reordered, members
+    // The extension keeps its own copy for the tagger: tell it, with the version (it reads them again if it's behind).
+    if (ev && ev.version != null) version = ev.version;
+    clearTimeout(forward);
+    forward = setTimeout(() => bridge.connected && bridge.call("collectionsChanged", { version }).catch(() => {}), 500);
+  });
   events.on("item", () => {
     clearTimeout(counts); // memberships: the counts
     counts = setTimeout(() => collectionsBar.refresh(), 1000);

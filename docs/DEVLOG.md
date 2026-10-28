@@ -263,6 +263,15 @@ npm run test:e2e                         # Playwright e2e: own profile, server :
   that has started swaps its source at the same moment and keeps playing (`swapSource`), the others when they
   next load. "▶ preview / original / Bandcamp stream" says what the track playing is heard from (the toggle and
   `local.best.preview`). Play/pause are SVG icons (the text glyphs rendered as a square in the docked player).
+- **Phase 9: collections in the extension's tagger** (user; contract in LOCAL_COLLECTION_PLAN.md): the extension
+  keeps `collectionsCache` / `activeCollection` / `pendingMembership` (`collectionsStore.js`); membership changes
+  are optimistic, queued and sent as `membership` ops with the item pushes (a new item and its collection in one
+  write, so one request); refresh on popup open (its single request), on the tick when `collections_version`
+  moved, and when the app forwards an SSE `collections` event (with its version) through the bridge. Popup
+  dropdown with New collection…; Bandcamp stars per the choice (Set lookups, redrawn from storage.onChanged);
+  the bundled page filters by it. "#": items starred into another collection than Collection get `order: null`
+  and a number only when they join Collection (fillOrder skips null). Star drawing with 1,100 items: 65–71 ms
+  before, 58–67 ms after (median of 5). e2e: 5 tests (~16.7 s).
 - **Collections e2e on A's real server** (after the merge of `e422c37`): the route stand-in is gone; the two
   collections tests create, fill, rename and delete real collections (and drop what they made), and the import
   test commits a real track-list batch with `collection_id` (`last-committed` says where it went). The toolbar test

@@ -13,7 +13,7 @@
 //   fetchPage(url, {credentials}) -> Promise<{ok, status, text()}>
 //   bandcampLimits?()           -> Promise<{concurrency, spacingMs} | null>  Settings → Bandcamp requests
 //   onTagsChanged(cb(tags))                          live vocabulary updates
-//   onItemsChanged?(cb)                              optional: items changed elsewhere
+//   onItemsChanged?(cb)                              optional: items changed elsewhere (here: the popup's collection)
 
 function send(msg) {
   return new Promise((resolve) => {
@@ -43,8 +43,18 @@ export class ExtensionDataSource {
     return send({ type: "getTags" });
   }
 
+  // The collection chosen in the popup ("all", or a collection: its members, from the extension's copy).
   getItems() {
-    return send({ type: "getTaggedItems" }).then((items) => items || {});
+    return Promise.all([
+      send({ type: "getTaggedItems" }),
+      new Promise((resolve) => chrome.storage.local.get(["activeCollection", "collectionsCache"], resolve)),
+    ]).then(([items, { activeCollection, collectionsCache }]) => {
+      items = items || {};
+      if (activeCollection == null || activeCollection === "all" || !collectionsCache) return items;
+      const out = {};
+      ((collectionsCache.members || {})[String(activeCollection)] || []).forEach((id) => id in items && (out[id] = items[id]));
+      return out;
+    });
   }
 
   setItemTags(id, tags) {
@@ -83,6 +93,13 @@ export class ExtensionDataSource {
       if (area === "local" && changes.tags) {
         cb(changes.tags.newValue || []);
       }
+    });
+  }
+
+  // Another collection chosen in the popup, or its members changed: the rows again.
+  onItemsChanged(cb) {
+    chrome.storage.onChanged.addListener((changes, area) => {
+      if (area === "local" && (changes.activeCollection || changes.collectionsCache)) cb();
     });
   }
 }

@@ -16,11 +16,13 @@
 
 import { withItems, serialized, getStorage, setStorage, nowIso, sameTags, laterIso, fillOrder, nextOrder, orderFloor, setOrderFloor } from "./itemsStore";
 import { CHALLENGE_TEXT, isChallengePage } from "../../shared/bandcampChallenge";
+import { readCollections, storeFetched, acceptOps, setActive } from "./collectionsStore";
 
 // http://127.0.0.1:8765 unless the build sets BC_DEFAULT_SERVER_URL (e2e builds).
 export const DEFAULT_SERVER_URL = __DEFAULT_SERVER_URL__;
 const FULL_SYNC_EVERY_MS = 15 * 60 * 1000;
 const PUSH_DEBOUNCE_MS = 800;
+const MEMBERSHIP_PUSH_MS = 250; // a star in a collection: soon (its item, if new, goes with it)
 
 // --- Config / status ---------------------------------------------------------
 
@@ -70,7 +72,11 @@ async function api(path, { method = "GET", body, timeoutMs = 15000 } = {}) {
   }
   const res = await fetch(base + path, init);
   const text = await res.text();
-  if (!res.ok) throw new Error(`${method} ${path}: HTTP ${res.status} ${text.slice(0, 200)}`);
+  if (!res.ok) {
+    const e = new Error(`${method} ${path}: HTTP ${res.status} ${text.slice(0, 200)}`);
+    e.status = res.status;
+    throw e;
+  }
   return text ? JSON.parse(text) : null;
 }
 
@@ -120,22 +126,28 @@ export function queueTags() {
   schedulePush();
 }
 
-function schedulePush() {
+export function schedulePush(delayMs = PUSH_DEBOUNCE_MS) {
   clearTimeout(pushTimer);
-  pushTimer = setTimeout(pushPending, PUSH_DEBOUNCE_MS);
+  pushTimer = setTimeout(pushPending, delayMs);
 }
 
+export const scheduleMembershipPush = () => schedulePush(MEMBERSHIP_PUSH_MS);
+
+// Membership changes made here ride on the item push (a new item and its collection together: the server would
+// otherwise put the item into the first collection), or go on their own; the server applies them after the items.
 async function pushPending() {
   const batch = pending;
   pending = { items: {}, deleted: new Set(), tags: false };
   const ids = Object.keys(batch.items);
-  if (!ids.length && !batch.deleted.size && !batch.tags) return;
+  const ops = (await readCollections()).pending;
+  if (!ids.length && !batch.deleted.size && !batch.tags && !ops.length) return;
   try {
-    if (ids.length || batch.deleted.size) {
+    if (ids.length || batch.deleted.size || ops.length) {
       await api("/api/sync/items", {
         method: "POST",
-        body: { items: batch.items, deleted: [...batch.deleted], full: false },
+        body: { items: batch.items, deleted: [...batch.deleted], full: false, ...(ops.length ? { membership: ops } : {}) },
       });
+      await acceptOps(ops);
     }
     if (batch.tags) {
       // A fresh install only has the tags.json seed: don't let it replace the
@@ -171,9 +183,15 @@ export async function fullSync(reason, { force = false } = {}) {
       skipped = `kept the server's ${serverItems} items: this extension has only ${count} (use "sync" to replace them)`;
     }
   }
+  const ops = (await readCollections()).pending; // after the items, as on every push
   try {
-    if (count || full) {
-      await api("/api/sync/items", { method: "POST", body: { items, deleted: [], full }, timeoutMs: 60000 });
+    if (count || full || ops.length) {
+      await api("/api/sync/items", {
+        method: "POST",
+        body: { items, deleted: [], full, ...(ops.length ? { membership: ops } : {}) },
+        timeoutMs: 60000,
+      });
+      await acceptOps(ops);
     }
     if (count) await api("/api/sync/tags", { method: "POST", body: { tags: Array.isArray(tags) ? tags : [] } });
     await setStatus({
@@ -191,6 +209,42 @@ export async function fullSync(reason, { force = false } = {}) {
     await setStatus({ needsFull: true, lastError: e.message, serverUp: false });
     throw e;
   }
+}
+
+// --- Collections (Phase 9) ------------------------------------------------------
+
+// One read of the server's collections and members (about 16 KB), kept in collectionsCache. Null: this server has
+// no collections (older), or isn't answering.
+export async function refreshCollections(timeoutMs = 4000) {
+  try {
+    return await storeFetched(await api("/api/collections/membership", { timeoutMs }));
+  } catch (e) {
+    return null;
+  }
+}
+
+// For the popup, as it opens: one localhost request (the collections read) says whether the server answers and
+// brings the collections up to date. The rest comes from storage.
+export async function popupState() {
+  const url = await getServerUrl();
+  let up = false;
+  try {
+    await storeFetched(await api("/api/collections/membership", { timeoutMs: 1000 }));
+    up = true;
+  } catch (e) {
+    up = !!e.status; // it answered (an older server without collections)
+  }
+  const [{ cache, active }, status, { taggedItems }] = await Promise.all([readCollections(), getStatus(), getStorage("taggedItems")]);
+  if (up) await setStatus({ serverUp: true, lastCheckAt: Date.now() });
+  return { url, up, status, cache, active, allCount: Object.keys(taggedItems || {}).length };
+}
+
+// "New collection…" in the popup: made on the server (the app hears of it), then the popup's choice.
+export async function createCollection(name) {
+  const made = await api("/api/collections", { method: "POST", body: { name } });
+  await refreshCollections();
+  await setActive(made.id);
+  return made;
 }
 
 // --- Tag edits queued by the local app ---------------------------------------
@@ -391,10 +445,15 @@ export async function syncTick(reason) {
     return;
   }
   const status = await setStatus({ serverUp: true, lastCheckAt: Date.now(), serverItems: health.items });
+  // Collections: read again only when the server says they changed (health.collections_version).
+  const { cache, pending: ops } = await readCollections();
+  if (health.collections_version != null && health.collections_version !== cache.version) await refreshCollections();
   const source = health.items_source || {};
   const stale = !status.lastFullAt || Date.now() - status.lastFullAt > FULL_SYNC_EVERY_MS;
   if (status.needsFull || stale || source.kind !== "extension") {
     await fullSync(reason).catch(() => {});
+  } else if (ops.length) {
+    await pushPending(); // membership changes made while the server was off
   }
   await pullTagEdits().catch((e) => console.warn("[sync] pull failed", e.message));
   await pullPendingAdds().catch((e) => console.warn("[sync] pending adds failed", e.message));

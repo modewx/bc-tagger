@@ -58,14 +58,15 @@ export function maxOrder(items) {
 // Number the items that have no `order` yet from 1 up, skipping numbers in
 // use, in storage order (what "#" showed before it was explicit). The server
 // numbers imports above its Bandcamp item count, so 1..N stay free for these.
-// Returns how many.
+// `order: null` is on purpose: an item starred into another collection than
+// "Collection" (Phase 9), numbered only if it joins "Collection". Returns how many.
 export function fillOrder(items) {
   const taken = new Set();
   Object.values(items).forEach((it) => it && Number.isFinite(it.order) && taken.add(it.order));
   let next = 0;
   let n = 0;
   Object.values(items).forEach((it) => {
-    if (it && typeof it === "object" && !Number.isFinite(it.order)) {
+    if (it && typeof it === "object" && it.order === undefined) {
       do next++;
       while (taken.has(next));
       it.order = next;
