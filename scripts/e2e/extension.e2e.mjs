@@ -5018,19 +5018,19 @@ const extensionCaughtUp = async () => {
 const onServer = (id) => api("/api/items").then((d) => (Array.isArray(d) ? d : d.items).find((i) => i.id === id) || null);
 // The track starts unsaved (an earlier test may have saved it): set aside, here and on the server; the returned
 // function puts it back as it was.
-async function trackAside() {
-  const copy = (await storage("taggedItems")).taggedItems[TRACK] || null;
+async function trackAside(id = TRACK) {
+  const copy = (await storage("taggedItems")).taggedItems[id] || null;
   const drop = () =>
     probe.evaluate((t) => chrome.storage.local.get("taggedItems").then(({ taggedItems }) => {
       delete taggedItems[t];
       return chrome.storage.local.set({ taggedItems });
-    }), TRACK);
+    }), id);
   if (copy) await drop();
-  await waitFor(async () => !(await onServer(TRACK)), { what: "the track not on the server" });
+  await waitFor(async () => !(await onServer(id)), { what: `${id} not on the server` });
   return async () => {
     if (!copy) return drop();
-    await probe.evaluate(([t, item]) => chrome.storage.local.get("taggedItems").then(({ taggedItems }) => chrome.storage.local.set({ taggedItems: { ...taggedItems, [t]: item } })), [TRACK, copy]);
-    await waitFor(async () => !!(await onServer(TRACK)), { what: "the track back on the server" });
+    await probe.evaluate(([t, item]) => chrome.storage.local.get("taggedItems").then(({ taggedItems }) => chrome.storage.local.set({ taggedItems: { ...taggedItems, [t]: item } })), [id, copy]);
+    await waitFor(async () => !!(await onServer(id)), { what: `${id} back on the server` });
   };
 }
 const starOf = (page, id) => page.locator(`.tag-button[data-item-id="${id}"]`);
@@ -5231,5 +5231,54 @@ test("Collections in the extension: starring while the server is off works at on
     await page.close();
     await dropCollections();
     await putBack();
+  }
+});
+
+test("Collections in the extension: a track with no \"#\" that joins Collection on the server is numbered there, and the extension's next \"#\" comes after it (no collision)", async () => {
+  await dropCollections();
+  const crates = await post("/api/collections", { name: "E2E Crates" });
+  const page = await context.newPage();
+  const app = await context.newPage();
+  const putBack = [];
+  try {
+    await page.goto(ALBUM_URL);
+    await page.waitForSelector(`.tag-button[data-item-id="${TRACK}"]`, { timeout: 30000 });
+    const other = (await page.$$eval(".tag-button[data-item-id]", (bs) => bs.map((b) => b.dataset.itemId))).find((i) => i.startsWith("t") && i !== TRACK);
+    assert.ok(other, "the album's other track");
+    putBack.push(await trackAside(TRACK), await trackAside(other));
+    // A hole in Collection's "#" (a low-numbered track deleted, as happens): its highest number is then above the
+    // number of tracks, which alone no longer covers a place given on the server.
+    const saved = (await storage("taggedItems")).taggedItems;
+    const low = Object.values(saved).filter((i) => Number.isInteger(i.order) && i.id !== ALBUM).sort((a, b) => a.order - b.order)[0].id;
+    putBack.push(await trackAside(low));
+    await extensionCaughtUp();
+    // The app is open: it passes the server's collections events on to the extension.
+    await app.goto(SERVER + "/");
+    await app.waitForFunction(() => /extension connected/.test(document.getElementById("navExt").textContent));
+    // Starred into E2E Crates: saved with no "#".
+    await setStorage({ activeCollection: crates.id });
+    await starIs(page, TRACK, false);
+    await starOf(page, TRACK).click();
+    await waitFor(async () => (await membersOf(crates.id)).includes(TRACK), { what: "the track in E2E Crates" });
+    assert.equal((await storage("taggedItems")).taggedItems[TRACK].order, null);
+    // It joins Collection on the server (the app's Import to Collection): numbered there, after the last.
+    assert.equal((await post("/api/collections/0/items", { ids: [TRACK] })).added, 1);
+    const numbered = (await api("/api/health")).max_order; // counts its place in Collection
+    await waitFor(async () => (await storage("orderFloor")).orderFloor >= numbered, { what: "the extension's highest \"#\"" });
+    // A new track starred in All (into Collection, the first) is numbered after it.
+    await setStorage({ activeCollection: "all" });
+    await starIs(page, other, false);
+    await starOf(page, other).click();
+    const order = await waitFor(async () => ((await storage("taggedItems")).taggedItems[other] || {}).order, { what: "its \"#\"" });
+    assert.ok(order > numbered, `${order} after ${numbered}`);
+    await waitFor(async () => (await membersOf(0)).includes(other), { what: "the new track in Collection" });
+    const inCollection = await membersOf(0);
+    assert.ok(inCollection.indexOf(TRACK) < inCollection.indexOf(other), "in that order in Collection");
+  } finally {
+    await setStorage({ activeCollection: "all" });
+    await app.close();
+    await page.close();
+    await dropCollections();
+    for (const back of putBack.reverse()) await back();
   }
 });

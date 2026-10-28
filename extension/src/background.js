@@ -293,6 +293,9 @@ async function handleAppBridge(op, payload, sender) {
       const { cache } = await readCollections();
       if (payload.version != null && payload.version === cache.version) return { version: cache.version, read: false };
       const fresh = await refreshCollections();
+      // A track with no "#" may have joined Collection on the server (numbered there): the highest "#" again, so the
+      // next one given here comes after it.
+      await probeServer(1500);
       return { version: fresh ? fresh.version : null, read: true };
     }
     case "setItemTags": {
