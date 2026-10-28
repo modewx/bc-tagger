@@ -220,6 +220,9 @@ $(function () {
         `${res.health.items} items on the server.` +
         (own.error ? ` Ownership: ${own.error}.` : own.count != null ? ` ${own.count} owned items.` : "") +
         (st.syncWarning ? ` Note: ${st.syncWarning}.` : "") +
+        (st.droppedMembership && st.droppedMembership.length
+          ? ` ${st.droppedMembership.length} collection change(s) the server couldn't take were dropped (details in the extension's console).`
+          : "") +
         (st.lastError ? ` Last error: ${st.lastError}` : "");
     } else {
       serverDot.className = "dot down";

@@ -16,7 +16,8 @@
 
 import { withItems, serialized, getStorage, setStorage, nowIso, sameTags, laterIso, fillOrder, nextOrder, orderFloor, setOrderFloor } from "./itemsStore";
 import { CHALLENGE_TEXT, isChallengePage } from "../../shared/bandcampChallenge";
-import { readCollections, storeFetched, acceptOps, setActive } from "./collectionsStore";
+import { readCollections, storeFetched, acceptOps, removeQueued, setActive } from "./collectionsStore";
+import { splitOps, postWithOps } from "./membershipOps";
 
 // http://127.0.0.1:8765 unless the build sets BC_DEFAULT_SERVER_URL (e2e builds).
 export const DEFAULT_SERVER_URL = __DEFAULT_SERVER_URL__;
@@ -133,21 +134,41 @@ export function schedulePush(delayMs = PUSH_DEBOUNCE_MS) {
 
 export const scheduleMembershipPush = () => schedulePush(MEMBERSHIP_PUSH_MS);
 
+// Membership ops the server can't take: out of the queue for good (a malformed one would make every later sync
+// fail), logged, and kept in the sync status (the popup's server line says so); the collections read again.
+async function dropOps(ops, error) {
+  console.warn("[sync] membership changes the server can't take, dropped:", ops, error && error.message);
+  await removeQueued(ops);
+  const { droppedMembership } = await getStatus();
+  const entry = { at: Date.now(), ops, error: (error && error.message) || String(error) };
+  await setStatus({ droppedMembership: [...(droppedMembership || []), entry].slice(-20) });
+  refreshCollections();
+}
+
+// The queued membership ops that can be sent (any malformed one, from before validation, is dropped now).
+async function queuedOps() {
+  const { good, bad } = splitOps((await readCollections()).pending);
+  if (bad.length) await dropOps(bad, new Error("malformed"));
+  return good;
+}
+
+// POST /api/sync/items with the queued ops; a 422 with ops attached: the items again without them (membershipOps.js).
+function syncItems(body, ops, timeoutMs) {
+  const post = (b) => api("/api/sync/items", { method: "POST", body: b, ...(timeoutMs ? { timeoutMs } : {}) });
+  return postWithOps(post, body, ops, { accept: acceptOps, drop: dropOps });
+}
+
 // Membership changes made here ride on the item push (a new item and its collection together: the server would
 // otherwise put the item into the first collection), or go on their own; the server applies them after the items.
 async function pushPending() {
   const batch = pending;
   pending = { items: {}, deleted: new Set(), tags: false };
   const ids = Object.keys(batch.items);
-  const ops = (await readCollections()).pending;
+  const ops = await queuedOps();
   if (!ids.length && !batch.deleted.size && !batch.tags && !ops.length) return;
   try {
     if (ids.length || batch.deleted.size || ops.length) {
-      await api("/api/sync/items", {
-        method: "POST",
-        body: { items: batch.items, deleted: [...batch.deleted], full: false, ...(ops.length ? { membership: ops } : {}) },
-      });
-      await acceptOps(ops);
+      await syncItems({ items: batch.items, deleted: [...batch.deleted], full: false }, ops);
     }
     if (batch.tags) {
       // A fresh install only has the tags.json seed: don't let it replace the
@@ -183,15 +204,10 @@ export async function fullSync(reason, { force = false } = {}) {
       skipped = `kept the server's ${serverItems} items: this extension has only ${count} (use "sync" to replace them)`;
     }
   }
-  const ops = (await readCollections()).pending; // after the items, as on every push
+  const ops = await queuedOps(); // after the items, as on every push
   try {
     if (count || full || ops.length) {
-      await api("/api/sync/items", {
-        method: "POST",
-        body: { items, deleted: [], full, ...(ops.length ? { membership: ops } : {}) },
-        timeoutMs: 60000,
-      });
-      await acceptOps(ops);
+      await syncItems({ items, deleted: [], full }, ops, 60000);
     }
     if (count) await api("/api/sync/tags", { method: "POST", body: { tags: Array.isArray(tags) ? tags : [] } });
     await setStatus({

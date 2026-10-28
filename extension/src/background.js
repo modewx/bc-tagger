@@ -465,8 +465,8 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
 
   if (request.type === "setMembership") {
     // Starring (or tagging) an item that exists, or un-starring it, while a collection is shown.
-    setMembership(request.op === "remove" ? "remove" : "add", Number(request.collection), request.id).then(
-      () => sendResponse({ ok: true }),
+    setMembership(request.op, request.collection, request.id).then(
+      (r) => sendResponse(r && r.queued ? { ok: true } : { ok: false, error: "not a valid change" }),
       (e) => sendResponse({ ok: false, error: e.message })
     );
     return true;

@@ -8,6 +8,7 @@
 // the server has them.
 
 import { serialized, getStorage, setStorage } from "./itemsStore";
+import { splitOps, withoutOps } from "./membershipOps";
 
 export const ALL = "all";
 export const MAIN = 0; // "Collection": its "#" is the items' `order`
@@ -52,21 +53,26 @@ function recount(cache) {
 /**
  * Queue membership changes and show them at once. `items` (optional) is written in the same storage write, so a new
  * item and its first membership go to the server together (the server puts a new item with no membership into the
- * first collection).
+ * first collection). A malformed op is never queued (the server would refuse the whole sync with it): it's logged
+ * and left out. Resolves to {queued, dropped}.
  */
 export function queueMembership(ops, writeItems = null) {
+  const { good, bad } = splitOps(ops);
+  if (bad.length) console.warn("[collections] not queued (malformed):", bad);
   return serialized(async () => {
     const { cache, pending } = await readCollections();
-    const values = {
-      pendingMembership: [...pending, ...ops],
-      collectionsCache: recount({ ...cache, members: applyOps(cache.members, ops) }),
-    };
+    const values = {};
+    if (good.length) {
+      values.pendingMembership = [...pending, ...good];
+      values.collectionsCache = recount({ ...cache, members: applyOps(cache.members, good) });
+    }
     if (writeItems) {
       const { taggedItems } = await getStorage("taggedItems");
       const items = taggedItems || {};
       if (writeItems(items) !== false) values.taggedItems = items;
     }
-    await setStorage(values);
+    if (Object.keys(values).length) await setStorage(values);
+    return { queued: good.length, dropped: bad.length };
   });
 }
 
@@ -94,15 +100,15 @@ export function storeFetched(fetched) {
   });
 }
 
-/** The server has the first `sent` of the queue: out of it (anything queued since stays). */
-export function acceptOps(sent) {
-  if (!sent.length) return Promise.resolve();
+/** Ops done with (the server took them, or they were dropped): out of the queue (anything queued since stays). */
+export function removeQueued(done) {
+  if (!done.length) return Promise.resolve();
   return serialized(async () => {
     const { pending } = await readCollections();
-    const same = sent.every((op, i) => JSON.stringify(pending[i]) === JSON.stringify(op));
-    await setStorage({ pendingMembership: same ? pending.slice(sent.length) : pending });
+    await setStorage({ pendingMembership: withoutOps(pending, done) });
   });
 }
+export const acceptOps = removeQueued;
 
 export function setActive(v) {
   return setStorage({ activeCollection: v === ALL || v == null ? ALL : Number(v) });

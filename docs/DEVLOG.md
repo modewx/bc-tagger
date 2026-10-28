@@ -263,6 +263,12 @@ npm run test:e2e                         # Playwright e2e: own profile, server :
   that has started swaps its source at the same moment and keeps playing (`swapSource`), the others when they
   next load. "▶ preview / original / Bandcamp stream" says what the track playing is heard from (the toggle and
   `local.best.preview`). Play/pause are SVG icons (the text glyphs rendered as a square in the docked player).
+- **Phase 9 hardening: no poison queue** (coordinator): the server answers a malformed membership op with 422 and
+  writes nothing, items included, so one bad op left in `pendingMembership` would stop all syncing. Ops are now
+  checked before they're queued (`membershipOps.js`: add/remove, an integer collection id from 0, item ids) and
+  again when read; a 422 with ops attached sends the items again without them, and only if that goes through are
+  the ops dropped (console, `bcSyncStatus.droppedMembership`, the popup's server tooltip; the collections read
+  again). If the items are refused too, the ops stay and the error is as before. Unit tests: `npm run test:unit`.
 - **Phase 9: collections in the extension's tagger** (user; contract in LOCAL_COLLECTION_PLAN.md): the extension
   keeps `collectionsCache` / `activeCollection` / `pendingMembership` (`collectionsStore.js`); membership changes
   are optimistic, queued and sent as `membership` ops with the item pushes (a new item and its collection in one
