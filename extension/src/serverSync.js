@@ -1,9 +1,9 @@
 // ---------------------------------------------------------------------------
 // Sync with the local bc-tagger server (server/ in this repo).
 //
-// The extension owns the data (chrome.storage.local); the server keeps a
+// The extension owns the data (chrome.storage.local, through itemsStore.js); the server keeps a
 // mirror for the local app. We push:
-//   - item upserts/deletions as they happen (diffed from storage.onChanged),
+//   - item upserts/deletions as they happen (the store says which items each change touched),
 //   - a full snapshot on startup and periodically (the server drops anything
 //     not in it),
 //   - the tag vocabulary,
@@ -14,9 +14,10 @@
 // Status:    chrome.storage.session bcSyncStatus = {...} (shown in the popup)
 // ---------------------------------------------------------------------------
 
-import { withItems, serialized, getStorage, setStorage, nowIso, sameTags, laterIso, fillOrder, nextOrder, orderFloor, setOrderFloor } from "./itemsStore";
+import { withItems, change, read, onStoreChange, nowIso, sameTags, laterIso, fillOrder, nextOrder, orderFloorOf, setOrderFloor } from "./itemsStore";
 import { CHALLENGE_TEXT, isChallengePage } from "../../shared/bandcampChallenge";
-import { readCollections, storeFetched, acceptOps, removeQueued, setActive } from "./collectionsStore";
+import { readCollections, storeFetched, acceptOps, removeQueued, setActive, allCountOf, activeOf } from "./collectionsStore";
+import { notePush } from "./timings";
 import { splitOps, postWithOps } from "./membershipOps";
 
 // http://127.0.0.1:8765 unless the build sets BC_DEFAULT_SERVER_URL (e2e builds).
@@ -96,41 +97,22 @@ export async function probeServer(timeoutMs = 800) {
 
 // --- Item / tag pushes -------------------------------------------------------
 
-let pending = { items: {}, deleted: new Set(), tags: false };
+// The items changed since the last push (sent as they are then: upserted, or deleted if gone), and the tag list.
+let pending = { ids: new Set(), tags: false };
 let pushTimer = null;
 
-function sameJson(a, b) {
-  return JSON.stringify(a) === JSON.stringify(b);
-}
-
-// Record what changed between two taggedItems snapshots; returns it ({changed: {id: item}, deleted: [ids]}).
-export function queueItemsDiff(oldItems, newItems) {
-  oldItems = oldItems || {};
-  newItems = newItems || {};
-  const changed = {};
-  const deleted = [];
-  Object.keys(newItems).forEach((id) => {
-    if (!sameJson(oldItems[id], newItems[id])) {
-      pending.items[id] = newItems[id];
-      pending.deleted.delete(id);
-      changed[id] = newItems[id];
-    }
-  });
-  Object.keys(oldItems).forEach((id) => {
-    if (!(id in newItems)) {
-      pending.deleted.add(id);
-      delete pending.items[id];
-      deleted.push(id);
-    }
-  });
-  schedulePush();
-  return { changed, deleted };
-}
-
-export function queueTags() {
-  pending.tags = true;
-  schedulePush();
-}
+// Every change to the store: its items and tags go to the server soon after (a membership change sooner), and the
+// tag list to open app tabs at once.
+onStoreChange(({ changed, deleted, keys }) => {
+  changed.forEach((id) => pending.ids.add(id));
+  deleted.forEach((id) => pending.ids.add(id));
+  if (keys.includes("tags")) {
+    pending.tags = true;
+    read((s) => notifyAppTabs("tagsChanged", s.tags || []));
+  }
+  if (keys.includes("pendingMembership")) scheduleMembershipPush();
+  else if (changed.length || deleted.length || keys.includes("tags")) schedulePush();
+});
 
 export function schedulePush(delayMs = PUSH_DEBOUNCE_MS) {
   clearTimeout(pushTimer);
@@ -167,26 +149,29 @@ function syncItems(body, ops, timeoutMs) {
 // otherwise put the item into the first collection), or go on their own; the server applies them after the items.
 async function pushPending() {
   const batch = pending;
-  pending = { items: {}, deleted: new Set(), tags: false };
-  const ids = Object.keys(batch.items);
+  pending = { ids: new Set(), tags: false };
+  // The items as they are now (an item changed again since is sent once, as it is).
+  const { items, deleted, tags, count } = await read((s) => {
+    const out = {};
+    const gone = [];
+    batch.ids.forEach((id) => (id in s.taggedItems ? (out[id] = s.taggedItems[id]) : gone.push(id)));
+    return { items: out, deleted: gone, tags: Array.isArray(s.tags) ? s.tags : [], count: Object.keys(s.taggedItems).length };
+  });
+  const ids = Object.keys(items);
   const ops = await queuedOps();
-  if (!ids.length && !batch.deleted.size && !batch.tags && !ops.length) return;
+  if (!ids.length && !deleted.length && !batch.tags && !ops.length) return;
+  const t0 = Date.now();
   try {
-    if (ids.length || batch.deleted.size || ops.length) {
-      await syncItems({ items: batch.items, deleted: [...batch.deleted], full: false }, ops);
+    if (ids.length || deleted.length || ops.length) {
+      await syncItems({ items, deleted, full: false }, ops);
     }
-    if (batch.tags) {
-      // A fresh install only has the tags.json seed: don't let it replace the
-      // server's vocabulary.
-      const { tags, taggedItems } = await chrome.storage.local.get(["tags", "taggedItems"]);
-      if (taggedItems && Object.keys(taggedItems).length) {
-        await api("/api/sync/tags", { method: "POST", body: { tags: Array.isArray(tags) ? tags : [] } });
-      }
-    }
-    await setStatus({ lastPushAt: Date.now(), lastPushCount: ids.length + batch.deleted.size, lastError: null, serverUp: true });
-    notifyAppTabs("synced");
+    // A fresh install only has the tags.json seed: don't let it replace the server's vocabulary.
+    if (batch.tags && count) await api("/api/sync/tags", { method: "POST", body: { tags } });
+    notePush([...batch.ids], t0, Date.now());
+    await setStatus({ lastPushAt: Date.now(), lastPushCount: ids.length + deleted.length, lastError: null, serverUp: true });
   } catch (e) {
     // Server down: a full sync on the next successful contact catches up.
+    notePush([...batch.ids], t0, Date.now(), e.message);
     await setStatus({ needsFull: true, lastError: e.message, serverUp: false });
   }
 }
@@ -196,8 +181,7 @@ async function pushPending() {
 // install, a new profile) wipe the server's mirror: they then only upsert.
 // Only the popup's "sync" passes {force: true} (the app's syncNow is guarded too).
 export async function fullSync(reason, { force = false } = {}) {
-  const { taggedItems, tags } = await chrome.storage.local.get(["taggedItems", "tags"]);
-  const items = taggedItems || {};
+  const { items, tags } = await read((s) => ({ items: s.taggedItems, tags: s.tags }));
   const count = Object.keys(items).length;
   let full = true;
   let skipped = null;
@@ -224,7 +208,6 @@ export async function fullSync(reason, { force = false } = {}) {
       syncWarning: skipped,
       serverUp: true,
     });
-    notifyAppTabs("synced");
     return { items: count, full };
   } catch (e) {
     await setStatus({ needsFull: true, lastError: e.message, serverUp: false });
@@ -245,7 +228,8 @@ export async function refreshCollections(timeoutMs = 4000) {
 }
 
 // For the popup, as it opens: one localhost request (the collections read) says whether the server answers and
-// brings the collections up to date. The rest comes from storage.
+// brings the collections up to date. The rest comes from the store. All's count is every item, as in the app (the
+// extension's and those only in a collection, e.g. Other items): with one collection, the same as it.
 export async function popupState() {
   const url = await getServerUrl();
   let up = false;
@@ -255,9 +239,9 @@ export async function popupState() {
   } catch (e) {
     up = !!e.status; // it answered (an older server without collections)
   }
-  const [{ cache, active }, status, { taggedItems }] = await Promise.all([readCollections(), getStatus(), getStorage("taggedItems")]);
+  const [state, status] = await Promise.all([read((s) => ({ cache: s.collectionsCache || { list: [] }, active: activeOf(s), allCount: allCountOf(s) })), getStatus()]);
   if (up) await setStatus({ serverUp: true, lastCheckAt: Date.now() });
-  return { url, up, status, cache, active, allCount: Object.keys(taggedItems || {}).length };
+  return { url, up, status, ...state };
 }
 
 // "New collection…" in the popup: made on the server (the app hears of it), then the popup's choice.
@@ -275,8 +259,9 @@ export async function pullTagEdits() {
   if (!Array.isArray(edits) || !edits.length) return { applied: 0, dropped: 0 };
   let applied = 0;
   const dropped = [];
-  // Oldest first, so the newest edit for an item wins. onChanged pushes the
+  // Oldest first, so the newest edit for an item wins. The store pushes the
   // applied tags back to the server.
+  const touched = edits.map((edit) => edit.item_id || edit.id);
   await withItems((items) => {
     edits.forEach((edit) => {
       const id = edit.item_id || edit.id;
@@ -290,7 +275,7 @@ export async function pullTagEdits() {
       }
     });
     if (!applied) return { ok: false, reason: "nothing to apply" }; // skip the write
-  });
+  }, touched);
   await api("/api/tag-edits/ack", { method: "POST", body: { ids: edits.map((e) => e.edit_id) } });
   if (dropped.length) console.warn("[sync] dropped queued tag edits for unknown items", dropped);
   await setStatus({ lastPullAt: Date.now(), lastPullApplied: applied });
@@ -308,7 +293,7 @@ export async function pullPendingAdds() {
   let added = 0;
   let merged = 0;
   const vocab = [];
-  const floor = await orderFloor();
+  const floor = await read(orderFloorOf);
   await withItems((items) => {
     // "#": the server numbers an import's new items in row order; else they go last here.
     fillOrder(items); // older items first, should they still have none
@@ -340,15 +325,14 @@ export async function pullPendingAdds() {
   });
   let newTags = 0;
   if (vocab.length) {
-    await serialized(async () => {
-      const { tags } = await getStorage("tags");
-      const current = Array.isArray(tags) ? tags : [];
+    await change((s) => {
+      const current = Array.isArray(s.tags) ? s.tags : [];
       const next = [...current];
       vocab.forEach((t) => {
         if (t && !next.includes(t)) next.push(t);
       });
       newTags = next.length - current.length;
-      if (newTags) await setStorage({ tags: next }); // onChanged pushes the vocabulary back
+      return newTags ? { values: { tags: next } } : { skip: true }; // the store pushes the vocabulary back
     });
   }
   await api("/api/tagger/pending-adds/ack", { method: "POST", body: { ids: adds.map((e) => e.add_id) } });

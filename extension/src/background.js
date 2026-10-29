@@ -9,25 +9,22 @@ import {
   linkImportRow,
   openImportRows,
   bandcampLimits,
-  queueItemsDiff,
-  queueTags,
   refreshOwnership,
   sameServerOrigin,
   syncTick,
-  scheduleMembershipPush,
-  notifyAppTabs,
   refreshCollections,
   popupState,
   createCollection,
 } from "./serverSync";
-import { MAIN, queueMembership, forgetItem, setActive, readCollections } from "./collectionsStore";
-import { serialized, withItems, getStorage, setStorage, nowIso, sameTags, fillOrder, nextOrder, orderFloor } from "./itemsStore";
+import { ALL, MAIN, queueMembership, removeItem, setActive, readCollections, activeOf, memberIndex, sortedList, firstCollection } from "./collectionsStore";
+import { withItems, change, read, flush, replaceItems, rev, tagsRev, nowIso, sameTags, fillOrder, nextOrder, orderFloorOf } from "./itemsStore";
+import { noteOp, noteScreen, timingsText } from "./timings";
 import { isChallengePage } from "../../shared/bandcampChallenge";
 
 // ---------------------------------------------------------------------------
 // Tag vocabulary helpers
 //
-// Data lives in chrome.storage.local:
+// Data lives in chrome.storage.local, read and written only here (itemsStore.js keeps it in memory):
 //   - taggedItems: { [id]: { ...metadata, tags: string[] } }  (the saved tracks)
 //   - tags:        string[]                                    (the vocabulary / dropdown options)
 //
@@ -62,37 +59,36 @@ function unionTags(...lists) {
   return out;
 }
 
+const seedTags = () =>
+  fetch(chrome.runtime.getURL("tags.json"))
+    .then((response) => response.json())
+    .catch(() => []);
+
+// The tag list as a change (pages see it when they're next shown: no broadcast to open tabs).
+const setTags = (tags) => change((s) => (JSON.stringify(s.tags) === JSON.stringify(tags) ? { skip: true } : { values: { tags } }));
+
 // Restore/maintain the complete vocabulary: tags.json ∪ existing ∪ used-by-tracks.
-function ensureTagsComplete(cb) {
-  const finish = (merged) => {
-    chrome.storage.local.set({ tags: merged }, () => cb && cb(merged));
-  };
-  chrome.storage.local.get(["tags", "taggedItems"], ({ tags, taggedItems }) => {
-    const existing = Array.isArray(tags) ? tags : [];
-    const used = [...usedTagsFrom(taggedItems)];
-    fetch(chrome.runtime.getURL("tags.json"))
-      .then((response) => response.json())
-      .then((seed) => finish(unionTags(seed, existing, used)))
-      .catch(() => finish(unionTags(existing, used))); // still guarantee used tags
+async function ensureTagsComplete() {
+  const seed = await seedTags(); // still guarantee used tags without it
+  return change((s) => {
+    const merged = unionTags(seed, Array.isArray(s.tags) ? s.tags : [], [...usedTagsFrom(s.taggedItems)]);
+    return JSON.stringify(merged) === JSON.stringify(s.tags) ? { skip: true } : { values: { tags: merged } };
   });
 }
 
-// A small notice to every tab's content script (tabs without one ignore it). Content scripts don't listen to
-// storage.onChanged: it would hand each of them the old and new taggedItems (1.6 MB each) on every write.
-function tellTabs(msg) {
-  chrome.tabs.query({}, (tabs) => {
-    tabs.forEach((tab) => {
-      chrome.tabs.sendMessage(tab.id, msg, () => {
-        void chrome.runtime.lastError; // ignore tabs with no content script
-      });
-    });
+// The vocabulary for a dropdown, unioned with every tag a saved track uses so a dropdown can always represent (and
+// never drop) a track's tags; kept when that adds any. Nothing stored yet: seeded from tags.json.
+async function vocabulary() {
+  const out = await change((s) => {
+    const existing = Array.isArray(s.tags) ? s.tags : [];
+    const merged = unionTags(existing, [...usedTagsFrom(s.taggedItems)]);
+    if (!merged.length) return { skip: true, result: null };
+    return merged.length !== existing.length ? { values: { tags: merged }, result: merged } : { skip: true, result: existing };
   });
-}
-
-// Push the current tag list to every tab so open Bandcamp pages can refresh
-// their annotation dropdowns without a reload.
-function broadcastTags(tags) {
-  tellTabs({ type: "tagsUpdated", tags });
+  if (out) return out;
+  const seeded = unionTags(await seedTags());
+  await setTags(seeded);
+  return seeded;
 }
 
 // ---------------------------------------------------------------------------
@@ -101,31 +97,41 @@ function broadcastTags(tags) {
 
 // Merge refreshed stream URLs back in: { [id]: { "mp3-128": url } }.
 function updateItemFiles(files) {
+  const ids = [];
   return withItems((items) => {
     Object.entries(files || {}).forEach(([id, file]) => {
-      if (items[id]) items[id].file = file;
+      if (items[id]) {
+        items[id].file = file;
+        ids.push(id);
+      }
     });
-  });
+  }, ids);
 }
 
 // Merge rebuilt thumbnail URLs back in: { [id]: art_url }.
 function updateItemArt(art) {
+  const ids = [];
   return withItems((items) => {
     Object.entries(art || {}).forEach(([id, art_url]) => {
-      if (items[id]) items[id].art_url = art_url;
+      if (items[id]) {
+        items[id].art_url = art_url;
+        ids.push(id);
+      }
     });
-  });
+  }, ids);
 }
 
 // Merge arbitrary fields into items without reordering: { [id]: {..} }.
 function updateItemFields(updates) {
+  const ids = [];
   return withItems((items) => {
     Object.entries(updates || {}).forEach(([id, fields]) => {
       if (items[id] && fields && typeof fields === "object") {
         Object.assign(items[id], fields);
+        ids.push(id);
       }
     });
-  });
+  }, ids);
 }
 
 // Update one item's tags (inline editing from the collection page / local app).
@@ -168,40 +174,47 @@ function ensureOrder() {
   return withItems((items) => (fillOrder(items) ? { ok: true } : { ok: false, reason: "all numbered" }));
 }
 
-// Starring / tagging on a Bandcamp page: a new item, or new tags, is a modification. `collection`: the collection it
-// joins now (null: none named; the server puts a new one into the first collection). "#" is Collection's: a new
-// item gets the next number when it joins Collection (or no collection is named), none (`order: null`) when it's
-// starred into another one, until it joins Collection (setMembership); an item keeps its number.
-async function saveTaggedItem(incoming, collection = null) {
-  const floor = await orderFloor();
-  const numbered = collection == null || collection === MAIN;
-  const write = (items) => {
+// The collections a page names (`collections: [ids]`, or the older `collection: id`), as integers.
+function collectionsOf(request) {
+  const list = Array.isArray(request.collections) ? request.collections : Number.isInteger(request.collection) ? [request.collection] : [];
+  return [...new Set(list.filter(Number.isInteger))];
+}
+
+// Starring / tagging on a Bandcamp page: a new item, or new tags, is a modification. `collections`: the collections
+// it joins now (none: the server puts a new one into the first collection; All: every collection). "#" is
+// Collection's: a new item gets the next number when it joins Collection (or no collection is named), none
+// (`order: null`) when it's starred into others only, until it joins Collection (setMembership); an item keeps its
+// number. Queued at once (the store's queue), so a page's next read sees it.
+function saveTaggedItem(incoming, collections = []) {
+  const numbered = !collections.length || collections.includes(MAIN);
+  const ids = [incoming.id];
+  const write = (items, s) => {
     const prev = items[incoming.id];
     const item = { ...incoming };
     item.modified_at = !prev || !sameTags(prev.tags, item.tags) ? nowIso() : prev.modified_at || item.modified_at;
     if (!item.modified_at) delete item.modified_at;
-    fillOrder(items); // older items first, should they still have none
+    fillOrder(items, ids); // older items first, should they still have none
     if (prev && prev.order != null) item.order = prev.order;
-    else item.order = numbered ? nextOrder(items, floor) : null;
+    else item.order = numbered ? nextOrder(items, orderFloorOf(s)) : null;
     items[item.id] = item;
   };
-  if (collection == null) return withItems(write);
-  return queueMembership([{ op: "add", collection_id: collection, ids: [incoming.id] }], write);
+  if (!collections.length) return withItems(write, ids);
+  return queueMembership(collections.map((cid) => ({ op: "add", collection_id: cid, ids: [incoming.id] })), write, ids);
 }
 
-// An item joins or leaves a collection (tags kept). Joining Collection numbers it, if it has no "#" yet.
-async function setMembership(op, collection, id) {
-  const floor = await orderFloor();
+// An item joins or leaves collections (tags kept). Joining Collection numbers it, if it has no "#" yet.
+function setMembership(op, collections, id) {
+  const ids = [id];
   const number =
-    op === "add" && collection === MAIN
-      ? (items) => {
+    op === "add" && collections.includes(MAIN)
+      ? (items, s) => {
           const it = items[id];
           if (!it || it.order != null) return false;
-          fillOrder(items);
-          it.order = nextOrder(items, floor);
+          fillOrder(items, ids);
+          it.order = nextOrder(items, orderFloorOf(s));
         }
       : null;
-  return queueMembership([{ op, collection_id: collection, ids: [id] }], number);
+  return queueMembership(collections.map((cid) => ({ op, collection_id: cid, ids: [id] })), number, ids);
 }
 
 function updateItemTags(id, tags) {
@@ -211,7 +224,71 @@ function updateItemTags(id, tags) {
     if (!sameTags(items[id].tags, next)) items[id].modified_at = nowIso();
     items[id].tags = next;
     return { ok: true };
+  }, [id]);
+}
+
+// What a page shows of its own items (`ids`): whether each is saved (and as what), the collections each is in, the
+// collection shown and the list. `since`: the version the page has; unchanged, one small answer.
+function pageState(ids, since) {
+  return read((s) => {
+    const now = rev();
+    if (since && since === now) return { rev: now, same: true };
+    const index = memberIndex(s);
+    const items = {};
+    const member = {};
+    (ids || []).forEach((id) => {
+      if (s.taggedItems[id]) items[id] = s.taggedItems[id];
+      const m = index.get(id);
+      if (m) member[id] = m;
+    });
+    const list = sortedList(s.collectionsCache).map(({ id, name, pos }) => ({ id, name, pos }));
+    return { rev: now, active: activeOf(s), list, items, member };
   });
+}
+
+// The bundled collection page: the items of the collection shown (All: every item here), and the versions.
+function shownItems() {
+  return read((s) => {
+    const active = activeOf(s);
+    let items = s.taggedItems;
+    if (active !== ALL && active != null) {
+      items = {};
+      ((s.collectionsCache.members || {})[String(active)] || []).forEach((id) => id in s.taggedItems && (items[id] = s.taggedItems[id]));
+    }
+    return { rev: rev(), tagsRev: tagsRev(), active, items };
+  });
+}
+
+// New items saved without naming a collection (an import, a test's setup) go into the first collection, as the
+// server puts them: said in the extension's copy at once (an op, sent with them), so pages showing a collection
+// list them before the next read from the server.
+async function intoFirstCollection(ids) {
+  const first = ids.length ? await read((s) => firstCollection(s.collectionsCache)) : null;
+  if (first) await queueMembership([{ op: "add", collection_id: first.id, ids }]);
+}
+
+// Keys a test (or a repair) writes as given, through the store: the items' differences are pushed as usual.
+async function writeStorage(values) {
+  const { taggedItems, bcServer, ...rest } = values || {};
+  if (bcServer !== undefined) await setServerUrl(bcServer && bcServer.url);
+  if (taggedItems) {
+    const had = await read((s) => new Set(Object.keys(s.taggedItems)));
+    await replaceItems(taggedItems, rest);
+    await intoFirstCollection(Object.keys(taggedItems).filter((id) => !had.has(id)));
+  } else if (Object.keys(rest).length) await change(() => ({ values: rest })).then(flush);
+  return { ok: true };
+}
+
+// The popup's server URL (a setting, not the store's): saved, then a sync with that server.
+async function setServerUrl(url) {
+  await chrome.storage.local.set({ bcServer: url ? { url } : null });
+  syncTick("server changed");
+}
+
+// A tagger action reached here: the timing log (timings.js), when the page sent its id.
+function noteAction(request, kind, ids, sender) {
+  if (!request.opId) return;
+  noteOp({ opId: request.opId, kind, page: request.page || (sender.tab ? "tab" : "extension page"), widgets: request.widgets, ids });
 }
 
 // ---------------------------------------------------------------------------
@@ -238,10 +315,11 @@ async function importData(data, mode) {
   const seed = await fetch(chrome.runtime.getURL("tags.json"))
     .then((r) => r.json())
     .catch(() => []);
-  const floor = await orderFloor();
-  // Read and write inside the queue so no other update lands in between.
-  return serialized(async () => {
-    const { taggedItems: existing = {}, tags: existingTags = [] } = await getStorage(["taggedItems", "tags"]);
+  const floor = await read(orderFloorOf);
+  // Read, then replace (the store's queue keeps other changes from landing in between, all but a page's star in the
+  // same instant, which the file's copy replaces anyway).
+  return (async () => {
+    const { existing, existingTags } = await read((s) => ({ existing: s.taggedItems, existingTags: Array.isArray(s.tags) ? s.tags : [] }));
     let taggedItems;
     if (mode === "replace") taggedItems = incoming;
     else if (mode === "keep") taggedItems = { ...incoming, ...existing };
@@ -268,10 +346,10 @@ async function importData(data, mode) {
       Array.isArray(data.tags) ? data.tags : [],
       [...usedTagsFrom(taggedItems)]
     );
-    await setStorage({ taggedItems, tags });
-    broadcastTags(tags);
+    await replaceItems(taggedItems, { tags });
+    await intoFirstCollection(Object.keys(taggedItems).filter((id) => !(id in existing)));
     return { ok: true, items: Object.keys(taggedItems).length, tags: tags.length };
-  });
+  })();
 }
 
 // ---------------------------------------------------------------------------
@@ -306,6 +384,7 @@ async function handleAppBridge(op, payload, sender) {
       return { version: fresh ? fresh.version : null, read: true };
     }
     case "setItemTags": {
+      noteAction(payload, "tags", [payload.id], sender);
       const res = await updateItemTags(payload.id, payload.tags);
       if (!res.ok) throw new Error(res.reason || "not saved");
       return res;
@@ -356,6 +435,8 @@ async function handleAppBridge(op, payload, sender) {
     }
     case "status":
       return { serverUrl: await getServerUrl(), status: await getStatus() };
+    case "timing":
+      return noteScreen(payload.opId, payload.screenMs);
     default:
       throw new Error(`unknown op ${op}`);
   }
@@ -365,33 +446,8 @@ async function handleAppBridge(op, payload, sender) {
 // Server sync triggers
 // ---------------------------------------------------------------------------
 
-// The one storage listener with the whole store in it (this worker's): pushes to the server, and small notices to
-// the pages (what changed, not the store).
-chrome.storage.onChanged.addListener((changes, area) => {
-  if (area !== "local") return;
-  if (changes.taggedItems) {
-    const diff = queueItemsDiff(changes.taggedItems.oldValue, changes.taggedItems.newValue);
-    const n = Object.keys(diff.changed).length + diff.deleted.length;
-    // (A bulk change, e.g. an import: the pages read the store again, once, rather than get it all in a notice.)
-    if (n > 200) tellTabs({ type: "itemsChanged", reload: true });
-    else if (n) tellTabs({ type: "itemsChanged", ...diff });
-  }
-  if (changes.tags) {
-    queueTags();
-    const tags = changes.tags.newValue || [];
-    broadcastTags(tags);
-    notifyAppTabs("tagsChanged", tags);
-  }
-  if (changes.activeCollection || changes.collectionsCache) {
-    getStorage(["activeCollection", "collectionsCache"]).then(({ activeCollection, collectionsCache }) =>
-      tellTabs({ type: "collectionsShown", active: activeCollection == null ? "all" : activeCollection, cache: collectionsCache || null })
-    );
-  }
-  // A membership change on its own (an item that exists already joins or leaves a collection).
-  const ops = changes.pendingMembership;
-  if (ops && ((ops.newValue || []).length > (ops.oldValue || []).length)) scheduleMembershipPush();
-  if (changes.bcServer) syncTick("server changed");
-});
+// No storage.onChanged listener anywhere in the extension: Chrome would copy every write (the old and new store) to
+// each context listening. This worker is the only writer; it knows what each change touched (itemsStore.js).
 
 // Every 30 s: catch up / pull queued tag edits (see syncTick).
 chrome.alarms.create("bc-sync", { periodInMinutes: 0.5 });
@@ -457,12 +513,7 @@ async function refreshContentScripts() {
 
 chrome.runtime.onInstalled.addListener(() => {
   refreshContentScripts();
-  chrome.storage.local.get("taggedItems", ({ taggedItems }) => {
-    if (!taggedItems) {
-      chrome.storage.local.set({ taggedItems: {} });
-    }
-  });
-  ensureTagsComplete();
+  ensureTagsComplete(); // (the store writes an empty taggedItems when there's none)
   ensureOrder();
   syncTick("installed");
 });
@@ -479,21 +530,36 @@ chrome.runtime.onStartup.addListener(() => {
 // ---------------------------------------------------------------------------
 
 chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
+  // Every change is queued in the store as the message arrives (no await before it), so a page's next read sees it.
   if (request.type === "getTaggedItems") {
-    chrome.storage.local.get("taggedItems", ({ taggedItems }) => {
-      sendResponse(taggedItems || {});
-    });
+    read((s) => s.taggedItems).then(sendResponse);
+    return true;
+  }
+
+  if (request.type === "pageState") {
+    // A page shown or focused (or just loaded): its items' state, or "same" when nothing changed since `rev`.
+    pageState(request.ids, request.rev).then(sendResponse);
+    return true;
+  }
+
+  if (request.type === "tagsState") {
+    // The tag list, unless the page has this version.
+    if (request.rev && request.rev === tagsRev()) sendResponse({ rev: tagsRev(), same: true });
+    else vocabulary().then((tags) => sendResponse({ rev: tagsRev(), tags }));
     return true;
   }
 
   if (request.type === "addTaggedItem") {
-    saveTaggedItem(request.item, Number.isInteger(request.collection) ? request.collection : null);
-    return false;
+    const item = request.item || {};
+    noteAction(request, request.kind || "star", [item.id], sender);
+    saveTaggedItem(item, collectionsOf(request)).then(() => sendResponse({ ok: true }), (e) => sendResponse({ ok: false, error: e.message }));
+    return true;
   }
 
   if (request.type === "setMembership") {
-    // Starring (or tagging) an item that exists, or un-starring it, while a collection is shown.
-    setMembership(request.op, request.collection, request.id).then(
+    // Starring (or tagging) an item that exists, or un-starring it, in a collection (in All: every collection).
+    noteAction(request, request.kind || (request.op === "add" ? "star" : "unstar"), [request.id], sender);
+    setMembership(request.op, collectionsOf(request), request.id).then(
       (r) => sendResponse(r && r.queued ? { ok: true } : { ok: false, error: "not a valid change" }),
       (e) => sendResponse({ ok: false, error: e.message })
     );
@@ -501,11 +567,46 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
   }
 
   if (request.type === "removeTaggedItem") {
-    // Un-starring in All: the item and its tags go, from every collection.
-    withItems((items) => {
-      delete items[request.id];
-    }).then(() => forgetItem(request.id));
+    // Un-starring in All: the item and its tags go, from every collection (one change).
+    noteAction(request, "unstar", [request.id], sender);
+    removeItem(request.id).then(() => sendResponse({ ok: true }));
+    return true;
+  }
+
+  if (request.type === "flushNow") {
+    // A page that made changes is hidden or closing: write them now.
+    flush().then(() => sendResponse({ ok: true }));
+    return true;
+  }
+
+  if (request.type === "timing") {
+    noteScreen(request.opId, request.screenMs);
     return false;
+  }
+
+  if (request.type === "getTimings") {
+    timingsText().then((text) => sendResponse({ text }));
+    return true;
+  }
+
+  if (request.type === "revs") {
+    sendResponse({ rev: rev(), tagsRev: tagsRev() });
+    return false;
+  }
+
+  if (request.type === "shownItems") {
+    shownItems().then(sendResponse);
+    return true;
+  }
+
+  if (request.type === "writeStorage") {
+    writeStorage(request.values).then(sendResponse, (e) => sendResponse({ ok: false, error: e.message }));
+    return true;
+  }
+
+  if (request.type === "setServerUrl") {
+    setServerUrl(request.url).then(() => sendResponse({ ok: true }));
+    return true;
   }
 
   if (request.type === "popupState") {
@@ -542,6 +643,7 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
   }
 
   if (request.type === "updateTaggedItemTags") {
+    noteAction(request, "tags", [request.id], sender);
     updateItemTags(request.id, request.tags).then(sendResponse);
     return true;
   }
@@ -621,59 +723,27 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
   }
 
   if (request.type === "getTags") {
-    // Return the vocabulary, defensively unioned with every tag used by saved
-    // tracks so a dropdown can always represent (and never drop) a track's tags.
-    chrome.storage.local.get(["tags", "taggedItems"], ({ tags, taggedItems }) => {
-      const existing = Array.isArray(tags) ? tags : [];
-      const used = [...usedTagsFrom(taggedItems)];
-      const merged = unionTags(existing, used);
-
-      if (merged.length > 0) {
-        if (merged.length !== existing.length) {
-          chrome.storage.local.set({ tags: merged });
-        }
-        sendResponse(merged);
-      } else {
-        // Nothing stored yet: seed from tags.json.
-        fetch(chrome.runtime.getURL("tags.json"))
-          .then((response) => response.json())
-          .then((seed) => {
-            const seeded = unionTags(seed, used);
-            chrome.storage.local.set({ tags: seeded });
-            sendResponse(seeded);
-          })
-          .catch(() => sendResponse(merged));
-      }
-    });
+    // The vocabulary, defensively unioned with every tag used by saved tracks so a dropdown can always represent
+    // (and never drop) a track's tags.
+    vocabulary().then(sendResponse);
     return true;
   }
 
   if (request.type === "addTag") {
     const name = (request.tag || "").trim();
-    chrome.storage.local.get("tags", ({ tags }) => {
-      const current = Array.isArray(tags) ? tags : [];
-      if (!name) {
-        sendResponse({ ok: false, reason: "empty" });
-        return;
-      }
-      if (current.includes(name)) {
-        sendResponse({ ok: false, reason: "exists" });
-        return;
-      }
+    change((s) => {
+      const current = Array.isArray(s.tags) ? s.tags : [];
+      if (!name) return { skip: true, result: { ok: false, reason: "empty" } };
+      if (current.includes(name)) return { skip: true, result: { ok: false, reason: "exists" } };
       const updated = [...current, name];
-      chrome.storage.local.set({ tags: updated }, () => {
-        broadcastTags(updated);
-        sendResponse({ ok: true, tags: updated });
-      });
-    });
+      return { values: { tags: updated }, result: { ok: true, tags: updated } };
+    }).then(sendResponse);
     return true;
   }
 
   if (request.type === "updateTags") {
-    chrome.storage.local.set({ tags: request.tags }, () => {
-      broadcastTags(request.tags);
-    });
-    return false;
+    setTags(Array.isArray(request.tags) ? request.tags : []).then(() => sendResponse({ ok: true }));
+    return true;
   }
 
   return false;

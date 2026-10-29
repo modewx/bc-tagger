@@ -254,6 +254,77 @@ npm run test:e2e                         # Playwright e2e: own profile, server :
 
 ### 2026-10-28
 
+- **Many tabs open: one owner of the data, nothing sent to tabs that aren't in use.**
+  - The user: un-starring and adding tags were slow, and unrelated Bandcamp tabs jumped to the top of the CPU
+    list for a few seconds.
+  - The cause, from the user's trace (found by the coordinator): each write of `taggedItems` made Chrome copy the
+    old and new store (about 3.2 MB) to every page listening to `storage.onChanged`. That happened on the browser's
+    main thread, the same thread that routes typing. With dozens of tabs open, it blocked that thread for
+    1.2–1.7 s at a time.
+  - **The worker owns the data ("many to one", `itemsStore.js`).**
+    - It reads storage once per worker life and keeps the data in memory.
+    - A change is applied in memory at once, then written with every other change in one `set`, 400 ms after the
+      last change (at most 2 s after the first).
+    - Until that write, the change is also in a small `opJournal` key. A worker that starts after one stopped
+      before writing replays it.
+    - Nothing in the extension listens to `storage.onChanged`, the worker included. The worker knows what each
+      change touched, and the server pushes come from that.
+    - Un-star is one change: the item and its memberships.
+    - Tests and repairs write through it too (`writeStorage`).
+  - **Pages are clients.**
+    - A Bandcamp tab asks for the state of its own items when it loads, and again when it's shown or focused. It
+      checks the version first: one small answer when nothing changed.
+    - It asks for the tag list when it's shown or a dropdown opens.
+    - No tab is ever sent anything, so a tab in the background does nothing.
+    - The tab where the user acts draws the change at once, sends it, and asks for the write when it's hidden or
+      closed.
+    - The popup and the bundled collection page ask the worker too, with no storage reads. The app gets the tag
+      list through its bridge.
+  - **The app's collection** patches only the rows the server's `item` events name (`/api/items?ids=`) instead of
+    reading all ~1,100 again. Rows added, removed or renumbered go in or out in place.
+  - **chosen's search box** no longer adds a div to `<body>` and measures it on every key, which cost a page-wide
+    style and layout per key. It's sized from the text's length.
+  - **Phase 9b:**
+    - The first collection is the default, and a stored "all" from before resets to it.
+    - All is a mode of its own:
+      - a star puts the track into every collection;
+      - a star is filled when the track is in any collection;
+      - un-starring deletes the track from all of them, asking first when it's in 2 or more;
+      - a tag on an unstarred track stars it everywhere.
+    - In All, the stars are amber and marked "all", and the popup says what All does.
+    - All's count is every item, as in the app: Collection's count plus the items in no collection.
+    - New items saved without naming a collection (an import) go into the first one, in the extension's copy at
+      once.
+  - **Copy timings** (popup) copies the last 100 actions with their times: on screen, queue, write and push, plus
+    the page, its widgets and the Bandcamp tabs open.
+  - **Measured with `scripts/perf/tabs.perf.mjs` (new).**
+    - Setup: 30 background tabs and one in front, all of the user's own fan collection page (a local file, not
+      committed); an app tab; 1,070 items; a browser-wide trace per action.
+    - Medians of 3 runs, in ms. Each cell reads 65f65aa → this change.
+    - The background tabs' CPU over the same window with no action: 65f65aa 98 / 4,588, now 533 / 4,089.
+    - Rounds 1 and 2 agree.
+
+    | | normal CPU | Bandcamp tabs at 6× |
+    |---|---|---|
+    | star on screen | 44 → **15** | 119 → **19** |
+    | star: longest task on the browser's main thread | 717 → **4** | 992 → **2** |
+    | star: the background tabs' CPU | 7,571 → **396** | 27,919 → **6,592** |
+    | star: the front tab's CPU | 75 → 7 | 300 → 25 |
+    | star at the server | 1,064 → 405 | 1,409 → 431 |
+    | un-star on screen | 44 → 16 | 79 → 16 |
+    | un-star: longest browser task | 528 → **2** | 881 → **6** |
+    | un-star: the background tabs' CPU | 3,982 → **438** | 30,634 → **5,312** |
+    | typing: slowest key / Enter | 16 / 16 → 24 / 16 | 88 / 64 → **40 / 32** |
+    | typing: longest browser task | 527 → **8** | 868 → **9** |
+    | typing: the background tabs' CPU | 10,812 → **62** | 37,790 → **4,001** |
+    | typing: the front tab's CPU | 204 → 87 | 1,163 → 238 |
+
+  - **Left as it is:** an app tab showing all ~1,100 rows *on screen* repaints the table for about 90 ms per frame
+    when a row changes. The trace shows its JavaScript at about 10 ms, but 600–650 ms of paint over 3 frames.
+    - It runs in its own process: the Bandcamp tab and the browser's main thread don't feel it.
+    - An app tab behind other tabs doesn't paint, and its event stream closes while it's hidden.
+    - The fix would be drawing only the visible rows.
+
 - **Speed of stars and tags** (user: a star took seconds, letters typed after Enter appeared a second later).
   Measured first with `scripts/perf/extension.perf.mjs` (new): a recorded album page, a 1,070-item store
   (1.6 MB), the pre-Phase-9 server like the user's, no network. It compares before Phase 9 (`ab310d9`), `65f65aa`
@@ -266,7 +337,7 @@ npm run test:e2e                         # Playwright e2e: own profile, server :
     - The content script keeps the page's items in memory (read once with the page). A star or a tag change is
       decided from them at once, and the star is drawn before anything is sent.
     - Pages and the app bridge no longer listen to `storage.onChanged`. The worker, now the one listener, sends
-      small notices instead:
+      small notices instead (replaced later the same day: nothing is sent, pages ask; see above):
       - `itemsChanged {changed, deleted}` (over 200 changes, `reload`: the page reads the store once);
       - `collectionsShown`;
       - `tagsUpdated`;

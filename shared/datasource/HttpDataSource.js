@@ -59,9 +59,21 @@ export class HttpDataSource {
   }
 
   async getItems() {
+    this.sources = {};
+    return this._items("");
+  }
+
+  // Only these items (those the server just announced), in the collection shown: an id missing from the answer is
+  // gone from it.
+  async getItemsById(ids) {
+    return this._items(`ids=${ids.map(encodeURIComponent).join(",")}`);
+  }
+
+  async _items(query) {
     const one = this.collection != null && this.collection !== "all";
+    const params = [query, one ? `collection=${encodeURIComponent(this.collection)}` : ""].filter(Boolean).join("&");
     const [data, pending] = await Promise.all([
-      apiJson(one ? `/api/items?collection=${encodeURIComponent(this.collection)}` : "/api/items"),
+      apiJson(params ? `/api/items?${params}` : "/api/items"),
       apiJson("/api/tag-edits/pending").catch(() => []),
     ]);
     // Items with a queued edit the extension hasn't applied yet (the server
@@ -69,7 +81,7 @@ export class HttpDataSource {
     const pendingIds = new Set((pending || []).map((e) => e.item_id || e.id));
     const list = Array.isArray(data) ? data : (data && data.items) || [];
     const items = {};
-    this.sources = {};
+    this.sources = this.sources || {};
     list.forEach((it) => {
       if (!it || it.id == null) return;
       this.sources[it.id] = it.source || "bandcamp";
@@ -79,7 +91,7 @@ export class HttpDataSource {
     return items;
   }
 
-  async setItemTags(id, tags) {
+  async setItemTags(id, tags, meta = {}) {
     // `other` items belong to the server, not the extension: the server
     // applies their edits right away.
     if ((this.sources && this.sources[id] === "other") || /^o[0-9a-f]+$/.test(id)) {
@@ -92,7 +104,7 @@ export class HttpDataSource {
     }
     if (this.bridge.connected) {
       try {
-        await this.bridge.call("setItemTags", { id, tags });
+        await this.bridge.call("setItemTags", { ...meta, id, tags });
         return { ok: true };
       } catch (e) {
         // The extension doesn't have this item (it only exists on the server):
@@ -110,6 +122,11 @@ export class HttpDataSource {
       console.error("[tags] could not queue the edit", e);
       return { ok: false, error: e.message };
     }
+  }
+
+  // The extension's timing log: this page's time from an edit to the screen.
+  noteTiming(opId, screenMs) {
+    if (this.bridge.connected) this.bridge.call("timing", { opId, screenMs }).catch(() => {});
   }
 
   // Refreshed links/art/fields are caches: save them through the extension when
@@ -159,15 +176,24 @@ export class HttpDataSource {
     this.events.on("tags", () => this.getTags().then(cb).catch(() => {}));
   }
 
-  // The server announces changed items (sync pushes, jobs); bursts (a full
-  // sync announces every item) collapse into one reload.
+  // The server announces changed items (sync pushes, jobs), each by id; a burst collapses into one call:
+  // `cb(ids)` for those items only, or `cb(null)` for everything again (ownership, or a burst of more than 200).
   onItemsChanged(cb) {
     let t = null;
-    const later = () => {
+    let ids = new Set();
+    let all = false;
+    const later = (data) => {
+      if (data && data.id != null) ids.add(String(data.id));
+      else all = true;
       clearTimeout(t);
-      t = setTimeout(cb, 400);
+      t = setTimeout(() => {
+        const batch = all || ids.size > 200 ? null : [...ids];
+        ids = new Set();
+        all = false;
+        cb(batch);
+      }, 400);
     };
     this.events.on("item", later);
-    this.events.on("ownership", later);
+    this.events.on("ownership", () => later(null));
   }
 }

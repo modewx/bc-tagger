@@ -1,5 +1,6 @@
 // DataSource for extension pages: talks to the background script, which owns
-// chrome.storage.local.
+// chrome.storage.local (this page never reads it or listens to it: it asks the
+// worker, and catches up when it's shown or focused).
 //
 // DataSource interface (also implemented by HttpDataSource):
 //   init()                      -> Promise           one-time setup before the first load
@@ -43,22 +44,22 @@ export class ExtensionDataSource {
     return send({ type: "getTags" });
   }
 
-  // The collection chosen in the popup ("all", or a collection: its members, from the extension's copy).
+  // The collection chosen in the popup (a collection: its members; All: every item), from the worker.
   getItems() {
-    return Promise.all([
-      send({ type: "getTaggedItems" }),
-      new Promise((resolve) => chrome.storage.local.get(["activeCollection", "collectionsCache"], resolve)),
-    ]).then(([items, { activeCollection, collectionsCache }]) => {
-      items = items || {};
-      if (activeCollection == null || activeCollection === "all" || !collectionsCache) return items;
-      const out = {};
-      ((collectionsCache.members || {})[String(activeCollection)] || []).forEach((id) => id in items && (out[id] = items[id]));
-      return out;
+    return send({ type: "shownItems" }).then((res) => {
+      if (!res) return {};
+      this.revs = { rev: res.rev, tagsRev: res.tagsRev };
+      return res.items || {};
     });
   }
 
-  setItemTags(id, tags) {
-    return send({ type: "updateTaggedItemTags", id, tags });
+  setItemTags(id, tags, meta = {}) {
+    return send({ ...meta, type: "updateTaggedItemTags", id, tags });
+  }
+
+  // The timing log: this page's time from an edit to the screen.
+  noteTiming(opId, screenMs) {
+    send({ type: "timing", opId, screenMs });
   }
 
   persistFiles(files) {
@@ -88,18 +89,33 @@ export class ExtensionDataSource {
     return fetch(url, opts);
   }
 
-  onTagsChanged(cb) {
-    chrome.storage.onChanged.addListener((changes, area) => {
-      if (area === "local" && changes.tags) {
-        cb(changes.tags.newValue || []);
-      }
-    });
+  // The page shown or focused: what changed meanwhile (another tab, the popup, the app), one small message when
+  // nothing did.
+  _catchUp() {
+    if (this._watching) return;
+    this._watching = { tags: [], items: [] };
+    const check = () => {
+      if (document.visibilityState !== "visible") return;
+      send({ type: "revs" }).then((now) => {
+        if (!now || !this.revs) return;
+        const was = this.revs;
+        this.revs = { ...this.revs, ...now };
+        if (now.tagsRev !== was.tagsRev) this.getTags().then((tags) => this._watching.tags.forEach((cb) => cb(tags || [])));
+        if (now.rev !== was.rev) this._watching.items.forEach((cb) => cb());
+      });
+    };
+    document.addEventListener("visibilitychange", check);
+    window.addEventListener("focus", check);
   }
 
-  // Another collection chosen in the popup, or its members changed: the rows again.
+  onTagsChanged(cb) {
+    this._catchUp();
+    this._watching.tags.push(cb);
+  }
+
+  // Another collection chosen in the popup, or items changed elsewhere: the rows again (only changed rows redraw).
   onItemsChanged(cb) {
-    chrome.storage.onChanged.addListener((changes, area) => {
-      if (area === "local" && (changes.activeCollection || changes.collectionsCache)) cb();
-    });
+    this._catchUp();
+    this._watching.items.push(cb);
   }
 }

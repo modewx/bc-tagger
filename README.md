@@ -12,9 +12,13 @@ server) match it to your music files and export it to rekordbox.
 | `app/` | The local app (collection with Owned / Located / Rekordbox columns, Settings), served by the server at `/`. |
 | `server/` | The local server (Python/FastAPI): file index, matching, ownership, rekordbox export. See [`server/README.md`](server/README.md). |
 
-The extension owns the tags (`chrome.storage.local`) and keeps the server's mirror up to date. The local
-app edits tags through the extension (a content script on the server's page); when the extension isn't
-reachable, edits are queued on the server and applied by the extension on its next sync.
+The extension owns the tags (`chrome.storage.local`) and keeps the server's mirror up to date. Only its service
+worker reads and writes them: it keeps them in memory, applies a change at once and writes changes together a moment
+later (a small journal covers a worker stopped before that). Bandcamp tabs, the popup, the built-in page and the
+local app are its clients: they send changes and ask for what they show when they're shown or focused; nothing is
+sent to a tab in the background. The local app edits tags through the extension (a content script on the server's
+page); when the extension isn't reachable, edits are queued on the server and applied by the extension on its next
+sync.
 
 ## The local app
 
@@ -148,14 +152,19 @@ server/bct serve     # local server + app on http://127.0.0.1:8765
   → Available currency options → the non-USD tab → Use it → Pay. A USD order is paid at once. Pay is never clicked
   while the page shows PayPal's rate; when it can't choose, it says so on the page and leaves Pay to you. Its
   progress is kept per checkout (by its token), so it never loops. Test: `npm run test:paypal` (fixtures, no network).
-- **Collections in the tagger** (Phase 9): the popup's **Collection** dropdown (All, then the collections with
+- **Collections in the tagger** (Phase 9, 9b): the popup's **Collection** dropdown (All, then the collections with
   their counts, then **New collection…**) says what the stars on Bandcamp pages show and where starring puts a
-  track; the choice is kept by the extension (default All) and open Bandcamp tabs redraw their stars at once. In a
-  collection, the star is membership (tags stay; the track stays in All). In All, starring a new track puts it into
-  the first collection, and un-starring deletes it everywhere (asking first when it's in two or more). New
-  collection… makes it on the server (the app shows it at once; one made in the app reaches the extension through
-  an open app tab, else at the next check). Starring works with the server off: the changes go when it's back.
-  The built-in See Collection page shows the chosen collection.
+  track; the choice is kept by the extension (default: the first collection, "Collection"), and a Bandcamp tab
+  redraws its stars when it's next shown or focused. In a collection, the star is membership (tags stay; the track
+  stays in All). **All** is a mode of its own, said in the popup while chosen, with amber stars marked "all" on
+  Bandcamp pages: a star puts the track into every collection, a star is filled when it's in any, a tag on an
+  unstarred track stars it everywhere, and un-starring deletes it from all of them (asking first when it's in two or
+  more). All's count is every track, as in the app. New collection… makes it on the server (the app shows it at
+  once; one made in the app reaches the extension through an open app tab, else at the next check). Starring works
+  with the server off: the changes go when it's back. The built-in See Collection page shows the chosen collection.
+- **Copy timings** (popup) copies how long the last 100 tagger actions took (star, un-star, tags; on Bandcamp pages
+  and both collection pages): to the screen, the wait before the write, the write and the push, with the page,
+  its widgets and the Bandcamp tabs open. Paste it into a message when it's slow.
 - The popup shows the local server's status; "edit" changes its URL (default `http://127.0.0.1:8765`),
   "sync" pushes everything now. **See Collection** opens the local app when the server answers, else the
   built-in page (Shift-click: always the built-in page).
@@ -181,7 +190,7 @@ Runs the extension, server and local app together in a Playwright Chromium with 
   real server (mapping, linking, browser lookups, downloads, re-locate, browse), settings, and rekordbox dry runs
   and a sandbox write.
 
-A full run (102 tests) takes about 3.5 minutes (2026-10-26: 110–147 s). For a quick check, run a subset by
+A full run (103 tests) takes about 3.5 minutes (2026-10-28: 212 s). For a quick check, run a subset by
 name. Include `Import \(replace\)`, which loads the test collection the others use:
 
 ```bash
@@ -193,6 +202,14 @@ can fail where the full run passes. Tests wait for conditions rather than fixed 
 waits check that something does *not* happen.
 
 First time only: `npx playwright install chromium`.
+
+`npm run test:unit` (no browser): the membership ops and the worker's store (writes together, the journal replayed
+after a stopped worker). `npm run test:paypal`: the PayPal steps on fixtures.
+
+Performance (`scripts/perf/`, local only, each with its own server on :8769 and scratch builds; see each file's
+header): `extension.perf.mjs` times a star, an un-star and typing on a recorded album page with a 1,070-item store;
+`tabs.perf.mjs` does it with 30 Bandcamp tabs in the background and an app tab, with a browser-wide trace per action
+(the longest task on the browser's main thread, the background tabs' CPU).
 
 Other helpers: `node scripts/ext-page-harness.js --build extension/build --data <export.json>` serves a
 built extension page in any browser with a stub `chrome` API. Server tests: see `server/README.md`.

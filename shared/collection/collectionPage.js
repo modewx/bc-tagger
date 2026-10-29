@@ -610,14 +610,15 @@ export function createCollectionPage(opts) {
   let sortDir = 1; // 1 = ascending, -1 = descending
 
   // Recompute the visible set from the search box + tag filter, then render.
-  function computeView() {
+  // Whether an item is shown: the search, the tag filter and opts.filterItem.
+  function viewFilter() {
     const q = (document.getElementById("searchInput").value || "").trim().toLowerCase();
     const terms = q.split(/\s+/).filter(Boolean);
     const selected = $("#tagFilterSelect").val() || [];
 
     const useAnd = !document.getElementById("filterOr").checked; // AND unless OR is picked
 
-    const entries = Object.entries(allItems).filter(([key, item]) => {
+    return (item) => {
       if (selected.length) {
         const tags = item.tags || [];
         const ok = useAnd
@@ -628,7 +629,12 @@ export function createCollectionPage(opts) {
       if (!matchesSearch(item, terms)) return false;
       if (opts.filterItem && !opts.filterItem(item)) return false;
       return true;
-    });
+    };
+  }
+
+  function computeView() {
+    const shown = viewFilter();
+    const entries = Object.entries(allItems).filter(([key, item]) => shown(item));
     currentView = Object.fromEntries(entries);
     renderCollectionTable(currentView);
     if (opts.onView) opts.onView(entries.length, Object.keys(allItems).length);
@@ -670,9 +676,20 @@ export function createCollectionPage(opts) {
   const localTagEdits = new Map(); // key -> {tags, at}
   const LOCAL_EDIT_TTL_MS = 30000;
 
+  // For the extension's timing log (its popup's "Copy timings"): this page's time from the edit to the next frame.
+  let lastInputAt = 0;
+  ["keydown", "pointerdown"].forEach((t) => document.addEventListener(t, (e) => (lastInputAt = e.timeStamp), true));
+  let editSeq = 0;
+  function timedEdit() {
+    const since = performance.now() - lastInputAt < 1000 ? lastInputAt : performance.now();
+    const meta = { opId: `${Date.now().toString(36)}-p${++editSeq}`, page: ds.name === "http" ? "app" : "ext page", widgets: Object.keys(currentView).length };
+    if (ds.noteTiming) requestAnimationFrame(() => setTimeout(() => ds.noteTiming(meta.opId, performance.now() - since), 0));
+    return meta;
+  }
+
   function onTagsEdited(key, tags, wrap) {
     localTagEdits.set(key, { tags: tags.slice(), at: Date.now() });
-    Promise.resolve(ds.setItemTags(key, tags)).then((res) => {
+    Promise.resolve(ds.setItemTags(key, tags, timedEdit())).then((res) => {
       const pending = !!(res && res.queued);
       const failed = !!(res && res.ok === false);
       if (failed) localTagEdits.delete(key);
@@ -1053,6 +1070,48 @@ export function createCollectionPage(opts) {
     playTrack(item, key, cell, btn);
   }
 
+  // The rows' order: [key, item] entries compared by the sort column ("#" until another is clicked); null: as they come.
+  function rowOrder() {
+    const sortCol = allColumns.find((c) => c.sortKey === sortColumn); // hidden columns still sort
+    if (sortColumn === "index") {
+      return (x, y) => ((indexByKey[x[0]] || 0) - (indexByKey[y[0]] || 0) || (x[0] < y[0] ? -1 : x[0] > y[0] ? 1 : 0)) * sortDir;
+    }
+    if (sortCol && sortCol.compare) return (x, y) => sortCol.compare(x[1], y[1]) * sortDir;
+    return null;
+  }
+
+  function buildRow(key, item) {
+    const row = document.createElement("tr");
+    row.dataset.key = key;
+    if (opts.rowClass) {
+      const cls = opts.rowClass(item, key);
+      if (cls) row.className = cls;
+    }
+    if (highlighted.has(key)) row.classList.add("row-highlight");
+    columns.forEach((col) => {
+      const cell = row.insertCell();
+      cell.classList.add(`col-${col.id}`);
+      col.render(cell, key, item);
+    });
+
+    // Only the player column plays: a click anywhere in it (its empty space too)
+    // plays or pauses the row. Elsewhere a click highlights the row
+    // (Finder-style); the controls (links, buttons, tag editor, checkboxes,
+    // thumbnail, popovers) keep their own behaviour.
+    row.addEventListener("mousedown", (e) => {
+      if (e.shiftKey && !e.target.closest(ROW_CONTROLS)) e.preventDefault(); // no text selection on Shift-click
+    });
+    row.addEventListener("click", (e) => {
+      const playerCell = e.target.closest("td.player-cell");
+      if (playerCell) {
+        if (!e.target.closest(".row-player, audio, button, a, iframe, input, select")) togglePlayRow(key, allItems[key] || item, playerCell);
+        return;
+      }
+      if (!e.target.closest(ROW_CONTROLS)) highlightRow(key, e);
+    });
+    return row;
+  }
+
   function renderCollectionTable(items) {
     const collectionTable = document.getElementById("collectionTable");
     // Preserve the live playing audio across the rebuild (global mode) by docking
@@ -1100,12 +1159,8 @@ export function createCollectionPage(opts) {
 
     // "#" order until another column is clicked.
     const entries = Object.entries(items);
-    const sortCol = allColumns.find((c) => c.sortKey === sortColumn); // hidden columns still sort
-    if (sortColumn === "index") {
-      entries.sort((x, y) => ((indexByKey[x[0]] || 0) - (indexByKey[y[0]] || 0) || (x[0] < y[0] ? -1 : x[0] > y[0] ? 1 : 0)) * sortDir);
-    } else if (sortCol && sortCol.compare) {
-      entries.sort((x, y) => sortCol.compare(x[1], y[1]) * sortDir);
-    }
+    const order = rowOrder();
+    if (order) entries.sort(order);
 
     const tbody = collectionTable.createTBody();
     let group;
@@ -1123,34 +1178,7 @@ export function createCollectionPage(opts) {
         }
         group = g;
       }
-      const row = tbody.insertRow();
-      row.dataset.key = key;
-      if (opts.rowClass) {
-        const cls = opts.rowClass(item, key);
-        if (cls) row.className = cls;
-      }
-      if (highlighted.has(key)) row.classList.add("row-highlight");
-      columns.forEach((col) => {
-        const cell = row.insertCell();
-        cell.classList.add(`col-${col.id}`);
-        col.render(cell, key, item);
-      });
-
-      // Only the player column plays: a click anywhere in it (its empty space too)
-      // plays or pauses the row. Elsewhere a click highlights the row
-      // (Finder-style); the controls (links, buttons, tag editor, checkboxes,
-      // thumbnail, popovers) keep their own behaviour.
-      row.addEventListener("mousedown", (e) => {
-        if (e.shiftKey && !e.target.closest(ROW_CONTROLS)) e.preventDefault(); // no text selection on Shift-click
-      });
-      row.addEventListener("click", (e) => {
-        const playerCell = e.target.closest("td.player-cell");
-        if (playerCell) {
-          if (!e.target.closest(".row-player, audio, button, a, iframe, input, select")) togglePlayRow(key, allItems[key] || item, playerCell);
-          return;
-        }
-        if (!e.target.closest(ROW_CONTROLS)) highlightRow(key, e);
-      });
+      tbody.appendChild(buildRow(key, item));
     });
 
     setupColumnResizing(collectionTable, colWidthKey, columns.map((c) => c.id), opts.legacyColWidths);
@@ -1437,6 +1465,11 @@ export function createCollectionPage(opts) {
   // follow, in the order they came.
   function setItems(items) {
     allItems = items || {};
+    indexItems();
+    computeView();
+  }
+
+  function indexItems() {
     indexByKey = {};
     let next = 0;
     Object.values(allItems).forEach((it) => {
@@ -1446,12 +1479,43 @@ export function createCollectionPage(opts) {
       const order = allItems[k] && allItems[k].order;
       indexByKey[k] = Number.isFinite(order) ? order : ++next;
     });
-    computeView();
+  }
+
+  // Rows added, removed or renumbered (a star on a Bandcamp tab, an import): just those rows, taken out and put in
+  // at their place, without rebuilding the table (about 1,100 rows). False when the whole table must be rebuilt:
+  // group rows, many rows at once, or the row of a track playing in a per-row player.
+  function patchRows(fresh) {
+    if (opts.groupBy) return false;
+    const tbody = document.querySelector("#collectionTable tbody");
+    if (!tbody) return false;
+    const gone = Object.keys(allItems).filter((k) => !(k in fresh));
+    const moved = Object.keys(fresh).filter((k) => !(k in allItems) || (fresh[k] || {}).order !== allItems[k].order);
+    if (gone.length + moved.length > 20) return false;
+    if (!globalMode && playingKey && (gone.includes(playingKey) || moved.includes(playingKey))) return false;
+    allItems = fresh;
+    indexItems();
+    [...gone, ...moved].forEach((k) => {
+      const row = tbody.querySelector(`tr[data-key="${CSS.escape(k)}"]`);
+      if (row) row.remove();
+      delete currentView[k];
+    });
+    const shown = viewFilter();
+    const order = rowOrder();
+    moved.forEach((k) => {
+      const item = allItems[k];
+      if (!shown(item)) return;
+      currentView[k] = item;
+      const row = buildRow(k, item);
+      const next = order && [...tbody.rows].find((r) => r.dataset.key in allItems && order([k, item], [r.dataset.key, allItems[r.dataset.key]]) < 0);
+      tbody.insertBefore(row, next || null);
+    });
+    if (opts.onView) opts.onView(Object.keys(currentView).length, Object.keys(allItems).length);
+    return true;
   }
 
   async function start() {
     ds.onTagsChanged(onVocabChanged);
-    if (ds.onItemsChanged) ds.onItemsChanged(() => reload());
+    if (ds.onItemsChanged) ds.onItemsChanged((ids) => (ids && ds.getItemsById ? patch(ids) : reload()));
 
     await ds.init();
     // Tags and items load together; until the items are in, the table says so.
@@ -1631,6 +1695,7 @@ export function createCollectionPage(opts) {
     keys.forEach((k) => {
       const old = allItems[k];
       const nu = fresh[k];
+      if (old && old === nu) return; // the same object (a patch of other rows)
       // Keep a recent local tag edit until the source reflects it.
       const local = localTagEdits.get(k);
       if (local) {
@@ -1650,7 +1715,7 @@ export function createCollectionPage(opts) {
       if (!nu._tagsPending) delete old._tagsPending;
       changed.push(k);
     });
-    if (structural) {
+    if (structural && !patchRows(fresh)) {
       setItems(fresh);
       changed.forEach(syncTagEditors); // e.g. the playing track's editor in the top bar
       return;
@@ -1678,6 +1743,15 @@ export function createCollectionPage(opts) {
   // keeps the filters, the sort and the playing track.
   async function reload() {
     applyItemUpdates(await ds.getItems());
+  }
+
+  // Only these items again (the server named them in its `item` events): changed rows redraw, new ones go in, gone
+  // ones go (in the collection shown).
+  async function patch(ids) {
+    const got = await ds.getItemsById(ids);
+    const fresh = { ...allItems };
+    ids.forEach((k) => (got[k] ? (fresh[k] = got[k]) : delete fresh[k]));
+    applyItemUpdates(fresh);
   }
 
   return {

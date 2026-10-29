@@ -183,6 +183,18 @@ $(function () {
     openTabIfNotExists("import.html");
   });
 
+  // The timing log of the last tagger actions, as text (to paste into a message when it's slow).
+  document.getElementById("copyTimings").addEventListener("click", (e) => {
+    e.preventDefault();
+    chrome.runtime.sendMessage({ type: "getTimings" }, (res) => {
+      const text = (res && res.text) || "";
+      navigator.clipboard.writeText(text).then(
+        () => showToast(`Copied ${Math.max(0, text.split("\n").length - 1)} timings`, "success"),
+        () => showToast("Couldn't copy the timings")
+      );
+    });
+  });
+
   // Dev builds can reload themselves after a rebuild.
   const devReload = document.getElementById("devReload");
   if (__DEV_BUILD__) {
@@ -239,9 +251,10 @@ $(function () {
   // All, then the collections by `pos` with their counts, then "New collection…" (made on the server: the app shows
   // it at once). The choice is kept in the extension's storage; Bandcamp tabs redraw their stars from it.
   const picker = document.getElementById("collectionPicker");
+  const allWarning = document.getElementById("allWarning");
   const newRow = document.getElementById("newCollectionRow");
   const newName = document.getElementById("newCollectionName");
-  let shown = { up: false, cache: { list: [] }, active: "all", allCount: 0 };
+  let shown = { up: false, cache: { list: [] }, active: null, allCount: 0 };
   const NEW = "new";
 
   function renderCollections() {
@@ -253,17 +266,20 @@ $(function () {
     const add = new Option(up ? "New collection…" : "New collection… (the server isn't running)", NEW);
     add.disabled = !up;
     picker.appendChild(add);
-    picker.value = list.some((c) => c.id === active) ? String(active) : "all";
+    // The choice: a collection (by default the first), or All when chosen.
+    picker.value = active === "all" ? "all" : list.some((c) => c.id === active) ? String(active) : list.length ? String(list[0].id) : "all";
+    allWarning.classList.toggle("open", picker.value === "all");
   }
 
   picker.addEventListener("change", () => {
     if (picker.value === NEW) {
       newRow.classList.add("open");
       newName.focus();
-      picker.value = String(shown.active);
+      picker.value = String(shown.active ?? "all");
       return;
     }
     shown.active = picker.value === "all" ? "all" : Number(picker.value);
+    allWarning.classList.toggle("open", shown.active === "all");
     chrome.runtime.sendMessage({ type: "setActiveCollection", collection: shown.active });
   });
 
@@ -333,7 +349,7 @@ $(function () {
       showToast("Use http://127.0.0.1:<port> or http://localhost:<port>");
       return;
     }
-    chrome.storage.local.set({ bcServer: { url } }, () => {
+    chrome.runtime.sendMessage({ type: "setServerUrl", url }, () => {
       serverEditRow.classList.remove("open");
       showToast("Server URL saved", "success");
       setTimeout(refreshServer, 300);

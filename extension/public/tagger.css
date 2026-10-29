@@ -83,3 +83,13 @@ tagger-input {
   color: #14532d;
   font-size: 13px;
 }
+/* All (chosen in the popup, never the default): a star puts the item into every collection and un-starring deletes
+   it from all of them, so its stars look different from a single collection's. */
+.tag-button.bct-all { color: #b45309; }
+.tag-button.bct-all::after {
+  content: "all";
+  margin-left: 2px;
+  font-size: 9px;
+  font-weight: 700;
+  vertical-align: super;
+}
