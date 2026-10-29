@@ -288,7 +288,7 @@ function hashCode(str) {
 // takes it out of it only, and deletes it (with its tags) when that was its last collection (the worker decides, from
 // its own copy). All (chosen in the popup, never the default) isn't a collection but every one at once: filled when
 // the item is in any, drawn differently (`.bct-all`); a star or any tag edit puts the item into every collection it
-// isn't in; un-starring deletes it from all of them. No collection known yet (the server never reached): filled
+// isn't in; un-starring deletes it from all of them, at once. No collection known yet (the server never reached): filled
 // when saved.
 const ALL = "all";
 const page = {
@@ -321,8 +321,6 @@ function starred(id) {
 }
 // Where a star (or a first tag) puts an item: the collection shown; in All, every collection.
 const targets = () => (page.active === ALL ? page.list.map((c) => c.id) : page.active == null ? [] : [page.active]);
-// The collections an item is in (by name).
-const collectionsWith = (id) => page.list.filter((c) => memberOf(id).has(c.id)).map((c) => c.name);
 
 function setStarClass(tagButton) {
   tagButton.classList.toggle("bct-all", page.active === ALL);
@@ -564,7 +562,7 @@ function createTagButton(element, itemUrl, trackdata) {
         const currentTags = tagger.val() || [];
         const existingItem = page.items[uniqueId];
         // A tag edit puts the item where a star would: the collection shown when it isn't in it; in All, every
-        // collection it isn't in (the worker leaves out those it's in already).
+        // collection (an add where it is already changes nothing).
         const joins = page.active === ALL ? targets() : starred(uniqueId) ? [] : targets();
         const item = existingItem
           ? { ...existingItem, tags: currentTags } // its tags in place; the rest (date_added too) intact
@@ -669,17 +667,8 @@ function createTagButton(element, itemUrl, trackdata) {
         return;
       }
       if (starred(uniqueId)) {
-        // All: un-starring deletes the item and its tags everywhere; in two or more collections, ask first.
-        const inCollections = collectionsWith(uniqueId);
-        if (
-          inCollections.length >= 2 &&
-          !window.confirm(
-            `“${(saved && saved.title) || uniqueId}” is in ${inCollections.length} collections (${inCollections.join(", ")}). ` +
-              "Delete it and its tags from all of them?"
-          )
-        ) {
-          return;
-        }
+        // All: un-starring deletes the item and its tags from every collection, at once (no confirmation in the
+        // extension: the user's choice).
         setStar(tagButton, false);
         delete page.items[uniqueId];
         page.member.delete(uniqueId);

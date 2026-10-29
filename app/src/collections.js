@@ -55,6 +55,37 @@ export function keepCollection(v) {
   }
 }
 
+// A track that Remove from collection or Delete collection leaves in no collection is deleted everywhere (the user,
+// 2026-10-28), after a confirmation that names each one. The server says which first (dry_run). An older server
+// doesn't know dry_run (it would act): it's asked only once the server has pending deletes.
+let deletesKnown = null;
+export function serverDeletes() {
+  deletesKnown =
+    deletesKnown ||
+    apiJson("/api/tagger/pending-deletes").then(
+      () => true,
+      () => false
+    );
+  return deletesKnown;
+}
+
+/**
+ * The confirmation when an action would delete tracks everywhere: each of them (title, artist; the list scrolls),
+ * and what happens to the others. True for Delete.
+ */
+export function confirmDeletes({ id, title, wouldDelete, others }) {
+  const n = wouldDelete.length;
+  const body = el("div");
+  body.append(
+    el("p", null, `${plural(n, "track")} ${n === 1 ? "is" : "are"} in no other collection, so ${n === 1 ? "it's" : "they're"} deleted everywhere, with ${n === 1 ? "its" : "their"} tags (in the extension too):`)
+  );
+  const list = el("ul", "would-delete");
+  wouldDelete.forEach((t) => list.append(el("li", null, [t.title || t.id, t.artist].filter(Boolean).join(" — "))));
+  body.append(list);
+  if (others) body.append(el("p", "muted", others));
+  return confirmDialog({ id, danger: true, title, body, confirmLabel: "Delete" });
+}
+
 /** A name for a collection, asked in a dialog (empty or taken: can't confirm); null if cancelled. */
 export async function askName({ id, title, value = "", confirmLabel, taken }) {
   const input = el("input", "collection-name");
@@ -102,7 +133,7 @@ export async function askName({ id, title, value = "", confirmLabel, taken }) {
  * @param {(v: string|number) => void} o.onPick   another one chosen (or made, or the shown one deleted)
  * @param {() => HTMLElement} o.statusEl
  */
-export function createCollectionsBar({ current, onPick, statusEl }) {
+export function createCollectionsBar({ current, onPick, statusEl, onDeleted = () => {} }) {
   let list = [];
   let allCount = null;
   const select = el("select", "collection-select");
@@ -171,20 +202,39 @@ export function createCollectionsBar({ current, onPick, statusEl }) {
   del.addEventListener("click", async () => {
     const c = byId(current);
     if (!c || c.id === 0) return;
-    const ok = await confirmDialog({
-      id: "deleteCollectionConfirm",
-      danger: true,
-      title: `Delete the collection “${c.name}”?`,
-      body:
-        `The ${plural(c.count ?? 0, "track")} in it stay in All and in your other collections, with their tags. Nothing ` +
-        "else changes: no file, preview or rekordbox entry is touched.",
-      confirmLabel: "Delete collection",
-    });
+    const url = `/api/collections/${c.id}`;
+    // Tracks only in it are deleted with it: which, first.
+    let doomed = [];
+    try {
+      if (await serverDeletes()) doomed = (await apiJson(`${url}?dry_run=true`, { method: "DELETE" })).would_delete || [];
+    } catch (e) {
+      say(`Delete: ${e.message}`);
+      return;
+    }
+    const title = `Delete the collection “${c.name}”?`;
+    const others = (c.count ?? 0) - doomed.length;
+    const ok = doomed.length
+      ? await confirmDeletes({
+          id: "deleteCollectionDeletes",
+          title,
+          wouldDelete: doomed,
+          others: others > 0 ? `The other ${plural(others, "track")} stay in your other collections, with their tags.` : "",
+        })
+      : await confirmDialog({
+          id: "deleteCollectionConfirm",
+          danger: true,
+          title,
+          body:
+            `The ${plural(c.count ?? 0, "track")} in it stay in All and in your other collections, with their tags. Nothing ` +
+            "else changes: no file, preview or rekordbox entry is touched.",
+          confirmLabel: "Delete collection",
+        });
     if (!ok) return;
     try {
-      await apiJson(`/api/collections/${c.id}`, { method: "DELETE" });
+      await apiJson(doomed.length ? `${url}?delete_orphans=true` : url, { method: "DELETE" });
+      if (doomed.length) onDeleted(doomed);
       await api.refresh();
-      say(`Deleted the collection “${c.name}”.`);
+      say(`Deleted the collection “${c.name}”` + (doomed.length ? `, and ${plural(doomed.length, "track")} only in it.` : "."));
       onPick(ALL);
     } catch (e) {
       say(`Delete: ${e.message}`);

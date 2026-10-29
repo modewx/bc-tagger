@@ -10,7 +10,7 @@ import { buildNav } from "./nav";
 import { appColumns, downloadable, isLocated, localPlayUrl, localDuration, localUnavailable } from "./columns";
 import { originalOf, previewToggle } from "./previews";
 import { buildPreviews, followPreviews, followRunning } from "./previewBuild";
-import { ALL, chosenCollection, keepCollection, createCollectionsBar, listCollections } from "./collections";
+import { ALL, chosenCollection, keepCollection, createCollectionsBar, listCollections, serverDeletes, confirmDeletes } from "./collections";
 import { confirmDialog } from "./dialog";
 import { downloadFlow, fullReleasesToggle } from "./downloads";
 import { startDevReload } from "./devReload";
@@ -211,23 +211,51 @@ importTo.addEventListener("change", async () => {
   if (shownCollection === ALL) await page.reload(); // their Collections chips
 });
 
+// Tracks deleted everywhere by Remove from collection or Delete collection: the extension (its tracks, the Bandcamp
+// ones) deletes them at once when it's here, without asking (this page asked); otherwise on its next check.
+function deletedInExtension(doomed) {
+  const ids = doomed.filter((t) => t.kind !== "other").map((t) => t.id);
+  if (ids.length && bridge.connected) bridge.call("deleteItems", { ids }).catch((e) => console.warn("[deleteItems]", e.message));
+}
+
 async function removeFromCollection(statusEl, button) {
   const ids = selectedIds();
   const id = shownCollection;
   if (!ids.length || id === ALL) return;
   const name = collectionsBar.nameOf(id);
-  const ok = await confirmDialog({
-    id: "removeFromCollectionConfirm",
-    title: `Remove ${ids.length} track${ids.length > 1 ? "s" : ""} from “${name}”?`,
-    body:
-      "Only from this collection: they stay in All and in any other collection they're in, with their tags and files.",
-    confirmLabel: "Remove from collection",
-  });
+  const url = `/api/collections/${id}/items`;
+  const title = `Remove ${ids.length} track${ids.length > 1 ? "s" : ""} from “${name}”?`;
+  // Tracks it leaves in no collection are deleted everywhere: which, first.
+  let plan = null;
+  try {
+    if (await serverDeletes()) plan = await apiJson(url, { method: "DELETE", body: { ids, dry_run: true } });
+  } catch (e) {
+    statusEl.textContent = `Remove from collection: ${e.message}`;
+    return;
+  }
+  const doomed = (plan && plan.would_delete) || [];
+  const others = ((plan && plan.would_remove) ?? ids.length) - doomed.length;
+  const ok = doomed.length
+    ? await confirmDeletes({
+        id: "removeFromCollectionDeletes",
+        title,
+        wouldDelete: doomed,
+        others: others > 0 ? `The other ${others} only leave “${name}”: they stay in their other collections, with their tags.` : "",
+      })
+    : await confirmDialog({
+        id: "removeFromCollectionConfirm",
+        title,
+        body:
+          "Only from this collection: they stay in All and in any other collection they're in, with their tags and files.",
+        confirmLabel: "Remove from collection",
+      });
   if (!ok) return;
   button.disabled = true;
   try {
-    const r = await apiJson(`/api/collections/${id}/items`, { method: "DELETE", body: { ids } });
-    statusEl.textContent = `Removed ${r.removed ?? ids.length} from “${name}”.`;
+    const r = await apiJson(url, { method: "DELETE", body: doomed.length ? { ids, delete_orphans: true } : { ids } });
+    if (doomed.length) deletedInExtension(doomed);
+    statusEl.textContent =
+      `Removed ${r.removed ?? ids.length} from “${name}”` + (doomed.length ? `; deleted ${doomed.length} everywhere (in no other collection).` : ".");
   } catch (e) {
     statusEl.textContent = `Remove from collection: ${e.message}`;
   }
@@ -510,7 +538,7 @@ async function refreshHealth() {
   });
 
   // Collections: the bar at the top (once the server says it has them), Import to Collection by Remove.
-  collectionsBar = createCollectionsBar({ current: shownCollection, onPick: pickCollection, statusEl: () => page.statusEl });
+  collectionsBar = createCollectionsBar({ current: shownCollection, onPick: pickCollection, statusEl: () => page.statusEl, onDeleted: deletedInExtension });
   collectionsBar.el.hidden = true;
   document.getElementById("topControls").prepend(collectionsBar.el);
   document.getElementById("removeFromCollection").before(importTo);

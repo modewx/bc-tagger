@@ -116,43 +116,45 @@ export function queueMembership(ops, writeItems = null, ids = []) {
   });
 }
 
-// The values a queued change gives: the ops in the queue, and in the copy shown. An add for a collection an item is in
-// already (as this copy has it: a page's may be older) is left out.
+// The values a queued change gives: the ops in the queue, and in the copy shown. Every op is sent, an add for a
+// collection the item is in already too (the server counts it "already"): this copy may be older than the server's
+// (a collection deleted, another made with its id), and an add left out there would be lost.
 function queued(s, ops) {
-  const cache = cacheOf(s);
-  ops = ops
-    .map((op) => {
-      if (op.op !== "add") return op;
-      const there = new Set(cache.members[String(op.collection_id)] || []);
-      return { ...op, ids: op.ids.filter((id) => !there.has(id)) };
-    })
-    .filter((op) => op.ids.length);
   if (!ops.length) return {};
+  const cache = cacheOf(s);
   return { pendingMembership: [...pendingOf(s), ...ops], collectionsCache: recount({ ...cache, members: applyOps(cache.members, ops) }) };
 }
 
-// An item deleted: gone from the items, from every collection in the copy shown, and from the ops still queued (the
-// server drops its memberships with it; a queued add would show it again until sent).
-function forget(s, id) {
-  const had = id in s.taggedItems;
-  delete s.taggedItems[id];
+// Items deleted: gone from the items, from every collection in the copy shown, and from the ops still queued (the
+// server drops their memberships with them; a queued add would show one again until sent).
+function forget(s, ids) {
+  const gone = new Set(ids);
+  const deleted = ids.filter((id) => id in s.taggedItems);
+  deleted.forEach((id) => delete s.taggedItems[id]);
   const values = {};
-  if ((memberIndex(s).get(id) || []).length) {
+  const index = memberIndex(s);
+  if (ids.some((id) => (index.get(id) || []).length)) {
     const cache = cacheOf(s);
     const members = {};
-    Object.entries(cache.members).forEach(([cid, ids]) => (members[cid] = ids.filter((i) => i !== id)));
+    Object.entries(cache.members).forEach(([cid, list]) => (members[cid] = list.filter((i) => !gone.has(i))));
     values.collectionsCache = recount({ ...cache, members });
   }
   const pending = pendingOf(s);
-  if (pending.some((op) => op.ids.includes(id))) {
-    values.pendingMembership = pending.map((op) => ({ ...op, ids: op.ids.filter((i) => i !== id) })).filter((op) => op.ids.length);
+  if (pending.some((op) => op.ids.some((i) => gone.has(i)))) {
+    values.pendingMembership = pending.map((op) => ({ ...op, ids: op.ids.filter((i) => !gone.has(i)) })).filter((op) => op.ids.length);
   }
-  return { deleted: had ? [id] : [], values };
+  return { deleted, values };
 }
 
 /** Un-starring in All: the item and its tags go, and from every collection (the server drops its memberships with it). */
 export function removeItem(id) {
-  return change((s) => forget(s, id));
+  return change((s) => forget(s, [id]));
+}
+
+/** Items deleted elsewhere (the app's Remove from collection or Delete collection left them in no collection): gone
+ *  here too, in one change. */
+export function removeItems(ids) {
+  return change((s) => (ids.length ? forget(s, [...new Set(ids)]) : { skip: true }));
 }
 
 /**
@@ -164,7 +166,7 @@ export function unstar(collections, id) {
   const { good } = splitOps(collections.map((cid) => ({ op: "remove", collection_id: cid, ids: [id] })));
   return change((s) => {
     const left = (memberIndex(s).get(id) || []).filter((c) => !collections.includes(c));
-    if (!left.length) return { ...forget(s, id), result: { ok: true, deleted: true } };
+    if (!left.length) return { ...forget(s, [id]), result: { ok: true, deleted: true } };
     return { values: queued(s, good), result: { ok: true, deleted: false } };
   });
 }

@@ -40,10 +40,12 @@ sync.
   - **Collections** (Phase 8; shown once the server has them): the dropdown at the top lists **All** (every track
     in a collection, once: the union, not a collection of its own) and then each collection, with its count; the choice is kept in this browser, and `?collection=<id|all>`
     opens one. **Create Collection** (a new, empty one), **Rename**, **Delete** (asks first; the tracks stay in other
-    collections, and no file, preview or rekordbox entry is touched; "Collection" can't be deleted). A change made
+    collections, and no file, preview or rekordbox entry is touched; "Collection" can't be deleted; a track only in
+    it is deleted everywhere, the extension too, after a confirmation that names it). A change made
     elsewhere (a star on a Bandcamp page) puts its row in, or takes it out, at once.
     On the selection: **Import to Collection…** copies the tracks into another collection (and says how many were
-    already there), **Remove from collection** (asks first; not in All). In All, a **Collections** column of chips
+    already there), **Remove from collection** (asks first; not in All; a
+    track it leaves in no collection is deleted everywhere, after a confirmation that names it). In All, a **Collections** column of chips
     (Columns ▾). Tags, files and everything else stay per track. An import's tracks go into the collection picked
     next to **Import selected** (the last used, else "Collection"; an open batch chooses then), and the collection
     page then opens in it, as does **Select last import**.
@@ -161,7 +163,7 @@ server/bct serve     # local server + app on http://127.0.0.1:8765
   its last collection, so every track is in at least one. **All** isn't a collection but every one at once, said in
   the popup while chosen, with amber stars marked "all" on Bandcamp pages: a star or any tag edit puts the track into
   every collection it isn't in, a star is filled when it's in any, and un-starring deletes it from all of them
-  (asking first when it's in two or more). All's count is the tracks in any collection (with one collection, its
+  (the extension never asks: only the app confirms deletions). All's count is the tracks in any collection (with one collection, its
   count). New collection… makes it on the server (the app shows it at once; one made in the app reaches the extension through an open app tab, else at the next check). Starring works
   with the server off: the changes go when it's back. The built-in See Collection page shows the chosen collection.
 - **Copy timings** (popup) copies how long the last 100 tagger actions took (star, un-star, tags; on Bandcamp pages

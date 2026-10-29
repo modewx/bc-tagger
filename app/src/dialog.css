@@ -18,6 +18,7 @@ dialog.confirm-dialog.danger { border-top: 5px solid #d92d20; }
 .dialog-body p { margin: 0 0 10px; }
 .dialog-body code { font-size: 12px; background: #f4f4f4; padding: 1px 4px; border-radius: 3px; }
 .dialog-body ul { margin: 4px 0 10px; padding-left: 20px; }
+.dialog-body ul.would-delete { max-height: 220px; overflow-y: auto; }
 .dialog-body details { margin: 4px 0; }
 .dialog-body summary { cursor: pointer; }
 .dialog-body .muted { color: #777; font-size: 12px; }

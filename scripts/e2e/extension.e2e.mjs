@@ -5148,15 +5148,14 @@ test("Collections in the extension: the popup lists All (every item, as the app 
   }
 });
 
-test("Collections in the extension: a Bandcamp page's stars follow the popup's choice when it's shown again (no reload); star and un-star in one of two collections (membership only); All: stars and tag edits put the track into every collection, filled when in any, drawn apart, un-starring deletes it (asking when it's in two or more)", async () => {
+test("Collections in the extension: a Bandcamp page's stars follow the popup's choice when it's shown again (no reload); star and un-star in one of two collections (membership only); All: stars and tag edits put the track into every collection, filled when in any, drawn apart, un-starring deletes it from all (no confirmation)", async () => {
   await dropCollections();
   const crates = await post("/api/collections", { name: "E2E Crates" });
   const page = await context.newPage();
   const dialogs = [];
-  let answer = false;
   page.on("dialog", (d) => {
     dialogs.push(d.message());
-    answer ? d.accept() : d.dismiss();
+    d.dismiss();
   });
   const saved = async (id) => !!(await storage("taggedItems")).taggedItems[id];
   const putBack = await tracksAside([TRACK]);
@@ -5211,19 +5210,14 @@ test("Collections in the extension: a Bandcamp page's stars follow the popup's c
     await page.click(`#tagger_${TRACK} + .chosen-container .chosen-results li.active-result`);
     await waitSoon(async () => (await membersOf(crates.id)).includes(TRACK), { what: "the tagged track in E2E Crates too" });
     assert.ok((await membersOf(0)).includes(TRACK), "still in Collection");
-    // The album is in two collections: un-starring asks first (No: kept; Yes: deleted everywhere).
-    await starOf(page, ALBUM).click();
-    await waitSoon(() => dialogs.length === 1, { what: "the confirm" });
-    assert.match(dialogs[0], /is in 2 collections \(Collection, E2E Crates\)\. Delete it and its tags from all of them\?$/);
-    await starIs(page, ALBUM, true);
-    assert.ok(await saved(ALBUM), "kept");
-    answer = true;
+    // The album is in two collections: un-starring in All deletes it from both at once (no confirmation in the
+    // extension).
     await starOf(page, ALBUM).click();
     await starIs(page, ALBUM, false);
     await waitSoon(async () => !(await onServer(ALBUM)), { what: "the album deleted on the server" });
     assert.equal(await saved(ALBUM), false);
     assert.equal((await membersOf(crates.id)).includes(ALBUM), false);
-    assert.equal(dialogs.length, 2);
+    assert.equal(dialogs.length, 0, "no confirmation");
     // Starred again in All: into every collection, numbered (it's in Collection).
     await starOf(page, ALBUM).click();
     await starIs(page, ALBUM, true);
@@ -5409,6 +5403,106 @@ test("local app on Collection: a track starred on a Bandcamp page shows up at it
     await page.close();
     await app.evaluate(() => localStorage.removeItem("bc_app_collection")).catch(() => {});
     await app.close();
+    await putBack();
+  }
+});
+
+// Remove from collection and Delete collection delete the tracks they leave in no collection, everywhere, after a
+// confirmation in the app naming them (the extension doesn't ask).
+const TRACK2 = "t3738475200"; // the album's other track (a stand-in in the recorded page)
+const intoCollection = (id, title, cid) =>
+  send({ type: "addTaggedItem", item: { id, title, artist: "Synergy Trilogy", tralbum_type: "t", raw_id: Number(id.slice(1)), tags: ["must"] }, collections: [cid] });
+const pendingDeletes = () => api("/api/tagger/pending-deletes");
+const rowsChecked = async (app, ids) => {
+  for (const id of ids) await app.click(`tr[data-key="${id}"] .row-check`);
+};
+const deleteList = (app, dialog) => app.$$eval(`#${dialog} .would-delete li`, (lis) => lis.map((li) => li.textContent));
+
+test("local app: Remove from collection deletes a track it leaves in no collection everywhere (the extension too), after a confirmation naming only that one (Cancel: nothing changes); Delete collection the same", async () => {
+  await dropCollections();
+  const crates = await post("/api/collections", { name: "E2E Crates" });
+  const putBack = await tracksAside([TRACK, TRACK2]);
+  const app = await context.newPage();
+  try {
+    // ITEM is in Collection and E2E Crates; Holo Law only in E2E Crates.
+    await post(`/api/collections/${crates.id}/items`, { ids: [ITEM] });
+    await intoCollection(TRACK, "Holo Law", crates.id);
+    await waitSoon(async () => (await membersOf(crates.id)).sort().join() === [ITEM, TRACK].sort().join(), { what: "both in E2E Crates" });
+    await storageFirst(app, { remove: COLLECTION_STATE }); // no selection kept from earlier tests
+    await app.goto(`${SERVER}/?collection=${crates.id}`);
+    await app.waitForFunction(() => /extension connected/.test(document.getElementById("navExt").textContent));
+    await app.waitForSelector(`tr[data-key="${TRACK}"]`);
+    await rowsChecked(app, [ITEM, TRACK]);
+    await app.click("#removeFromCollection");
+    await app.waitForSelector("#removeFromCollectionDeletes");
+    assert.deepEqual(await deleteList(app, "removeFromCollectionDeletes"), ["Holo Law — Synergy Trilogy"]);
+    assert.match(await app.textContent("#removeFromCollectionDeletes .dialog-body"), /The other 1 only leave “E2E Crates”/);
+    await app.click("#removeFromCollectionDeletes .dialog-cancel");
+    assert.equal((await membersOf(crates.id)).length, 2, "Cancel: nothing changes");
+    assert.ok((await storage("taggedItems")).taggedItems[TRACK], "still in the extension");
+    await app.click("#removeFromCollection");
+    await app.click("#removeFromCollectionDeletes .dialog-confirm");
+    await app.waitForSelector(`tr[data-key="${TRACK}"]`, { state: "detached" });
+    await waitSoon(async () => !(await storage("taggedItems")).taggedItems[TRACK], { what: "deleted in the extension (at once, through the app)" });
+    assert.equal(await onServer(TRACK), false);
+    assert.deepEqual(await membersOf(crates.id), [], "ITEM left E2E Crates only");
+    assert.ok((await membersOf(0)).includes(ITEM), "still in Collection");
+    await waitSoon(async () => !(await pendingDeletes()).length, { what: "the extension acked it" });
+    // Delete collection with a track only in it: the same confirmation, then the collection and the track go.
+    await intoCollection(TRACK2, "E2E stand-in track", crates.id);
+    await waitSoon(async () => (await membersOf(crates.id)).includes(TRACK2), { what: "the stand-in in E2E Crates" });
+    await app.reload();
+    await app.waitForSelector(`tr[data-key="${TRACK2}"]`);
+    await app.click("#deleteCollection");
+    await app.waitForSelector("#deleteCollectionDeletes");
+    assert.deepEqual(await deleteList(app, "deleteCollectionDeletes"), ["E2E stand-in track — Synergy Trilogy"]);
+    await app.click("#deleteCollectionDeletes .dialog-confirm");
+    await waitSoon(async () => !(await collectionsNow()).some((c) => c.id === crates.id), { what: "the collection gone" });
+    await waitSoon(async () => !(await storage("taggedItems")).taggedItems[TRACK2], { what: "the stand-in deleted in the extension" });
+    assert.equal(await onServer(TRACK2), false);
+  } finally {
+    await app.evaluate(() => localStorage.removeItem("bc_app_collection")).catch(() => {});
+    await app.close();
+    await dropCollections();
+    await putBack();
+  }
+});
+
+test("local app: a track deleted while the extension isn't connected is deleted there on its next check, before any full sync could send it back", async () => {
+  await dropCollections();
+  const crates = await post("/api/collections", { name: "E2E Crates" });
+  const putBack = await tracksAside([TRACK]);
+  const app = await context.newPage();
+  try {
+    await intoCollection(TRACK, "Holo Law", crates.id);
+    await waitSoon(async () => (await membersOf(crates.id)).includes(TRACK), { what: "the track in E2E Crates" });
+    await setStorage({ bcServer: { url: "http://127.0.0.1:9" } }); // the extension away: no bridge on the app, no sync
+    await storageFirst(app, { remove: COLLECTION_STATE }); // no selection kept from earlier tests
+    await app.goto(`${SERVER}/?collection=${crates.id}`);
+    await app.waitForSelector(`tr[data-key="${TRACK}"]`);
+    await rowsChecked(app, [TRACK]);
+    await app.click("#removeFromCollection");
+    await app.click("#removeFromCollectionDeletes .dialog-confirm");
+    await app.waitForSelector(`tr[data-key="${TRACK}"]`, { state: "detached" });
+    assert.equal(await onServer(TRACK), false);
+    assert.equal((await pendingDeletes()).length, 1, "queued for the extension");
+    assert.ok((await storage("taggedItems")).taggedItems[TRACK], "the extension still has it");
+    // Back, with a full sync due: its check applies the delete first, then acks it, and the full sync doesn't send
+    // the track back.
+    await probe.evaluate(() =>
+      chrome.storage.session.get("bcSyncStatus").then(({ bcSyncStatus }) => chrome.storage.session.set({ bcSyncStatus: { ...bcSyncStatus, needsFull: true } }))
+    );
+    const since = Date.now();
+    await setStorage({ bcServer: { url: SERVER } });
+    await waitSoon(async () => ((await probe.evaluate(() => chrome.storage.session.get("bcSyncStatus"))).bcSyncStatus || {}).tickDoneAt > since, { what: "the check", timeout: 20000 });
+    assert.equal((await storage("taggedItems")).taggedItems[TRACK], undefined, "deleted in the extension");
+    assert.equal(await onServer(TRACK), false, "not sent back by the full sync");
+    assert.deepEqual(await pendingDeletes(), [], "acked");
+  } finally {
+    await setStorage({ bcServer: { url: SERVER } });
+    await app.evaluate(() => localStorage.removeItem("bc_app_collection")).catch(() => {});
+    await app.close();
+    await dropCollections();
     await putBack();
   }
 });

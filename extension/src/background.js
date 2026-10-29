@@ -5,6 +5,7 @@ import {
   probeServer,
   pullTagEdits,
   pullPendingAdds,
+  pullPendingDeletes,
   importLinkCandidatesMany,
   linkImportRow,
   openImportRows,
@@ -16,7 +17,7 @@ import {
   popupState,
   createCollection,
 } from "./serverSync";
-import { ALL, MAIN, queueMembership, removeItem, unstar, setActive, readCollections, activeOf, memberIndex, sortedList, firstCollection } from "./collectionsStore";
+import { ALL, MAIN, queueMembership, removeItem, removeItems, unstar, setActive, readCollections, activeOf, memberIndex, sortedList, firstCollection } from "./collectionsStore";
 import { withItems, change, read, flush, replaceItems, rev, tagsRev, nowIso, sameTags, fillOrder, nextOrder, orderFloorOf } from "./itemsStore";
 import { noteOp, noteScreen, timingsText } from "./timings";
 import { isChallengePage } from "../../shared/bandcampChallenge";
@@ -393,6 +394,14 @@ async function handleAppBridge(op, payload, sender) {
       // next one given here comes after it.
       await probeServer(1500);
       return { version: fresh ? fresh.version : null, read: true };
+    }
+    case "deleteItems": {
+      // The app's Remove from collection / Delete collection deleted these (left in no collection): here too, at
+      // once, without asking (the app asked); then the server's queue of them is acked.
+      const ids = (Array.isArray(payload.ids) ? payload.ids : []).filter((id) => typeof id === "string");
+      await removeItems(ids);
+      const pulled = await pullPendingDeletes().catch(() => ({ deleted: 0 }));
+      return { deleted: ids.length, acked: pulled.deleted };
     }
     case "setItemTags": {
       noteAction(payload, "tags", [payload.id], sender);

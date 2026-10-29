@@ -16,7 +16,7 @@
 
 import { withItems, change, read, onStoreChange, nowIso, sameTags, laterIso, fillOrder, nextOrder, orderFloorOf, setOrderFloor } from "./itemsStore";
 import { CHALLENGE_TEXT, isChallengePage } from "../../shared/bandcampChallenge";
-import { readCollections, storeFetched, acceptOps, removeQueued, setActive, allCountOf, activeOf } from "./collectionsStore";
+import { readCollections, storeFetched, acceptOps, removeQueued, setActive, allCountOf, activeOf, removeItems } from "./collectionsStore";
 import { notePush } from "./timings";
 import { splitOps, postWithOps } from "./membershipOps";
 
@@ -181,6 +181,8 @@ async function pushPending() {
 // install, a new profile) wipe the server's mirror: they then only upsert.
 // Only the popup's "sync" passes {force: true} (the app's syncNow is guarded too).
 export async function fullSync(reason, { force = false } = {}) {
+  // Tracks the app deleted first: a full sync must never send them back.
+  await pullPendingDeletes().catch((e) => console.warn("[sync] pending deletes failed", e.message));
   const { items, tags } = await read((s) => ({ items: s.taggedItems, tags: s.tags }));
   const count = Object.keys(items).length;
   let full = true;
@@ -280,6 +282,25 @@ export async function pullTagEdits() {
   if (dropped.length) console.warn("[sync] dropped queued tag edits for unknown items", dropped);
   await setStatus({ lastPullAt: Date.now(), lastPullApplied: applied });
   return { applied, dropped: dropped.length };
+}
+
+// --- Items the app deleted (Remove from collection / Delete collection) ------------
+
+// Bandcamp tracks the app left in no collection and deleted there: deleted here too (one change), then acked, which
+// lifts the server's tombstone (until then it ignores them in a sync). An older server has none (404).
+export async function pullPendingDeletes() {
+  let list;
+  try {
+    list = await api("/api/tagger/pending-deletes", { timeoutMs: 4000 });
+  } catch (e) {
+    if (e.status === 404 || e.status === 405) return { deleted: 0 };
+    throw e;
+  }
+  if (!Array.isArray(list) || !list.length) return { deleted: 0 };
+  await removeItems(list.map((d) => d.item_id).filter(Boolean));
+  await api("/api/tagger/pending-deletes/ack", { method: "POST", body: { ids: list.map((d) => d.delete_id) } });
+  await setStatus({ lastPendingDeletesAt: Date.now(), lastPendingDeletes: list.length });
+  return { deleted: list.length };
 }
 
 // --- Imported Bandcamp items queued by the server -------------------------------
@@ -450,6 +471,8 @@ export async function syncTick(reason) {
     return;
   }
   const status = await setStatus({ serverUp: true, lastCheckAt: Date.now(), serverItems: health.items });
+  // Tracks the app deleted while this extension wasn't connected: before anything is sent.
+  await pullPendingDeletes().catch((e) => console.warn("[sync] pending deletes failed", e.message));
   // Collections: read again only when the server says they changed (health.collections_version).
   const { cache, pending: ops } = await readCollections();
   if (health.collections_version != null && health.collections_version !== cache.version) await refreshCollections();

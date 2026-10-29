@@ -254,6 +254,19 @@ npm run test:e2e                         # Playwright e2e: own profile, server :
 
 ### 2026-10-28
 
+- **Remove from collection and Delete collection delete the tracks they leave in no collection; no confirmations
+  in the extension** (user, 2026-10-28; contract in LOCAL_COLLECTION_PLAN.md, server half by Session A).
+  - The app asks the server first (`dry_run`; only once the server has pending deletes, since an older one would
+    act). Nothing to delete: today's flow and confirm. Otherwise a confirmation names each track it would delete
+    (title — artist, the list scrolls) and says what happens to the others; Delete sends `delete_orphans`.
+  - Bandcamp tracks: handed to the extension at once through the bridge (`deleteItems`): the worker deletes them in
+    one change, without asking, and acks the server's pending deletes. Not connected: the worker pulls pending
+    deletes on its next check, before anything is sent (and at the start of any full sync), then acks.
+  - The extension asks nothing any more: un-star in All deletes at once, even in 2+ collections.
+  - e2e: Remove with a shared and an exclusive track (the confirmation lists only the exclusive one; Cancel changes
+    nothing; Delete removes it everywhere, the extension too); Delete collection with a track only in it; deleted
+    while the extension is away, applied on its check with a full sync due, not sent back.
+
 - **The app's rows follow membership** (user: starred a track, saw it in the app, un-starred it, and the row stayed).
   - The app tab was on All, which listed every item, in a collection or not: the un-starred track (in no
     collection, under 610e554's rule) was still in it, so the patch kept its row.
@@ -272,8 +285,9 @@ npm run test:e2e                         # Playwright e2e: own profile, server :
 - **All is every collection at once ("*"), not a collection** (user: "when `All` is selected … operations apply to
   all collections. Tagging and adding tracks adds to all available collections; deleting deletes from all").
   - In All, any tag edit now puts the track into every collection it isn't in, a starred one too (9b left a
-    starred track's collections alone). The page names every collection; the worker leaves out an add for a
-    collection the track is in already (its own copy decides), so nothing extra is queued or sent.
+    starred track's collections alone). The page names every collection, and every add is sent (one where the
+    track is already changes nothing; an earlier version left those out from the worker's copy, which lost an add
+    when that copy was older than the server's).
   - Unchanged: a star in All goes into every collection, un-star deletes from all (confirm at 2+), a star is filled
     when the track is in any; in one collection a star or tag adds there only, un-star takes it out of there only
     (deleting the track when it was its last).
