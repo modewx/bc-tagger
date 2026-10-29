@@ -416,6 +416,15 @@ If you use rekordbox Cloud Library Sync, turn it off before opening the test lib
   track in several formats), the format preference picks one, so AIFF beats MP3. Lower scores
   above `candidate_threshold` are kept as candidates to confirm in the UI
   (`POST /api/matches/{id}/confirm|reject {path}`; for albums the path is the release folder).
+- "Set file…" (collection items, any kind): `POST /api/matches/{id}/set-file {path}` takes any audio file inside
+  the music roots (symlinks and `..` resolved: 403 outside; 400 for a missing or non-audio file; 404 for an
+  unknown item), indexes it if it isn't, and makes it the item's one confirmed path, even with no title
+  overlap. An album item confirms the file's release folder. The item is located again and gets an SSE `item`
+  event; the answer is `{item_id, path, item: <item view>}`. A confirmed path is kept by every later locate,
+  scan and locate job while the file is indexed. `DELETE /api/matches/{id}/confirm` ("Back to automatic")
+  removes it, keeps the rejects, locates again and answers the item view. An item view's `local.manual` is true
+  when its best is a confirmed file (method `confirmed`/`manual`). Picking the file: `GET /api/index/search?q=`
+  (indexed files) and `GET /api/fs/list?path=` (folders and audio files under the roots).
 
 ## Ownership
 
@@ -430,22 +439,32 @@ Item views carry hints like `owned_but_only_in_not_owned_root`.
 
 For an owned item (or import row) that isn't located, `POST /api/download {ids: ["t123", "<batch>:<n>"]}`
 runs the user's `bandcamp-collection-downloader` (branch `bc-tagger-item-id`, `./gradlew fatJar`, JDK 11) with
-`--item-id a<id>|t<id>`: exactly that collection item, respecting the tool's cache unless `force`. Tracks map
-to their album when the album is owned. Releases are deduped and given to one tool run together: several
-`--item-id`, `--jobs=<download_parallel>` (default 4, like the tool's own default; at most one per release),
-`--timeout=<download_timeout_s × 1000>` (default 180 s; the tool's own 50 s restarted whole zips on slow
-stretches), `--skip-hidden`, the app's User-Agent and the cookies file. Long lists go in runs of 3 ×
-`download_parallel`, and there's still one download job at a time. Files go into `downloads_dir` (empty: the
-owned root; refused unless inside an owned root), in `download_format` (default `aiff-lossless`). After each run
-its folders are indexed and the affected items and rows are located. Bandcamp's bot check or a rate limit stops
-the rest. The tool's parallel output ("[pool-1-thread-N] …", "Progresses: [thread] x % || …") is tied to our
-releases by the "Found release" title. If a title matches none of ours, every folder that run wrote is indexed
-and the item is checked by locating it.
+`--item-id a<id>|t<id>`: exactly that collection item. Tracks map to their album when the album is owned.
+Releases are deduped and the whole job is ONE tool run (one login and one walk of the collection, like
+`bc-download`): one `--item-id` each, `--jobs=<download_parallel>` (default 4, like the tool's own default; at
+most one per release), `--timeout=<download_timeout_s × 1000>` (default 180 s; the tool's own 50 s restarted
+whole zips on slow stretches), `--skip-hidden`, `--force`, `--preorders`, the app's User-Agent and the cookies
+file. `--force` because only releases that aren't located are queued (`force: true` adds located ones too), so
+the tool's cache must not skip them. `--preorders` (like the user's `bc-download.sh -p`) fetches what's out now
+of a preorder; an item of it that isn't located afterwards reads "a preorder, out <date>: downloaded what's out
+now; this one isn't out yet". There's one download job at a time. Files go into `downloads_dir` (empty: the owned
+root; refused unless inside an owned root), in `download_format` (default `aiff-lossless`). Each release is
+indexed and its items and rows located as soon as the tool says it finished, while the run goes on (on a
+finisher thread, so reading the tool's output never waits on it); the job's `current`/`total` count finished
+releases. Bandcamp's bot check or a rate limit in the output, or the downloads drive going away (checked every
+second), ends the run at once (SIGTERM, then SIGKILL after 10 s); the releases not finished yet fail with that
+message and the result's `stopped` says why. The tool's parallel output ("[pool-1-thread-N] …", "Progresses:
+[thread] x % || …") is tied to our releases by each thread's "Managing item N/M: <id> (p<sale id>)" line (the
+tool's `bc-tagger-item-id` branch since 2026-10-29), so retries and "Could not download item: …" before "Found
+release" belong to their release too. With an older tool, by the "Found release" title; if a title matches none
+of ours, every folder the run wrote is indexed at the end and the item is checked by locating it. A release the
+output never reports on reads "the downloader didn't report on it; see the download log" (outcome
+`unreported`). Each run's output (redacted, no progress lines, after the command without the cookies file) goes
+to `<data dir>/download-logs/<job id>.log`, the newest 30 kept; the job's result has `log`, and
+`GET /api/jobs/{id}/log` serves it as text (also after a restart).
 `full_release: true` ("Download Full Release") fetches the whole album/EP of each track, when that release is
 owned; without it ("Download File") a track bought alone is fetched by itself. Item views say what's possible
-(`owned.track_owned`, `owned.album_owned`, `owned.full_release`). If the tool's cache says a release was
-downloaded before but its files aren't in the index (moved or deleted), it is fetched again once
-(`--force`). Progress is per release, "downloading 42 %" (SSE `download` events carry `percent`); the job's
+(`owned.track_owned`, `owned.album_owned`, `owned.full_release`). Progress is per release, "downloading 42 %" (SSE `download` events carry `percent`); the job's
 line lists every release in flight ("Album A: downloading 42 % · MSP01: retry 1/3: read timed out"). A retry
 names its reason in plain words ("read timed out", "HTTP 503", else the exception), and a release that needed
 retries ends "downloaded (after 1 retry: read timed out)".

@@ -626,6 +626,16 @@ def create_app(service: Service | None = None) -> FastAPI:
     def reject(item_id: str, body: PathBody) -> dict:
         return svc.set_match_override(item_id, body.path, "reject")
 
+    @app.post("/api/matches/{item_id}/set-file")
+    def set_file(item_id: str, body: PathBody) -> dict:
+        """"Set file…": any audio file in the music roots becomes the item's confirmed file."""
+        return svc.set_item_file(item_id, body.path)
+
+    @app.delete("/api/matches/{item_id}/confirm")
+    def back_to_automatic(item_id: str) -> dict:
+        """"Back to automatic": the confirmed file goes (rejects stay); returns the item view."""
+        return svc.clear_item_file(item_id)
+
     # -- rekordbox ---------------------------------------------------------------------
 
     @app.post("/api/rekordbox/export")
@@ -697,6 +707,16 @@ def create_app(service: Service | None = None) -> FastAPI:
         if j is None:
             raise HTTPException(404, f"unknown job {job_id}")
         return j.to_dict()
+
+    @app.get("/api/jobs/{job_id}/log")
+    def job_log(job_id: str) -> Response:
+        """A download job's downloader output (redacted, no progress lines); kept across restarts."""
+        from . import downloads
+
+        path = downloads.log_dir(svc) / f"{job_id}.log"
+        if not re.fullmatch(r"[\w.-]+", job_id) or not path.is_file():
+            raise HTTPException(404, f"no download log for {job_id}")
+        return Response(path.read_text(encoding="utf-8", errors="replace"), media_type="text/plain; charset=utf-8")
 
     @app.get("/api/events")
     async def events(request: Request) -> StreamingResponse:

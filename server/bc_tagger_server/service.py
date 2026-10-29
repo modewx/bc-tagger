@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import threading
 from pathlib import Path
 from typing import Any, Iterable
@@ -876,13 +877,7 @@ class Service:
 
     def set_match_override(self, item_id: str, path: str, decision: str) -> dict[str, Any]:
         """Confirm or reject a candidate path, then re-locate the item right away."""
-        from fastapi import HTTPException
-
-        from .matcher import load_overrides, locate_item, save_result
-
-        item = self.store.get_item(item_id)
-        if item is None:
-            raise HTTPException(404, f"unknown item {item_id}")
+        item = self._collection_item(item_id)
         with self.store.tx() as c:
             if decision == "confirm":
                 # One confirmed path per item.
@@ -893,10 +888,72 @@ class Service:
                 "created_at = excluded.created_at",
                 (item_id, path, decision, now_iso()),
             )
-        result = locate_item(item, self.file_index(), self.match_config(), load_overrides(self.store, item_id))
-        save_result(self.store, item_id, result)
-        self.jobs.bus.publish("item", {"id": item_id})
+        self._relocate_item(item)
         return {"item_id": item_id, "path": path, "decision": decision, "item": self.get_item_view(item_id)}
+
+    def set_item_file(self, item_id: str, path: str) -> dict[str, Any]:
+        """"Set file…" for a collection item: an audio file inside the music roots (indexed now if it isn't)
+        becomes the item's one confirmed path, with or without any title overlap; an album item confirms the
+        file's release (its folder, as the matcher groups it). The item is located again; every later locate
+        keeps it while the file is indexed, until "Back to automatic" (``clear_item_file``)."""
+        from fastapi import HTTPException
+
+        from .browse import inside_roots
+        from .indexer import index_file
+        from .items import is_album
+
+        item = self._collection_item(item_id)
+        wanted = Path(os.path.normpath(Path(path).expanduser()))
+        if not inside_roots(self.settings.roots(), wanted):
+            raise HTTPException(403, f"{path} is outside the music roots")
+        try:
+            found = index_file(self.store, wanted, self.settings.roots())
+        except FileNotFoundError:
+            raise HTTPException(400, f"no such file: {path}") from None
+        except (ValueError, OSError) as e:  # not an audio file, unreadable
+            raise HTTPException(400, str(e)) from None
+        index = self.file_index()
+        f = index.by_path.get(found["path"])
+        if f is None:
+            raise HTTPException(400, f"couldn't index {path}")
+        confirmed = f.path
+        if is_album(item):
+            at = next(i for i, g in enumerate(index.files) if g is f)
+            confirmed = next(key for key, idxs in index.releases.items() if at in idxs)
+        with self.store.tx() as c:
+            c.execute("DELETE FROM match_overrides WHERE item_id = ? AND decision = 'confirm'", (item_id,))
+            c.execute("INSERT INTO match_overrides(item_id, path, decision, created_at) VALUES(?, ?, 'confirm', ?) "
+                      "ON CONFLICT(item_id, path) DO UPDATE SET decision = excluded.decision, "
+                      "created_at = excluded.created_at", (item_id, confirmed, now_iso()))
+        self._relocate_item(item)
+        return {"item_id": item_id, "path": confirmed, "item": self.get_item_view(item_id)}
+
+    def clear_item_file(self, item_id: str) -> dict | None:
+        """"Back to automatic": the item's confirmed path goes (rejected ones stay) and it's located again.
+        Returns the item view."""
+        item = self._collection_item(item_id)
+        with self.store.tx() as c:
+            c.execute("DELETE FROM match_overrides WHERE item_id = ? AND decision = 'confirm'", (item_id,))
+        self._relocate_item(item)
+        return self.get_item_view(item_id)
+
+    def _collection_item(self, item_id: str) -> dict:
+        """Any collection item (Bandcamp, pending add, other), else a 404."""
+        from fastapi import HTTPException
+
+        from .collection import all_items
+
+        item = next((it for it in all_items(self.store) if it["id"] == item_id), None)
+        if item is None:
+            raise HTTPException(404, f"unknown item {item_id}")
+        return item
+
+    def _relocate_item(self, item: dict) -> None:
+        from .matcher import load_overrides, locate_item, save_result
+
+        result = locate_item(item, self.file_index(), self.match_config(), load_overrides(self.store, item["id"]))
+        save_result(self.store, item["id"], result)
+        self.jobs.bus.publish("item", {"id": item["id"]})
 
     def start_download(self, string_filter: str, number: int = 1, audio_format: str = "aiff-lossless", dry_run: bool = False):
         from .downloader import run

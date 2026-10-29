@@ -1,10 +1,12 @@
 """Wrapper around bandcamp-collection-downloader (the user's Kotlin tool).
 
 * Exact releases (Phase 4, ``run_releases``): ``--item-id a<id>|t<id>`` for each release downloads exactly
-  those collection items in one run, ``download_parallel`` at a time (``--jobs``), with ``download_timeout_s``
-  as the tool's ``--timeout``, respecting the tool's cache unless ``force``, into ``downloads_dir`` (default:
-  the owned root; refused unless inside an owned root). Only on the user's click; agents and
-  tests use ``test-downloads/`` or a stub (``BC_TAGGER_DOWNLOADER_STUB=<script>``).
+  those collection items in one run (one walk of the collection), ``download_parallel`` at a time (``--jobs``),
+  with ``download_timeout_s`` as the tool's ``--timeout``, respecting the tool's cache unless ``force``, and
+  ``--preorders`` (what's out now of a preorder), into ``downloads_dir`` (default: the owned root; refused
+  unless inside an owned root). Bandcamp's bot check or a rate limit in the output, or the drive going away,
+  ends the run at once. The run's output (redacted, no progress lines) can go to a log file. Only on the
+  user's click; agents and tests use ``test-downloads/`` or a stub (``BC_TAGGER_DOWNLOADER_STUB=<script>``).
 * Filtered sets (A7, CLI, agents): a non-wildcard ``--string-filter``, at most ``MAX_ITEMS``
   releases, only into ``test-downloads/``.
 
@@ -20,6 +22,8 @@ import os
 import re
 import subprocess
 import sys
+import threading
+import time
 from pathlib import Path
 from typing import Any, Callable
 
@@ -30,6 +34,8 @@ from .fsguard import NotMounted, ensure_dir_under, require_existing_root
 from .rbguard import is_within, resolve
 
 MAX_ITEMS = 5
+DRIVE_CHECK_S = 1.0  # a run checks this often that the downloads drive is still there
+KILL_AFTER_S = 10.0  # a stopped run that hasn't ended after SIGTERM gets SIGKILL
 FORMATS = {"flac", "wav", "aac-hi", "mp3-320", "aiff-lossless", "vorbis", "mp3-v0", "alac"}
 _SECRET = re.compile(r"(identity|session|js_logged_in|BACKENDID\d*|csrf_token)=([^;\s]+)", re.I)
 LEGACY_JAR = Path.home() / "Scripts/bc-download/bandcamp-collection-downloader-master/build/libs/bandcamp-collection-downloader.jar"
@@ -116,7 +122,8 @@ def _launcher(settings) -> list[str]:
 def release_command(settings, release_ids: str | list[str], audio_format: str = "aiff-lossless",
                     force: bool = False, jobs: int | None = None) -> list[str]:
     """One downloader run for exact releases: ``--item-id`` for each, ``--jobs`` parallel downloads
-    (``download_parallel``, at most one per release) and ``--timeout`` (``download_timeout_s``)."""
+    (``download_parallel``, at most one per release), ``--timeout`` (``download_timeout_s``) and ``--preorders``
+    (a preorder's tracks that are out now, like the user's ``bc-download.sh -p``)."""
     ids = [release_ids] if isinstance(release_ids, str) else list(release_ids)
     if not ids or not all(re.fullmatch(r"[at]\d+", i or "") for i in ids):
         raise DownloadRefused(f"not release ids: {ids!r}")
@@ -138,9 +145,15 @@ def release_command(settings, release_ids: str | list[str], audio_format: str = 
         f"--timeout={timeout_ms}",
         f"--user-agent={USER_AGENT}",
         *(["--force"] if force else []),
+        "--preorders",
         f"--cookies-file={cookies}",
         settings.get("bandcamp_username"),
     ]
+
+
+def shown(cmd: list[str]) -> list[str]:
+    """The command as logs show it: the cookies file's path left out too."""
+    return [c if not c.startswith("--cookies-file=") else "--cookies-file=<cookies file>" for c in cmd]
 
 
 _THREAD = re.compile(r"^\[([^\]]+)\]\s+(.*)$")  # parallel runs: "[pool-1-thread-2] <message>"
@@ -150,6 +163,11 @@ _TRY_ERROR = re.compile(r'Error while trying: "(.*)"\.?\s*$')
 _RETRY = re.compile(r"Retrying \((\d+)/(\d+)\)")
 _FOUND = re.compile(r'Found release "(.*)" \((\d{4})\) by (.*) \(Bandcamp ID: [^)]*\)\.?\s*$')
 _NOT_IN = re.compile(r"Not in the collection: (.*)$")
+_RATE_LIMIT = re.compile(r"Status=429|HTTP 429|Too Many Requests")
+# "Managing item 2/6: t3716152796 (p408218550)" (the tool since 2026-10-29; before, just "Managing item 2/6")
+_MANAGING = re.compile(r"^Managing item \d+/\d+(?::\s*(\S+))?")
+_PREORDER = re.compile(r"is a preorder \(out ([^)]+)\); downloading")
+_GONE = "cannot be downloaded anymore"  # "Sale Item ID p1 cannot be downloaded anymore (maybe a refund?); skipping"
 
 
 def _short_error(error: str | None) -> str:
@@ -180,14 +198,22 @@ def _match_release(title: str, artist: str, releases: list[dict], taken: set[str
 
 
 def run_releases(settings, releases: list[dict], audio_format: str = "aiff-lossless", force: bool = False,
-                 on_line: Callable[..., None] | None = None, jobs: int | None = None) -> dict[str, Any]:
+                 on_line: Callable[..., None] | None = None, jobs: int | None = None,
+                 on_done: Callable[[dict], None] | None = None, log_path: Path | None = None) -> dict[str, Any]:
     """Download several releases in one downloader run, ``download_parallel`` at a time. ``releases``:
-    ``[{release, title, artist}]`` (the title tells the tool's output lines apart). Returns ``{"releases":
-    {release: {outcome, ok, folder, files, errors, retries}}, "exit_code", "log_tail"}``; ``outcome``:
-    downloaded | on_disk | cached | not_in_collection | challenged | rate_limited | failed, or unmatched
-    (the output named a release we couldn't tie to this one; ``folders`` lists every release folder written).
-    ``on_line(release, message, percent)`` gets each release's progress in plain words (``release`` is None
-    for lines about the whole run): its percentage, and on a retry the reason."""
+    ``[{release, title, artist}]``. Returns ``{"releases": {release: {outcome, ok, folder, files, errors, retries,
+    preorder}}, "stopped", "stop_error", "exit_code", "log_tail"}``; ``outcome``: downloaded | on_disk | cached |
+    not_in_collection | challenged | rate_limited | failed | unreported (the output never said what became of
+    it), or unmatched (the output named a release we couldn't tie to this one; ``folders`` lists every release
+    folder written). ``preorder``: its release date, for a preorder. Each thread's lines are tied to a release by
+    its "Managing item N/M: <id> (<sale id>)" line, or, with an older tool, by the "Found release" title. ``on_line(release, message, percent)`` gets each release's progress in plain words (``release`` is
+    None for lines about the whole run): its percentage, and on a retry the reason. ``on_done(result)`` gets a
+    release's result as soon as the output says it finished (downloaded, on disk, failed, not in the collection)
+    while the run goes on; it's called on the thread reading the tool's output, so it must be quick.
+    Bandcamp's bot check or a rate limit in the output, or the downloads drive going away, ends the run at once
+    (``stopped``: challenged | rate_limited | not_mounted, with the drive's message in ``stop_error``); releases
+    not finished by then get that outcome (failed, for the drive). ``log_path``: the run's output goes there as
+    it comes (redacted, without progress lines), after the command (without the cookies file)."""
     ids = [r["release"] for r in releases]
     cmd = release_command(settings, ids, audio_format, force, jobs)
     target, root = _downloads_root(settings)  # again: the drive may have gone since the job started
@@ -196,89 +222,154 @@ def run_releases(settings, releases: list[dict], audio_format: str = "aiff-lossl
     except NotMounted as e:
         raise DownloadRefused(str(e)) from None
     say = on_line or (lambda release, message, percent=None: None)
-    state = {i: {"outcome": None, "folder": None, "errors": [], "retries": [], "percent": None, "last_error": None}
-             for i in ids}
+    state = {i: {"outcome": None, "folder": None, "errors": [], "retries": [], "percent": None, "last_error": None,
+                 "reported": False, "preorder": None} for i in ids}
     thread_release: dict[str, str | None] = {}
     taken: set[str] = set()
     unmatched = 0  # "Found release" lines we couldn't tie to one of ours
     folders: list[str] = []
     stray_errors: list[str] = []  # errors on those releases' lines
     lines: list[str] = []
+    stopped: dict[str, Any] = {}
+    stop_lock, ended = threading.Lock(), threading.Event()
+    log = None
+    if log_path is not None:
+        Path(log_path).parent.mkdir(parents=True, exist_ok=True)
+        log = open(log_path, "w", encoding="utf-8")  # noqa: SIM115 (closed below)
+        log.write(f"# {time.strftime('%Y-%m-%d %H:%M:%S')}  {' '.join(shown(cmd))}\n")
+        log.flush()
     proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
     assert proc.stdout is not None
-    for raw in proc.stdout:  # text mode: the tool's "\r" progress updates arrive as lines too
-        line = redact(raw.strip())
-        if not line:
-            continue
-        progress = _PROGRESSES.match(line)
-        if progress:  # thousands of these: report whole percents per release, don't keep them
-            for part in progress.group(1).split("||"):
-                m = _ONE_PROGRESS.search(part)
-                rel = thread_release.get(m.group(1) or "main") if m else None
-                if m and rel:
-                    p, st = float(m.group(2).replace(",", ".")), state[rel]
-                    if st["percent"] is None or int(p) > int(st["percent"]):
-                        st["percent"] = p
-                        say(rel, f"downloading {int(p)} %", p)
-            continue
-        lines.append(line)
-        m = _THREAD.match(line)
-        thread, msg = (m.group(1), m.group(2)) if m else ("main", line)
-        if (found := _FOUND.search(msg)) is not None:
-            rel = _match_release(found.group(1), found.group(3), releases, taken)
-            thread_release[thread] = rel
-            if rel:
-                taken.add(rel)
+
+    def stop(why: str, error: str | None = None) -> None:
+        with stop_lock:
+            if not stopped:
+                stopped.update(why=why, error=error, at=time.monotonic())
+                proc.terminate()
+
+    def guard() -> None:  # the drive's still there; a stopped run that won't end is killed
+        while not ended.wait(DRIVE_CHECK_S):
+            if stopped:
+                if time.monotonic() - stopped["at"] > KILL_AFTER_S:
+                    proc.kill()
+                    return
+                continue
+            try:
+                require_existing_root(root)
+            except NotMounted as e:
+                stop("not_mounted", str(e))
+
+    def result(i: str, outcome: str) -> dict[str, Any]:
+        st = state[i]
+        folder = st["folder"]
+        files = sorted(str(p) for p in Path(folder).rglob("*") if p.is_file() and not p.name.startswith(".")) \
+            if folder and Path(folder).is_dir() else []
+        return {"release": i, "outcome": outcome, "ok": outcome in ("downloaded", "on_disk", "cached"),
+                "folder": folder, "files": files, "errors": st["errors"][-5:], "retries": st["retries"],
+                "preorder": st["preorder"]}
+
+    def finished(i: str, outcome: str) -> None:
+        st = state[i]
+        st["outcome"] = outcome
+        if on_done and not st["reported"]:
+            st["reported"] = True
+            on_done(result(i, outcome))
+
+    threading.Thread(target=guard, name="downloader-guard", daemon=True).start()
+    try:
+        for raw in proc.stdout:  # text mode: the tool's "\r" progress updates arrive as lines too
+            line = redact(raw.strip())
+            if not line:
+                continue
+            progress = _PROGRESSES.match(line)
+            if progress:  # thousands of these: report whole percents per release, don't keep them
+                for part in progress.group(1).split("||"):
+                    m = _ONE_PROGRESS.search(part)
+                    rel = thread_release.get(m.group(1) or "main") if m else None
+                    if m and rel:
+                        p, st = float(m.group(2).replace(",", ".")), state[rel]
+                        if st["percent"] is None or int(p) > int(st["percent"]):
+                            st["percent"] = p
+                            say(rel, f"downloading {int(p)} %", p)
+                continue
+            lines.append(line)
+            if log:
+                log.write(line + "\n")
+                log.flush()
+            if is_challenge(line) or "Client Challenge" in line:  # never retry past it: stop the run now
+                stop("challenged")
+            elif _RATE_LIMIT.search(line):
+                stop("rate_limited")
+            m = _THREAD.match(line)
+            thread, msg = (m.group(1), m.group(2)) if m else ("main", line)
+            if (found := _FOUND.search(msg)) is not None:
+                if thread_release.get(thread):  # its "Managing item" line said which
+                    say(thread_release[thread], "found", None)
+                    continue
+                rel = _match_release(found.group(1), found.group(3), releases, taken)
+                thread_release[thread] = rel
+                if rel:
+                    taken.add(rel)
+                else:
+                    unmatched += 1
+                continue
+            if "Release folder: " in msg:
+                folders.append(msg.split("Release folder: ", 1)[1].strip())
+            if (managing := _MANAGING.match(msg)) is not None:
+                rel = managing.group(1) if managing.group(1) in state else None
+                thread_release[thread] = rel  # else (an older tool) the next "Found release" says which
+                if rel:
+                    taken.add(rel)
+                continue
+            if (gone := _NOT_IN.search(msg)) is not None:
+                for i in re.split(r"[,\s]+", gone.group(1)):
+                    if i in state:
+                        finished(i, "not_in_collection")
+                continue
+            rel = thread_release.get(thread)
+            st = state.get(rel) if rel else None
+            if st is None:
+                if msg.startswith("Could not download item") or _TRY_ERROR.search(msg):
+                    stray_errors.append(msg)
+                say(None, msg[-200:], None)
+                continue
+            if "Release folder: " in msg:
+                st["folder"] = msg.split("Release folder: ", 1)[1].strip()
+            if (e := _TRY_ERROR.search(msg)) is not None:
+                st["last_error"] = e.group(1)
+                st["retries"].append(_short_error(e.group(1)))
+                say(rel, f"Bandcamp error: {_short_error(e.group(1))}", st["percent"])
+            elif (r := _RETRY.search(msg)) is not None:
+                st["percent"] = None
+                say(rel, f"retry {r.group(1)}/{r.group(2)}: {_short_error(st['last_error'])}", None)
+            elif (pre := _PREORDER.search(msg)) is not None:
+                st["preorder"] = pre.group(1)
+                say(rel, f"a preorder (out {pre.group(1)}): downloading what's out now", None)
+            elif "Starting the download of" in msg:
+                say(rel, "downloading…", None)
+            elif "successfully downloaded" in msg:
+                say(rel, "downloaded; unpacking done", 100.0)
+                finished(rel, "downloaded")
+            elif "already exists on disk" in msg:
+                finished(rel, "on_disk")
+            elif msg.startswith("Could not download item") or "is a preorder; skipping" in msg or _GONE in msg:
+                st["errors"].append(msg)
+                say(rel, msg[-200:], st["percent"])
+                finished(rel, "failed")
             else:
-                unmatched += 1
-            continue
-        if "Release folder: " in msg:
-            folders.append(msg.split("Release folder: ", 1)[1].strip())
-        if msg.startswith("Managing item"):
-            thread_release[thread] = None  # the next "Found release" says which
-            continue
-        if (gone := _NOT_IN.search(msg)) is not None:
-            for i in re.split(r"[,\s]+", gone.group(1)):
-                if i in state:
-                    state[i]["outcome"] = "not_in_collection"
-            continue
-        rel = thread_release.get(thread)
-        st = state.get(rel) if rel else None
-        if st is None:
-            if msg.startswith("Could not download item") or _TRY_ERROR.search(msg):
-                stray_errors.append(msg)
-            say(None, msg[-200:], None)
-            continue
-        if "Release folder: " in msg:
-            st["folder"] = msg.split("Release folder: ", 1)[1].strip()
-        if (e := _TRY_ERROR.search(msg)) is not None:
-            st["last_error"] = e.group(1)
-            st["retries"].append(_short_error(e.group(1)))
-            say(rel, f"Bandcamp error: {_short_error(e.group(1))}", st["percent"])
-        elif (r := _RETRY.search(msg)) is not None:
-            st["percent"] = None
-            say(rel, f"retry {r.group(1)}/{r.group(2)}: {_short_error(st['last_error'])}", None)
-        elif "Starting the download of" in msg:
-            say(rel, "downloading…", None)
-        elif "successfully downloaded" in msg:
-            st["outcome"] = "downloaded"
-            say(rel, "downloaded; unpacking done", 100.0)
-        elif "already exists on disk" in msg:
-            st["outcome"] = "on_disk"
-        elif msg.startswith("Could not download item") or "is a preorder; skipping" in msg:
-            st["outcome"] = "failed"
-            st["errors"].append(msg)
-            say(rel, msg[-200:], st["percent"])
-        else:
-            say(rel, msg[-200:], st["percent"])
-    code = proc.wait()
+                say(rel, msg[-200:], st["percent"])
+        code = proc.wait()
+    finally:
+        ended.set()
+        if proc.poll() is None:  # the reader failed (on_done or on_line raised): don't leave the tool running
+            proc.kill()
+            proc.wait()
+        if log:
+            log.write(f"# exit {proc.returncode}" + (f", stopped: {stopped['why']}" if stopped else "") + "\n")
+            log.close()
     text = "\n".join(lines)
-    run_outcome = None
-    if is_challenge(text) or "Client Challenge" in text:
-        run_outcome = "challenged"
-    elif re.search(r"Status=429|HTTP 429|Too Many Requests", text):
-        run_outcome = "rate_limited"
-    elif "None of the requested items are in the collection" in text:
+    run_outcome = stopped.get("why")
+    if run_outcome is None and "None of the requested items are in the collection" in text:
         run_outcome = "not_in_collection"
     ignored = re.search(r"Ignoring \d+ already downloaded items", text) is not None
     out: dict[str, dict[str, Any]] = {}
@@ -287,17 +378,16 @@ def run_releases(settings, releases: list[dict], audio_format: str = "aiff-lossl
         outcome = st["outcome"]
         if outcome is None and i not in taken and not run_outcome and unmatched:
             outcome = "unmatched"  # some release we couldn't tell apart: the caller checks its files
+        if outcome is None and run_outcome == "not_mounted":
+            outcome = "failed"
+            st["errors"].append(stopped["error"])
         if outcome is None:
-            outcome = run_outcome or ("cached" if ignored and i not in taken else "failed")
-        if outcome == "failed" and not st["errors"]:
-            st["errors"] = [ln for ln in lines if "ERROR" in ln][-3:]
-        folder = st["folder"]
-        files = sorted(str(p) for p in Path(folder).rglob("*") if p.is_file() and not p.name.startswith(".")) \
-            if folder and Path(folder).is_dir() else []
-        out[i] = {"release": i, "outcome": outcome, "ok": outcome in ("downloaded", "on_disk", "cached"),
-                  "folder": folder, "files": files, "errors": st["errors"][-5:], "retries": st["retries"]}
-    return {"releases": out, "folders": folders, "stray_errors": stray_errors[-5:], "exit_code": code,
-            "log_tail": lines[-20:]}
+            outcome = run_outcome or ("cached" if ignored and i not in taken else "unreported")
+        if outcome in ("failed", "unreported") and not st["errors"]:
+            st["errors"] = [ln for ln in lines if "ERROR" in ln][-3:]  # the run's own errors, if any
+        out[i] = result(i, outcome)
+    return {"releases": out, "folders": folders, "stray_errors": stray_errors[-5:], "stopped": stopped.get("why"),
+            "stop_error": stopped.get("error"), "exit_code": code, "log_tail": lines[-20:]}
 
 
 def run_release(settings, release_id: str, audio_format: str = "aiff-lossless", force: bool = False,

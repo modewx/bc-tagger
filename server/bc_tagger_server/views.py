@@ -95,7 +95,7 @@ def local_status(store: Store, item_id: str, data: ViewData | None = None) -> di
     else:
         row = store.query_one("SELECT * FROM locate_results WHERE item_id = ?", (item_id,))
     if not row:
-        return {"status": "unknown", "best": None, "candidates": []}
+        return {"status": "unknown", "best": None, "candidates": [], "manual": False}
     best = json.loads(row["best"]) if row["best"] else None
     if best is not None:
         files = data.files if data is not None else file_info(store, [t["path"] for t in located_tracks(best)])
@@ -105,6 +105,7 @@ def local_status(store: Store, item_id: str, data: ViewData | None = None) -> di
         "best": best,
         "candidates": json.loads(row["candidates"]) if row["candidates"] else [],
         "located_at": row["located_at"],
+        "manual": bool(best) and best.get("method") in ("confirmed", "manual"),  # a file the user set or confirmed
     }
 
 
