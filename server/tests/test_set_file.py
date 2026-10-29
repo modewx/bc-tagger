@@ -41,7 +41,7 @@ def test_set_file_indexes_a_file_in_the_roots_with_no_title_overlap(setup):
     r = c.post("/api/matches/t1/set-file", json={"path": str(picked)})
     assert r.status_code == 200, r.text
     body = r.json()
-    assert body["item_id"] == "t1" and body["path"] == str(picked)
+    assert body["item_id"] == "t1" and body["path"] == str(picked) and body["decision"] == "confirm"
     view = body["item"]["local"]
     assert view["status"] == "located" and view["best"]["path"] == str(picked) and view["best"]["method"] == "confirmed"
     assert view["manual"] is True
@@ -53,24 +53,29 @@ def test_set_file_indexes_a_file_in_the_roots_with_no_title_overlap(setup):
     assert row["local"]["manual"] is True and row["local"]["best"]["path"] == str(picked)
 
 
-def test_set_file_refuses_what_isnt_an_audio_file_in_the_roots(setup):
+def test_set_file_takes_what_an_import_row_takes(setup):
+    """The import's "Set file…" helper: any audio file (outside the roots, its folder counts as a not-owned
+    root), and its folder is where the file browser opens next, on either page."""
     c, svc, music, tmp = setup["c"], setup["svc"], setup["music"], setup["tmp"]
-    outside = write_aiff(tmp / "elsewhere" / "x.aiff", "Song A", "Artist A", "Album", 1)
     before = svc.store.query("SELECT * FROM match_overrides")
-    for path in (str(outside), str(music / ".." / "elsewhere" / "x.aiff")):
-        r = c.post("/api/matches/t1/set-file", json={"path": path})
-        assert r.status_code == 403 and "outside the music roots" in r.json()["detail"]
-    (music / "link").symlink_to(tmp / "elsewhere")  # a link out of the roots doesn't count as inside
-    assert c.post("/api/matches/t1/set-file", json={"path": str(music / "link" / "x.aiff")}).status_code == 403
     r = c.post("/api/matches/t1/set-file", json={"path": str(music / "Loose" / "gone.aiff")})
     assert r.status_code == 400 and "no such file" in r.json()["detail"]
     (music / "notes.txt").write_text("x")
     r = c.post("/api/matches/t1/set-file", json={"path": str(music / "notes.txt")})
     assert r.status_code == 400 and "not an audio file" in r.json()["detail"]
-    assert c.post("/api/matches/nope/set-file", json={"path": setup["auto"]}).status_code == 404
-    assert svc.store.query_one("SELECT 1 FROM files WHERE path LIKE ?", (str(tmp / "elsewhere") + "%",)) is None
+    elsewhere = write_aiff(tmp / "elsewhere" / "x.aiff", "Whatever", "Someone", "Else", 1)
+    assert c.post("/api/matches/nope/set-file", json={"path": str(elsewhere)}).status_code == 404
+    assert svc.store.query_one("SELECT 1 FROM files WHERE path = ?", (str(elsewhere),)) is None  # 404 first
     assert svc.store.query("SELECT * FROM match_overrides") == before
-    assert local(c, "t1")["best"]["path"] == setup["auto"]
+    assert c.get("/api/settings").json()["last_browse_dir"] == ""
+    r = c.post("/api/matches/t1/set-file", json={"path": str(elsewhere)})
+    assert r.status_code == 200 and r.json()["item"]["local"]["best"]["path"] == str(elsewhere)
+    row = svc.store.query_one("SELECT root_kind FROM files WHERE path = ?", (str(elsewhere),))
+    assert row["root_kind"] == "not_owned"
+    assert c.get("/api/settings").json()["last_browse_dir"] == str(tmp / "elsewhere")
+    picked = write_aiff(music / "Loose" / "rip.aiff", "Totally Different", "Someone", "Bootleg", 7)
+    c.post("/api/matches/t1/set-file", json={"path": str(picked)})
+    assert c.get("/api/settings").json()["last_browse_dir"] == str(music / "Loose")
 
 
 def test_a_manual_file_survives_scans_and_locates(setup):

@@ -1018,8 +1018,7 @@ def update_row(svc, batch_id: str, n: int, changes: dict) -> dict:
         identity = True
     if "path" in changes:  # the user picks the file (like the collection's Located popover); None: back to auto
         if changes["path"]:
-            row["located"] = _manual_location(svc, changes["path"])
-            svc.settings.update({"last_browse_dir": str(Path(row["located"]["best"]["path"]).parent)})
+            row["located"] = _manual_location(svc, changes["path"])  # remembers its folder (last_browse_dir)
         else:
             row["located"] = {"status": "unknown", "best": None, "candidates": []}
             _locate(svc, [row])
@@ -1080,18 +1079,14 @@ def _clean_page_url(value: str | None, key: str = "bandcamp_url") -> str:
 
 
 def _manual_location(svc, path: str) -> dict[str, Any]:
-    from .indexer import index_file
     from .matcher import _file_entry
 
     try:
-        found = index_file(svc.store, path, svc.settings.roots())
+        view = svc.index_picked_file(path)  # also the collection's "Set file…"
     except FileNotFoundError:
         raise ImportError_(f"no such file: {path}") from None
     except (ValueError, OSError) as e:
         raise ImportError_(str(e)) from None
-    view = svc.file_index().by_path.get(found["path"])
-    if view is None:
-        raise ImportError_(f"couldn't index {path}")
     best = _file_entry(view, {"confidence": 1.0, "method": "manual"})
     return {"status": "located", "best": best, "candidates": [], "manual": True, "match_source": "manual"}
 
