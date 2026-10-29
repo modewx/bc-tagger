@@ -284,11 +284,12 @@ function hashCode(str) {
 // changed), so a tab in the background does no work. A star or a tag change here is drawn at once and sent as a
 // change; the worker queues it and writes it later, with others.
 //
-// Stars (Phase 9b): in a collection, filled when the item is in it; un-starring takes it out, and deletes it (with
-// its tags) when that was its last collection (the worker decides, from its own copy). In All (chosen in the popup,
-// never the default), filled when it's in any collection, and drawn differently (`.bct-all`): a star puts the item
-// into every collection, un-starring deletes it from all of them. No collection known yet (the server never
-// reached): filled when saved.
+// Stars (Phase 9b): in a collection, filled when the item is in it; a star or a tag adds it there only; un-starring
+// takes it out of it only, and deletes it (with its tags) when that was its last collection (the worker decides, from
+// its own copy). All (chosen in the popup, never the default) isn't a collection but every one at once: filled when
+// the item is in any, drawn differently (`.bct-all`); a star or any tag edit puts the item into every collection it
+// isn't in; un-starring deletes it from all of them. No collection known yet (the server never reached): filled
+// when saved.
 const ALL = "all";
 const page = {
   rev: null, // the worker's version of what's below
@@ -327,7 +328,7 @@ function setStarClass(tagButton) {
   tagButton.classList.toggle("bct-all", page.active === ALL);
   tagButton.title =
     page.active === ALL
-      ? "All: a star puts this into every collection; un-starring deletes it (and its tags) from all of them"
+      ? "All: a star or a tag puts this into every collection; un-starring deletes it (and its tags) from all of them"
       : "";
 }
 const redrawStars = () =>
@@ -562,9 +563,9 @@ function createTagButton(element, itemUrl, trackdata) {
         const since = actionStart();
         const currentTags = tagger.val() || [];
         const existingItem = page.items[uniqueId];
-        // Tagging an item that isn't starred here stars it: into the collection shown (All: every collection). A
-        // starred one keeps its collections.
-        const joins = starred(uniqueId) ? [] : targets();
+        // A tag edit puts the item where a star would: the collection shown when it isn't in it; in All, every
+        // collection it isn't in (the worker leaves out those it's in already).
+        const joins = page.active === ALL ? targets() : starred(uniqueId) ? [] : targets();
         const item = existingItem
           ? { ...existingItem, tags: currentTags } // its tags in place; the rest (date_added too) intact
           : { ...trackdata, date_added: new Date().toISOString(), tags: currentTags };

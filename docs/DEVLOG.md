@@ -254,6 +254,18 @@ npm run test:e2e                         # Playwright e2e: own profile, server :
 
 ### 2026-10-28
 
+- **All is every collection at once ("*"), not a collection** (user: "when `All` is selected … operations apply to
+  all collections. Tagging and adding tracks adds to all available collections; deleting deletes from all").
+  - In All, any tag edit now puts the track into every collection it isn't in, a starred one too (9b left a
+    starred track's collections alone). The page names every collection; the worker leaves out an add for a
+    collection the track is in already (its own copy decides), so nothing extra is queued or sent.
+  - Unchanged: a star in All goes into every collection, un-star deletes from all (confirm at 2+), a star is filled
+    when the track is in any; in one collection a star or tag adds there only, un-star takes it out of there only
+    (deleting the track when it was its last).
+  - The popup says "All: stars and tags go into every collection; un-star deletes from all."
+  - e2e: in All, a tag edit on a track in one of two collections puts it in both (the Phase 9 test's tag step,
+    which was on an unstarred track).
+
 - **Un-starring in a track's last collection deletes it** (user: "Yes, delete it", so All is always the union).
   - Un-star in a collection the track shares with others: out of that one only, its tags kept.
   - In its last collection: the track and its tags are deleted, one change sent to the server as a deletion (which

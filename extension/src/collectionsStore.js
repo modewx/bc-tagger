@@ -9,9 +9,10 @@
 // The cache shows the pending changes too (optimistic); a fresh read from the server gets them put back on top until
 // the server has them.
 //
-// All (Phase 9b) is a special mode, never the default: a star puts the item into every collection, a star is filled
-// when the item is in any, and un-starring deletes it (and its tags) from all of them. Every track is in at least one
-// collection: un-starring it in its last one deletes it too.
+// All (Phase 9b) isn't a collection: it's every collection at once ("*"), never the default. A star, or any tag edit,
+// puts the item into every collection it isn't in; a star is filled when the item is in any; un-starring deletes it
+// (and its tags) from all of them. In one collection, a star or tag adds to it only, un-starring takes the item out
+// of it only. Every track is in at least one collection: un-starring it in its last one deletes it.
 
 import { change, read, rev } from "./itemsStore";
 import { splitOps, withoutOps } from "./membershipOps";
@@ -115,10 +116,18 @@ export function queueMembership(ops, writeItems = null, ids = []) {
   });
 }
 
-// The values a queued change gives: the ops in the queue, and in the copy shown.
+// The values a queued change gives: the ops in the queue, and in the copy shown. An add for a collection an item is in
+// already (as this copy has it: a page's may be older) is left out.
 function queued(s, ops) {
-  if (!ops.length) return {};
   const cache = cacheOf(s);
+  ops = ops
+    .map((op) => {
+      if (op.op !== "add") return op;
+      const there = new Set(cache.members[String(op.collection_id)] || []);
+      return { ...op, ids: op.ids.filter((id) => !there.has(id)) };
+    })
+    .filter((op) => op.ids.length);
+  if (!ops.length) return {};
   return { pendingMembership: [...pendingOf(s), ...ops], collectionsCache: recount({ ...cache, members: applyOps(cache.members, ops) }) };
 }
 

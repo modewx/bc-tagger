@@ -5036,7 +5036,6 @@ test("Bandcamp page: the stars of a recorded album page are drawn as fast with 1
 
 const ALBUM = "a563830364"; // Synergy Trilogy, in the imported export (in "Collection")
 const TRACK = "t3738475288"; // Holo Law, one of its tracks: not saved
-const TRACK2 = "t3738475200"; // its other track (a stand-in in the recorded page)
 const ALBUM_URL = "https://infiniteexpanse.bandcamp.com/album/synergy-trilogy";
 const setStorage = (values) => probe.evaluate((v) => store.set(v), values);
 const send = (msg) => probe.evaluate((m) => new Promise((r) => chrome.runtime.sendMessage(m, r)), msg);
@@ -5130,7 +5129,7 @@ test("Collections in the extension: the popup lists All (every item, as the app 
     assert.equal(await popup.isVisible("#allWarning"), false);
     assert.equal(await popup.isVisible("#copyTimings"), true);
     await popup.selectOption("#collectionPicker", "all");
-    assert.equal(await popup.textContent("#allWarning"), "All: stars go into every collection; un-star deletes from all.");
+    assert.equal(await popup.textContent("#allWarning"), "All: stars and tags go into every collection; un-star deletes from all.");
     assert.equal(await popup.isVisible("#allWarning"), true);
     if (process.env.E2E_SHOTS) await popup.screenshot({ path: path.join(process.env.E2E_SHOTS, "popup-collections.png") });
     await popup.selectOption("#collectionPicker", String(crates.id));
@@ -5149,7 +5148,7 @@ test("Collections in the extension: the popup lists All (every item, as the app 
   }
 });
 
-test("Collections in the extension: a Bandcamp page's stars follow the popup's choice when it's shown again (no reload); star and un-star in one of two collections (membership only); All: stars into every collection, filled when in any, drawn apart, a tag on an unstarred track stars it everywhere, un-starring deletes it (asking when it's in two or more)", async () => {
+test("Collections in the extension: a Bandcamp page's stars follow the popup's choice when it's shown again (no reload); star and un-star in one of two collections (membership only); All: stars and tag edits put the track into every collection, filled when in any, drawn apart, un-starring deletes it (asking when it's in two or more)", async () => {
   await dropCollections();
   const crates = await post("/api/collections", { name: "E2E Crates" });
   const page = await context.newPage();
@@ -5160,8 +5159,7 @@ test("Collections in the extension: a Bandcamp page's stars follow the popup's c
     answer ? d.accept() : d.dismiss();
   });
   const saved = async (id) => !!(await storage("taggedItems")).taggedItems[id];
-  const OTHER = TRACK2;
-  const putBack = await tracksAside([TRACK, OTHER]);
+  const putBack = await tracksAside([TRACK]);
   const albumCopy = (await storage("taggedItems")).taggedItems[ALBUM];
   assert.ok(albumCopy);
   await extensionCaughtUp();
@@ -5207,13 +5205,12 @@ test("Collections in the extension: a Bandcamp page's stars follow the popup's c
     await page.waitForSelector(`.tag-button.bct-all[data-item-id="${TRACK}"]`);
     await starIs(page, TRACK, true);
     assert.equal(await isStarred(page, ALBUM), true);
-    assert.equal(await isStarred(page, OTHER), false);
     assert.equal(loads.length, 0, "no reload");
-    // A tag on an unstarred track stars it, into every collection.
-    await page.click(`#tagger_${OTHER} + .chosen-container`);
-    await page.click(`#tagger_${OTHER} + .chosen-container .chosen-results li.active-result`);
-    await starIs(page, OTHER, true);
-    await waitSoon(async () => (await membersOf(0)).includes(OTHER) && (await membersOf(crates.id)).includes(OTHER), { what: "the tagged track in both" });
+    // All is every collection: a tag edit on a track in one of the two (Collection) puts it in the other too.
+    await page.click(`#tagger_${TRACK} + .chosen-container`);
+    await page.click(`#tagger_${TRACK} + .chosen-container .chosen-results li.active-result`);
+    await waitSoon(async () => (await membersOf(crates.id)).includes(TRACK), { what: "the tagged track in E2E Crates too" });
+    assert.ok((await membersOf(0)).includes(TRACK), "still in Collection");
     // The album is in two collections: un-starring asks first (No: kept; Yes: deleted everywhere).
     await starOf(page, ALBUM).click();
     await waitSoon(() => dialogs.length === 1, { what: "the confirm" });
