@@ -333,7 +333,8 @@ npm run test:e2e                         # Playwright e2e: own profile, server :
     - Test: Save mapping under A, then under B; ▼ lists both; picking A brings A's back. Unsaved changes ask first.
       Save settings makes B active, and after a reload typing A loads A's.
     - Main (the radio): its own folder, nothing saved; Save mapping keeps one for it without touching Test's. Back
-      to Test, its folder and mapping are as left.
+      to Test, its folder and mapping are as left. Save settings keeps both libraries' folder and mapping (Test still
+      in use). After a reload each radio shows its own again, and ▼ lists only that library's saved folders.
     - The marks test now gives both libraries the same mapping.
 - **The sort is kept** (user: "save the last order in which a collection is displayed both for main collection page and
   imported collection sessions. Save it like the selection ticks").

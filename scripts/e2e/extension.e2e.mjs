@@ -915,6 +915,29 @@ test("Settings: a mapping per Target folder: Save mapping under one folder, anot
     await page.check("#f_target_test");
     await page.waitForFunction((a) => document.getElementById("f_playlist_folder").value === a, A);
     await poolIs("Pool A");
+
+    // Save settings sends both libraries' (Test in use): after a reload each radio shows its own again.
+    await page.click("#saveBtn");
+    await page.waitForFunction(() => /Saved/.test(document.getElementById("saveState").textContent));
+    s = await settingsNow();
+    assert.equal(s.rekordbox_target, "test");
+    assert.deepEqual([s.playlist_mappings.test.folder, s.playlist_mappings.test.mode, s.playlist_mappings.test.map.pool], [A, "custom", ["Pool A"]]);
+    assert.deepEqual([s.playlist_mappings.main.folder, s.playlist_mappings.main.mode, s.playlist_mappings.main.map.pool], [M, "custom", ["Pool M"]]);
+    assert.equal(s.playlist_folder, A, "the old key: the library in use");
+    await page.reload();
+    await mappingLoaded(page);
+    assert.equal(await page.inputValue(folder), A);
+    await poolIs("Pool A");
+    await page.check("#f_target_main");
+    await page.waitForFunction((m) => document.getElementById("f_playlist_folder").value === m, M);
+    await poolIs("Pool M");
+    assert.equal(await page.isChecked("#mappingAuto"), false);
+    await page.click("#playlistFolderMenuBtn");
+    assert.deepEqual(await page.$$eval("#playlistFolderMenu .folder-option", (bs) => bs.map((b) => b.textContent)), [M], "Main's saved folders only");
+    await page.click("#playlistFolderMenuBtn");
+    await page.check("#f_target_test");
+    await page.waitForFunction((a) => document.getElementById("f_playlist_folder").value === a, A);
+    await poolIs("Pool A");
   } finally {
     await put({ rekordbox_main_db_path: before.rekordbox_main_db_path, rekordbox_target: before.rekordbox_target, playlist_mappings: before.playlist_mappings });
     await page.close();
