@@ -230,6 +230,17 @@ CREATE TABLE IF NOT EXISTS pending_adds (
     acked_at TEXT
 );
 
+-- Bandcamp items the app deleted (left in no collection) for the extension to delete too. An unacked row is also a
+-- tombstone: until the extension acks it, a sync that still sends the item (a full sync, a stale push) is ignored.
+CREATE TABLE IF NOT EXISTS pending_deletes (
+    delete_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    item_id TEXT NOT NULL,
+    data TEXT,  -- the item as it was, should it ever need restoring
+    created_at TEXT NOT NULL,
+    acked_at TEXT
+);
+CREATE UNIQUE INDEX IF NOT EXISTS pending_deletes_open ON pending_deletes(item_id) WHERE acked_at IS NULL;
+
 -- Cached Bandcamp search/page responses.
 CREATE TABLE IF NOT EXISTS http_cache (
     key TEXT PRIMARY KEY,
@@ -423,8 +434,10 @@ class Store:
         """Write the items whose data changed (an unchanged one is left alone) and remove ``deleted`` (with
         ``full``: every item not in ``items``); then, in the same transaction, the extension's ``membership`` ops
         (``[{op: "add"|"remove", collection_id, ids}]``, in order). A new item that's in no collection after that
-        joins the first collection. ``{upserted, changed, removed, changed_ids, removed_ids, membership: {added,
-        removed, skipped, unknown, auto_added}, collection_changes: {cid: {added: [ids], removed: [ids]}}}``."""
+        joins the first collection. Tombstoned ids (deleted in the app, not yet acked by the extension) are
+        ``ignored``: not written, and left out of the ops. ``{upserted, changed, removed, ignored, changed_ids,
+        removed_ids, membership: {added, removed, skipped, unknown, auto_added}, collection_changes: {cid: {added:
+        [ids], removed: [ids]}}}``."""
         from . import membership as m
 
         ts = now_iso()
@@ -434,6 +447,10 @@ class Store:
         new_ids: list[str] = []
         orders: dict[str, int | None] = {}
         with self.tx() as c:
+            tombstoned = {r["item_id"] for r in c.execute("SELECT item_id FROM pending_deletes WHERE acked_at IS NULL")}
+            ignored = [i for i in items if i in tombstoned]
+            if ignored:
+                items = {k: v for k, v in items.items() if k not in tombstoned}
             if full:
                 keep = set(items)
                 existing = [r["id"] for r in c.execute("SELECT id FROM items")]
@@ -475,7 +492,7 @@ class Store:
             ops = membership or []
             named = list(dict.fromkeys(i for op in ops for i in op["ids"]))
             known = self._known_items(c, named, orders)
-            result = m.apply_ops(c, ops, orders, known, ts)
+            result = m.apply_ops(c, ops, orders, known, ts, tombstoned)
             for cid, change in result.pop("changes").items():
                 into = changes.setdefault(cid, {"added": [], "removed": []})
                 into["added"] += change["added"]
@@ -489,7 +506,7 @@ class Store:
                 joined = m.add_rows(c, first, [(i, orders.get(i)) for i in homeless], ts, follow_order=True)["added"]
                 changes.setdefault(first, {"added": [], "removed": []})["added"] += joined
             result["auto_added"] = len(homeless)
-        return {"upserted": len(items), "changed": len(changed_ids), "removed": len(removed_ids),
+        return {"upserted": len(items), "changed": len(changed_ids), "removed": len(removed_ids), "ignored": ignored,
                 "changed_ids": changed_ids, "removed_ids": removed_ids, "membership": result,
                 "collection_changes": {k: v for k, v in changes.items() if v["added"] or v["removed"]}}
 

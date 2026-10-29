@@ -243,6 +243,19 @@ Tests never touch Bandcamp, the music drive or a real rekordbox library: Bandcam
   (triggers) in `/api/health` tells it when to re-read; every membership change sends an SSE `collections` event with
   the version.
 
+### 2026-10-28
+
+- `health.max_order` also counts collection 0's positions (an item starred elsewhere, then copied into
+  "Collection", is numbered there), so the extension's next "#" can't collide.
+- **Tracks left in no collection are deleted (user: "would be deleted from everywhere in that case", after a
+  confirmation listing them):** Remove from collection and Delete collection take `dry_run` (what would be deleted,
+  nothing written) and `delete_orphans`.
+  - Other items go on the server, with their locate results and match decisions. Files, previews and rekordbox stay.
+  - Bandcamp items leave the mirror and are queued for the extension (`/api/tagger/pending-deletes`, acked like
+    pending adds).
+  - Until the ack, the item is a tombstone: the extension's full sync, which still has it, can't bring it back, and
+    its ops naming it are skipped. After the ack, starring the track again makes a new item.
+
 ## App and extension (`app/`, `extension/`, `shared/`, branch `claude/local-collection-ui-e8f6f6`)
 
 *(Session B's notes go here.)*

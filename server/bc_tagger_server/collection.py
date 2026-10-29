@@ -163,6 +163,77 @@ def merge_pending_item_tags(store: Store, item_id: str, tags: list[str], replace
     return True
 
 
+# -- deleting items (the app's Remove from collection / Delete collection) ------------------
+
+
+def _found(c, ids: list[str]) -> dict[str, tuple[str, dict]]:
+    """``{id: (kind, data)}`` for those of ``ids`` that are items: Other items, the mirror, unacked pending adds."""
+    out: dict[str, tuple[str, dict]] = {}
+    for r in c.execute(
+            "SELECT id, data, 'other' AS kind, 0 AS rank FROM other_items WHERE id IN (SELECT value FROM json_each(?)) "
+            "UNION ALL SELECT id, data, 'bandcamp', 1 FROM items WHERE id IN (SELECT value FROM json_each(?)) "
+            "UNION ALL SELECT item_id, json_extract(payload, '$.item'), 'bandcamp', 2 FROM pending_adds "
+            "WHERE acked_at IS NULL AND item_id IN (SELECT value FROM json_each(?)) ORDER BY rank",
+            (json.dumps(ids),) * 3):  # the mirror's copy before a pending add's
+        out.setdefault(r["id"], (r["kind"], json.loads(r["data"])))
+    return out
+
+
+def describe(c, ids: list[str]) -> list[dict]:
+    """``[{id, title, artist, kind: "bandcamp"|"other"}]`` for those of ``ids`` that are items, in that order."""
+    found = _found(c, ids)
+    return [{"id": i, "title": found[i][1].get("title"), "artist": found[i][1].get("artist"), "kind": found[i][0]}
+            for i in ids if i in found]
+
+
+def delete_items(c, ids: list[str], ts: str) -> dict[str, list]:
+    """Delete items for good, inside ``c`` (with their memberships, locate results and match decisions; files and
+    rekordbox stay). Other items are the server's: gone. Bandcamp items are the extension's: out of the mirror (an
+    unacked pending add or tag edit is called off), with a pending delete for the extension that is also a
+    tombstone until it's acked. Ids that aren't items are left alone. ``{deleted: [ids], pending_deletes:
+    [{delete_id, item_id}]}``."""
+    found = _found(c, ids)
+    deleted, queued = [], []
+    for item_id in ids:
+        if item_id not in found:
+            continue
+        kind, data = found[item_id]
+        if kind == "other":
+            c.execute("DELETE FROM other_items WHERE id = ?", (item_id,))
+        else:
+            c.execute("DELETE FROM items WHERE id = ?", (item_id,))
+            c.execute("UPDATE pending_adds SET acked_at = ? WHERE item_id = ? AND acked_at IS NULL", (ts, item_id))
+            c.execute("UPDATE tag_edits SET acked_at = ? WHERE item_id = ? AND acked_at IS NULL", (ts, item_id))
+            c.execute("INSERT OR IGNORE INTO pending_deletes(item_id, data, created_at) VALUES(?, ?, ?)",
+                      (item_id, json.dumps(data), ts))  # already queued: the one there stands
+            row = c.execute("SELECT delete_id FROM pending_deletes WHERE item_id = ? AND acked_at IS NULL",
+                            (item_id,)).fetchone()
+            queued.append({"delete_id": row["delete_id"], "item_id": item_id})
+        for table in ("collection_items", "locate_results", "match_overrides"):
+            c.execute(f"DELETE FROM {table} WHERE item_id = ?", (item_id,))
+        deleted.append(item_id)
+    return {"deleted": deleted, "pending_deletes": queued}
+
+
+# -- pending deletes (server -> extension) ---------------------------------------------------
+
+
+def pending_deletes(store: Store) -> list[dict]:
+    """``[{delete_id, item_id}]`` not acked yet, oldest first."""
+    return [{"delete_id": r["delete_id"], "item_id": r["item_id"]} for r in store.query(
+        "SELECT delete_id, item_id FROM pending_deletes WHERE acked_at IS NULL ORDER BY delete_id")]
+
+
+def ack_deletes(store: Store, delete_ids: Iterable[int]) -> int:
+    """The extension deleted them too: their tombstones go, so a later star of the same track works."""
+    ts, n = now_iso(), 0
+    with store.tx() as c:
+        for delete_id in delete_ids:
+            n += c.execute("UPDATE pending_deletes SET acked_at = ? WHERE delete_id = ? AND acked_at IS NULL",
+                           (ts, int(delete_id))).rowcount
+    return n
+
+
 # -- both collections ------------------------------------------------------------------------
 
 

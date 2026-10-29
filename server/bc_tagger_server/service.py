@@ -191,15 +191,46 @@ class Service:
             self.collections_event({"action": action, "id": collection_id, "collection": after})
         return after
 
-    def collection_delete(self, collection_id: int) -> dict:
-        """Removes the collection and its memberships; the items stay (in All, and any other collection)."""
+    def collection_delete(self, collection_id: int, delete_orphans: bool = False, dry_run: bool = False) -> dict:
+        """Removes the collection and its memberships: ``{deleted: <collection id>, items: n}``. Its items stay (in
+        All, and any other collection) unless ``delete_orphans``: then those in no other collection are deleted
+        (``_take_out``), adding ``{deleted_items: [ids], pending_deletes: [{delete_id, item_id}]}``. ``dry_run``:
+        nothing changes; ``{would_delete: [{id, title, artist, kind}], would_remove: n}``."""
         from . import membership
 
-        ids = membership.delete(self.store, collection_id)
-        self.collections_event({"action": "deleted", "id": collection_id})
-        for item_id in ids:
+        membership.check_deletable(self.store, collection_id)
+        out = self._take_out(collection_id, None, delete_orphans, dry_run)
+        if dry_run:
+            return out
+        result = {"deleted": collection_id, "items": len(out["inside"])}
+        if delete_orphans:
+            result.update(deleted_items=out["deleted"], pending_deletes=out["pending_deletes"])
+        self.collections_event({"action": "deleted", "id": collection_id,
+                                **({"items_deleted": len(out["deleted"])} if out["deleted"] else {})})
+        for item_id in out["inside"]:
             self.jobs.bus.publish("item", {"id": item_id})
-        return {"deleted": collection_id, "items": len(ids)}
+        return result
+
+    def _take_out(self, collection_id: int, ids: list[str] | None, delete_orphans: bool, dry_run: bool) -> dict:
+        """Take ``ids`` (None: the whole collection, which goes too) out of a collection, in one transaction. With
+        ``delete_orphans``, those that leaves in no collection are deleted (``collection.delete_items``: Other items
+        on the server; Bandcamp items queued for the extension, tombstoned until it acks). ``{inside, deleted,
+        pending_deletes}``, or with ``dry_run`` (nothing written) ``{would_delete, would_remove}``."""
+        from . import membership
+        from .collection import delete_items, describe
+
+        with self.store.tx() as c:
+            inside, orphans = membership.leaving(c, collection_id, ids)
+            if dry_run:
+                return {"would_delete": describe(c, orphans), "would_remove": len(inside)}
+            if ids is None:
+                membership.delete_rows(c, collection_id)
+            else:
+                membership.remove_rows(c, collection_id, inside)
+            done = delete_items(c, orphans, now_iso()) if delete_orphans else {"deleted": [], "pending_deletes": []}
+        if done["deleted"]:
+            log.info("deleted %d item(s) left in no collection: %s", len(done["deleted"]), done["deleted"])
+        return {"inside": inside, **done}
 
     def collection_add(self, collection_id: int, ids: list[str]) -> dict:
         """Copy items into a collection ("Import to Collection"): ``{added, already, unknown}`` (counts)."""
@@ -214,19 +245,30 @@ class Service:
         return {"added": len(result["added"]), "already": len(result["already"]),
                 "unknown": sum(i not in index for i in wanted)}
 
-    def collection_remove(self, collection_id: int, ids: list[str]) -> dict:
-        """Take items out of a collection (membership only): ``{removed}``."""
+    def collection_remove(self, collection_id: int, ids: list[str], delete_orphans: bool = False,
+                          dry_run: bool = False) -> dict:
+        """Take items out of a collection (membership only): ``{removed}``. Those it leaves in no collection stay
+        (in All) unless ``delete_orphans``: then they're deleted (``_take_out``), adding ``{deleted: [ids],
+        deleted_items: (the same), pending_deletes: [{delete_id, item_id}]}``. ``dry_run``: nothing changes;
+        ``{would_delete: [{id, title, artist, kind}], would_remove: n}``."""
         from . import membership
 
-        gone = membership.remove_items(self.store, collection_id, ids)
-        self._membership_changed(collection_id, gone, "removed")
-        return {"removed": len(gone)}
+        membership.get(self.store, collection_id)
+        out = self._take_out(collection_id, ids, delete_orphans, dry_run)
+        if dry_run:
+            return out
+        self._membership_changed(collection_id, out["inside"], "removed", deleted=len(out["deleted"]))
+        result = {"removed": len(out["inside"])}
+        if delete_orphans:
+            result.update(deleted=out["deleted"], deleted_items=out["deleted"], pending_deletes=out["pending_deletes"])
+        return result
 
-    def _membership_changed(self, collection_id: int, ids: list[str], what: str) -> None:
+    def _membership_changed(self, collection_id: int, ids: list[str], what: str, deleted: int = 0) -> None:
         for item_id in ids:
             self.jobs.bus.publish("item", {"id": item_id})
         if ids:
-            self.collections_event({"action": "items", "id": collection_id, what: len(ids)})
+            self.collections_event({"action": "items", "id": collection_id, what: len(ids),
+                                    **({"items_deleted": deleted} if deleted else {})})
 
     def get_item_view(self, item_id: str) -> dict | None:
         from .collection import all_items

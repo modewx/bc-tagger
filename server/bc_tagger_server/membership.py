@@ -93,14 +93,43 @@ def update(store: Store, collection_id: int, name: Any = None, pos: Any = None) 
 def delete(store: Store, collection_id: int) -> list[str]:
     """Remove the collection and its memberships only (items, files and rekordbox stay). Returns the item ids
     that were in it."""
+    check_deletable(store, collection_id)
+    with store.tx() as c:
+        return delete_rows(c, collection_id)
+
+
+def check_deletable(store: Store, collection_id: int) -> None:
     if collection_id == MAIN:
         raise CollectionConflict('"Collection" can\'t be deleted')
     get(store, collection_id)
-    ids = members(store, collection_id)
-    with store.tx() as c:
-        c.execute("DELETE FROM collection_items WHERE collection_id = ?", (collection_id,))
-        c.execute("DELETE FROM collections WHERE id = ?", (collection_id,))
+
+
+def delete_rows(c, collection_id: int) -> list[str]:
+    """``delete`` inside a transaction ``c``."""
+    ids = [r["item_id"] for r in c.execute("SELECT item_id FROM collection_items WHERE collection_id = ?",
+                                           (collection_id,))]
+    c.execute("DELETE FROM collection_items WHERE collection_id = ?", (collection_id,))
+    c.execute("DELETE FROM collections WHERE id = ?", (collection_id,))
     return ids
+
+
+def leaving(c, collection_id: int, ids: Iterable[str] | None = None) -> tuple[list[str], list[str]]:
+    """Inside ``c``: the members of the collection among ``ids`` (None: all of them, by "#"), and those of them in
+    no other collection, which taking them out would leave nowhere."""
+    if ids is None:
+        inside = [r["item_id"] for r in c.execute(
+            "SELECT item_id FROM collection_items WHERE collection_id = ? ORDER BY pos IS NULL, pos, added_at, item_id",
+            (collection_id,))]
+    else:
+        ids = list(dict.fromkeys(ids))
+        have = {r["item_id"] for r in c.execute(
+            "SELECT item_id FROM collection_items WHERE collection_id = ? AND item_id IN (SELECT value FROM "
+            "json_each(?))", (collection_id, json.dumps(ids)))}
+        inside = [i for i in ids if i in have]
+    elsewhere = {r["item_id"] for r in c.execute(
+        "SELECT DISTINCT item_id FROM collection_items WHERE collection_id != ? AND item_id IN (SELECT value FROM "
+        "json_each(?))", (collection_id, json.dumps(inside)))}
+    return inside, [i for i in inside if i not in elsewhere]
 
 
 def members(store: Store, collection_id: int) -> list[str]:
@@ -173,11 +202,13 @@ def first_collection(store_or_conn) -> int:
     return run(FIRST_SQL)["id"]
 
 
-def apply_ops(c, ops: list[dict], orders: dict[str, int | None], known: set[str], ts: str) -> dict[str, Any]:
+def apply_ops(c, ops: list[dict], orders: dict[str, int | None], known: set[str], ts: str,
+              tombstoned: set[str] = frozenset()) -> dict[str, Any]:
     """The extension's membership changes (``[{op: "add"|"remove", collection_id, ids}]``), in order, inside the
-    sync's transaction ``c``. An op for a collection that's gone is skipped; ids that aren't items are left out of
-    adds. ``{added, removed, skipped: [{index, op, collection_id, reason}], unknown, changes: {cid: {added,
-    removed}}}``."""
+    sync's transaction ``c``. An op for a collection that's gone is skipped; so are ``tombstoned`` ids (deleted in
+    the app; the rest of their op is applied, and the skip names them in ``ids``); ids that aren't items are left
+    out of adds. ``{added, removed, skipped: [{index, op, collection_id, reason, ids?}], unknown, changes: {cid:
+    {added, removed}}}``."""
     exists = {r["id"] for r in c.execute("SELECT id FROM collections")}
     out: dict[str, Any] = {"added": 0, "removed": 0, "skipped": [], "unknown": 0, "changes": {}}
     for index, op in enumerate(ops):
@@ -188,6 +219,11 @@ def apply_ops(c, ops: list[dict], orders: dict[str, int | None], known: set[str]
             continue
         change = out["changes"].setdefault(cid, {"added": [], "removed": []})
         ids = list(dict.fromkeys(op["ids"]))
+        gone = [i for i in ids if i in tombstoned]
+        if gone:
+            out["skipped"].append({"index": index, "op": op["op"], "collection_id": cid, "reason": "deleted",
+                                   "ids": gone})
+            ids = [i for i in ids if i not in tombstoned]
         if op["op"] == "add":
             wanted = [i for i in ids if i in known]
             out["unknown"] += len(ids) - len(wanted)
