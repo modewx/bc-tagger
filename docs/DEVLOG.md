@@ -302,8 +302,13 @@ npm run test:e2e                         # Playwright e2e: own profile, server :
   - A file set by hand: the chip reads "✓ set manually" (its tooltip "Set manually: <path>"), the popup's header
     "Located (set manually)", and **Back to automatic** calls `DELETE /api/matches/{id}/confirm`.
   - Locate again, Wrong file, Confirm / Reject and the Download buttons stay.
-  - e2e: Set file by search, then by Browse, then Back to automatic on a collection item (the test's own music
-    folder); the import preview's Set file tests pass unchanged.
+  - Set file… is in the popup whatever the chip says: ✗ (not found, with Locate again), ?, – or ✓. The user
+    reaches it from the ✗ chip most.
+  - With A's `807ff85` the server remembers the picked file's folder (`last_browse_dir`), so Browse… opens there
+    next, on either page.
+  - e2e: a collection item that Locate doesn't find (✗, "Not found in the local folders") gets Set file by search
+    (located, set manually, the folder remembered), then by Browse, then Back to automatic (✗ again). The test
+    uses its own music folder. The import preview's Set file tests pass unchanged.
 - **Download owned missing refreshes ownership first** (user: five items bought today weren't downloaded, as the last
   Refresh ownership was from two days before). Both pages' button (collection and import preview):
   - first runs Refresh ownership (the extension when connected, else the server's cookie-file job), with "Download:

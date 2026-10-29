@@ -3006,11 +3006,6 @@ test("collection: Set file… by search, then by Browse; the chip says set manua
   const app = await context.newPage();
   const chip = `tr[data-key="${ITEM_SET.id}"] .col-located .chip`;
   const chipStatus = () => app.$eval(chip, (c) => c.dataset.status);
-  const openSetFile = async () => {
-    await app.click(chip);
-    await app.click(".popover #setFile");
-    await app.waitForSelector(".popover .set-file-q");
-  };
   try {
     assert.notEqual(((await api(`/api/items/${ITEM_SET.id}`)).local || {}).status, "located", "not located to start with");
     await app.goto(SERVER + "/");
@@ -3024,10 +3019,15 @@ test("collection: Set file… by search, then by Browse; the chip says set manua
     await app.click(".popover button:has-text('Locate')");
     await app.waitForFunction((id) => new RegExp(`^${id}: locating… (done|failed)`).test(document.getElementById("refreshStatus").textContent), ITEM_SET.id, { timeout: 60000 });
     const auto = (await api(`/api/items/${ITEM_SET.id}`)).local.status;
-    assert.notEqual(auto, "located");
+    assert.equal(auto, "missing");
+    await app.waitForFunction((c) => (document.querySelector(c) || {}).textContent === "✗", chip);
 
-    // By search: the box starts with the item's artist and title.
-    await openSetFile();
+    // From the ✗ chip (not found, Locate again): Set file…, by search; the box starts with the item's artist and title.
+    await app.click(chip);
+    assert.equal(await app.textContent(".popover .pop-head"), "Not found in the local folders");
+    assert.ok(await app.$(".popover button:has-text('Locate again')"), "Locate again stays");
+    await app.click(".popover #setFile");
+    await app.waitForSelector(".popover .set-file-q");
     assert.equal(await app.inputValue(".popover .set-file-q"), `${ITEM_SET.artist} ${ITEM_SET.title}`);
     await app.fill(".popover .set-file-q", "e2e hand picked");
     await app.click(".popover .set-file button:has-text('Search')");
@@ -3040,6 +3040,7 @@ test("collection: Set file… by search, then by Browse; the chip says set manua
     let local = (await api(`/api/items/${ITEM_SET.id}`)).local;
     assert.equal(local.manual, true);
     assert.equal(local.best.path, searched);
+    assert.equal((await api("/api/settings").then((d) => d.settings || d)).last_browse_dir, E2E_MUSIC, "Browse… opens there next");
 
     // By Browse: from the music folders down to another file.
     await app.click(chip);
