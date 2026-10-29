@@ -296,6 +296,10 @@ Tests never touch Bandcamp, the music drive or a real rekordbox library: Bandcam
   - `playlist_mappings` holds a folder, a mode, a map and the saved per-folder mappings for each of Test and Main.
   - An export uses the mapping of the library it goes to. Existing settings start both libraries from the
     current mapping. The old single keys keep working as the mapping of the library in use.
+- **Downloads back off on Bandcamp's rate limit (the user picked "Back off, continue"):**
+  - On the first 429 in a download job, what's already downloading finishes. After a 60 s pause, the rest go
+    one at a time.
+  - A second 429 ends the job as before. The bot check still stops at once.
 
 ## App and extension (`app/`, `extension/`, `shared/`, branch `claude/local-collection-ui-e8f6f6`)
 

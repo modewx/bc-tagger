@@ -480,9 +480,13 @@ now; this one isn't out yet". There's one download job at a time. Files go into 
 root; refused unless inside an owned root), in `download_format` (default `aiff-lossless`). Each release is
 indexed and its items and rows located as soon as the tool says it finished, while the run goes on (on a
 finisher thread, so reading the tool's output never waits on it); the job's `current`/`total` count finished
-releases. Bandcamp's bot check or a rate limit in the output, or the downloads drive going away (checked every
-second), ends the run at once (SIGTERM, then SIGKILL after 10 s); the releases not finished yet fail with that
-message and the result's `stopped` says why. The tool's parallel output ("[pool-1-thread-N] …", "Progresses:
+releases. Bandcamp's bot check in the output, or the downloads drive going away (checked every second), ends
+the run at once (SIGTERM, then SIGKILL after 10 s); the releases not finished yet fail with that message and the
+result's `stopped` says why. Bandcamp's first rate limit (HTTP 429) in a job backs off instead: the tool's
+threads busy at that moment finish their item, then the run ends; after `downloads.BACKOFF_S` (60 s; "Bandcamp
+is rate-limiting: waiting 60 s, then one at a time" on the job and the rows) the rest, and the ones that failed
+on the 429, go in one more run with `--jobs=1` (one more collection walk). A 429 in that run ends the job
+("Bandcamp is rate-limiting; try again later"). The tool's parallel output ("[pool-1-thread-N] …", "Progresses:
 [thread] x % || …") is tied to our releases by each thread's "Managing item N/M: <id> (p<sale id>)" line (the
 tool's `bc-tagger-item-id` branch since 2026-10-29), so retries and "Could not download item: …" before "Found
 release" belong to their release too. With an older tool, by the "Found release" title; if a title matches none

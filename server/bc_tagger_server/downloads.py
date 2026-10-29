@@ -7,6 +7,8 @@ given to ONE downloader run per job (one login and one walk of the collection, l
 (unless the user's ``force``), so the tool's cache must not skip them; and ``--preorders``: a preorder's
 tracks that are out now. One download job at a time. Each run's output goes to ``download-logs/<job>.log`` in
 the data dir (the last ``KEEP_LOGS``; the job's result names it, ``GET /api/jobs/{id}/log`` serves it).
+Bandcamp's first rate limit (429) in a job doesn't end it: what's being downloaded finishes, then after
+``BACKOFF_S`` the rest go in one more run with ``--jobs=1``; a rate limit in that run ends the job.
 Each release is indexed and its items and rows located as soon as it finishes, on a finisher thread, while
 the run goes on. Bandcamp's bot check or a rate limit in the output, or the drive going away, ends the run
 at once and fails the releases not finished yet.
@@ -29,6 +31,7 @@ from .tagread import AUDIO_EXTS
 
 _one_at_a_time = threading.Lock()
 KEEP_LOGS = 30  # download-logs/: the newest this many
+BACKOFF_S = 60.0  # after Bandcamp's first rate limit in a run: the pause before the rest go one at a time
 
 MESSAGES = {
     "downloaded": "downloaded",
@@ -253,7 +256,7 @@ def _message(res: dict) -> str:
         message = f"{message}: {errors[-1]}"
     elif res["outcome"] == "unreported" and errors:
         message = f"{message} (the run's last error: {errors[-1]})"
-    elif retries:
+    elif retries and res["ok"]:  # what it took to get it (a stop's own retries say nothing new)
         message = f"{message} (after {len(retries)} retr{'y' if len(retries) == 1 else 'ies'}: {retries[-1]})"
     if res.get("preorder"):
         message = f"a preorder, out {res['preorder']}: {message}"
@@ -333,6 +336,20 @@ def _run_releases(svc, p: dict, by_ref: dict, ctx, job_id, publish, results: lis
             active.pop(res["release"], None)
         todo.put(res)
 
+    def _back_off(again: list[str]) -> None:
+        """Bandcamp rate-limited the first run: say so on the job and the rows, wait, then the rest go one at a
+        time."""
+        message = f"Bandcamp is rate-limiting: waiting {BACKOFF_S:g} s, then one at a time"
+        with lock:
+            for r in again:
+                active.pop(r, None)
+        progress(message)
+        for r in again:
+            for e in entries_of[r]:
+                e.update(state="downloading", message=message)
+                publish(e)
+        time.sleep(BACKOFF_S)
+
     with _one_at_a_time:
         for rel in rels:
             for e in entries_of[rel["release"]]:
@@ -341,9 +358,23 @@ def _run_releases(svc, p: dict, by_ref: dict, ctx, job_id, publish, results: lis
         progress(f"starting the downloader for {total} release{'s' if total != 1 else ''}")
         worker = threading.Thread(target=finisher, name="download-finisher", daemon=True)
         worker.start()
+        spec = {r["release"]: {k: r[k] for k in ("release", "title", "artist")} for r in rels}
         try:
-            run = downloader.run_releases(svc.settings, [{k: r[k] for k in ("release", "title", "artist")} for r in rels],
-                                          p["format"], True, on_line=report, on_done=on_done, log_path=log)
+            run = downloader.run_releases(svc.settings, list(spec.values()), p["format"], True, on_line=report,
+                                          on_done=on_done, log_path=log, rate_limit="back_off")
+            again = [r for r in spec if r not in handed and run["releases"][r]["outcome"] == "rate_limited"]
+            if run["stopped"] is None and again:
+                _back_off(again)
+                try:
+                    second = downloader.run_releases(svc.settings, [spec[r] for r in again], p["format"], True,
+                                                     on_line=report, jobs=1, on_done=on_done, log_path=log)
+                except (DownloadRefused, OSError) as err:
+                    second = {"releases": {r: _failed(r, err) for r in again}, "folders": [], "stray_errors": [],
+                              "stopped": None, "stop_error": None}
+                run = {**run, "releases": {**run["releases"], **second["releases"]},
+                       "folders": run["folders"] + second["folders"],
+                       "stray_errors": run["stray_errors"] + second["stray_errors"],
+                       "stopped": second["stopped"], "stop_error": second["stop_error"]}
         except (DownloadRefused, OSError) as err:
             run = {"releases": {r["release"]: _failed(r["release"], err) for r in rels}, "folders": [],
                    "stray_errors": [], "stopped": None, "stop_error": None}
