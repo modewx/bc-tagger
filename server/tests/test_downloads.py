@@ -116,22 +116,83 @@ def _more_owned(svc, *ids):
             c.execute("INSERT INTO owned_ids(id, source, checked_at) VALUES(?, 'test', '2026-10-26')", (i,))
 
 
-def test_bot_check_stops_the_remaining_releases(svc, tmp_path, monkeypatch):
-    # download_parallel 1 → three releases per downloader run: the bot check in the first run stops the second
+@pytest.mark.parametrize("fail, said", [("challenge", "bot check"), ("rate_limit", "rate-limiting")])
+def test_a_bot_check_mid_run_ends_it_and_fails_the_rest(svc, tmp_path, monkeypatch, fail, said):
+    # one release at a time: Single downloads, then Album A meets the bot check (or a 429). The stub carries on
+    # after 2 s like a tool that didn't notice, so only the server ending the run keeps the rest from coming.
     svc.settings.update({"download_parallel": 1})
     _more_owned(svc, "t601")
     rel = tmp_path / "releases.json"
-    rel.write_text(json.dumps({**RELEASES, "a10": {**RELEASES["a10"], "fail": "challenge"}}))
+    rel.write_text(json.dumps({**RELEASES, "a10": {**RELEASES["a10"], "fail": fail}}))
     args = tmp_path / "args.jsonl"
     monkeypatch.setenv("BC_TAGGER_STUB_ARGS", str(args))
-    result = downloads.run(svc, ["t100", "t200", "a70", "t601"])
+    started = time.monotonic()
+    result = downloads.run(svc, ["t200", "t100", "a70", "t601"])
+    assert time.monotonic() - started < 1.5  # not the stub's 2 s: it was stopped
     items = by_ref(result)
-    assert result["stopped"] and "bot check" in result["stopped"]
-    for ref in ("t100", "t200", "a70"):  # the same run
-        assert items[ref]["state"] == "failed" and "bot check" in items[ref]["message"]
-    assert items["t601"]["state"] == "failed" and len(result["releases"]) == 3  # never started
+    assert result["stopped"] and said in result["stopped"]
+    assert items["t200"]["state"] == "done" and items["t200"]["located"]  # finished before it
+    for ref in ("t100", "a70", "t601"):
+        assert items[ref]["state"] == "failed" and items[ref]["message"] == result["stopped"], ref
+    assert [r["release"] for r in result["releases"]] == ["t200", "a10", "a70", "t601"]
     assert len(args.read_text().splitlines()) == 1
-    assert not (tmp_path / "owned" / "Artist B").exists()
+    assert not (tmp_path / "owned" / "Artist A").exists() and not (tmp_path / "owned" / "Stub Artist").exists()
+
+
+def test_a_long_selection_is_one_downloader_run(svc, tmp_path, monkeypatch):
+    """14 releases with download_parallel 4: one run (one login, one walk of the collection), every id, --force."""
+    ids = [f"t6{n:02d}" for n in range(1, 15)]
+    _more_owned(svc, *ids)
+    rel = tmp_path / "releases.json"
+    rel.write_text(json.dumps({**RELEASES, **{i: {"artist": "Artist F", "title": f"Song {i}", "year": 2026,
+                                                  "tracks": [f"Song {i}"]} for i in ids}}))
+    args = tmp_path / "args.jsonl"
+    monkeypatch.setenv("BC_TAGGER_STUB_ARGS", str(args))
+    totals = []
+
+    class Ctx:
+        job = type("Job", (), {"id": "download-test"})()
+
+        def progress(self, cur, total, message):
+            totals.append((cur, total, message))
+
+    result = downloads.run(svc, ids, ctx=Ctx())
+    runs = [json.loads(line) for line in args.read_text().splitlines()]
+    assert len(runs) == 1
+    assert [a for a in runs[0] if a.startswith("--item-id=")] == [f"--item-id={i}" for i in ids]
+    assert "--force" in runs[0] and "--jobs=4" in runs[0]
+    assert all(e["state"] == "done" and e["located"] for e in result["items"])
+    assert [r["release"] for r in result["releases"]] == ids
+    counted = [cur for cur, total, _ in totals if total == 14]
+    assert counted == sorted(counted) and set(range(15)) <= set(counted)  # finished releases, one by one
+    assert not any(" of 14" in m for _, _, m in totals)  # no "downloading 1–12 of 14" chunks
+
+
+def test_each_release_is_located_while_the_run_goes_on(svc, tmp_path, monkeypatch):
+    svc.settings.update({"download_parallel": 1})
+    monkeypatch.setenv("BC_TAGGER_STUB_DELAY", "0.4")  # before writing each release
+    album = tmp_path / "owned" / "Artist A"
+    real, ended = downloader.run_releases, []
+
+    def timed(*a, **kw):
+        try:
+            return real(*a, **kw)
+        finally:
+            ended.append(time.monotonic())
+
+    monkeypatch.setattr(downloader, "run_releases", timed)
+    seen = []
+
+    def publish(kind, data):
+        if kind == "download" and data["state"] == "done":
+            seen.append((data["ref"], data["located"], time.monotonic(), album.exists()))
+
+    monkeypatch.setattr(svc.jobs.bus, "publish", publish)
+    downloads.run(svc, ["t200", "t100"])
+    single = next(s for s in seen if s[0] == "t200")
+    assert single[1] is True and single[2] < ended[0]  # located and done before the run ended
+    assert single[3] is False  # Album A wasn't even written yet
+    assert {s[0] for s in seen} == {"t200", "t100"}
 
 
 def test_releases_download_in_parallel_in_one_run(svc, tmp_path, monkeypatch):
@@ -157,6 +218,7 @@ def test_releases_download_in_parallel_in_one_run(svc, tmp_path, monkeypatch):
     assert len(runs) == 1  # one downloader run for all three
     assert [a for a in runs[0] if a.startswith("--item-id=")] == ["--item-id=a10", "--item-id=t200", "--item-id=a70"]
     assert "--jobs=3" in runs[0] and "--timeout=240000" in runs[0]  # at most one per release (setting: 4)
+    assert "--force" in runs[0]  # only what isn't located is queued: the tool's cache mustn't skip it
     assert [r["outcome"] for r in result["releases"]] == ["downloaded"] * 3 and result["stopped"] is None
     assert all(e["state"] == "done" and e["located"] for e in result["items"])
     # each release's own percent, read from the shared "Progresses: [thread] x % || …" line
@@ -284,9 +346,11 @@ def test_import_rows_say_what_can_be_downloaded(svc):
     assert rows[1]["owned"] is None  # not a Bandcamp row
 
 
-def test_cached_but_missing_files_are_downloaded_again(svc, tmp_path):
+def test_a_release_in_the_tools_cache_still_downloads_in_the_same_run(svc, tmp_path, monkeypatch):
     import shutil
 
+    args = tmp_path / "args.jsonl"
+    monkeypatch.setenv("BC_TAGGER_STUB_ARGS", str(args))
     first = downloads.run(svc, ["t200"])
     assert by_ref(first)["t200"]["located"] is True
     folder = tmp_path / "owned" / "Artist B"
@@ -294,10 +358,12 @@ def test_cached_but_missing_files_are_downloaded_again(svc, tmp_path):
     with svc.store.tx() as c:
         c.execute("DELETE FROM files WHERE path LIKE ?", (str(folder.resolve()) + "%",))
     svc.locate(ids=["t200"], scan="none")
-    result = downloads.run(svc, ["t200"])
+    result = downloads.run(svc, ["t200", "t100"])
     item = by_ref(result)["t200"]
-    assert result["releases"][0]["outcome"] == "redownloaded" and item["state"] == "done" and item["located"] is True
-    assert item["message"].startswith("downloaded again")
+    assert result["releases"][0]["outcome"] == "downloaded" and item["state"] == "done" and item["located"] is True
+    assert item["message"] == "downloaded"
+    runs = [json.loads(line) for line in args.read_text().splitlines()]
+    assert len(runs) == 2 and all("--force" in r for r in runs)  # one run per job, no second "cached" run
     # with force (the user asked explicitly) it is fetched again even though it is on disk and located
     again = downloads.run(svc, ["t200"], force=True)
     assert again["releases"][0]["outcome"] in ("downloaded", "on_disk")  # force: the user asked explicitly

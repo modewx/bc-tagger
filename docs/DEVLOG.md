@@ -256,6 +256,16 @@ Tests never touch Bandcamp, the music drive or a real rekordbox library: Bandcam
   - Until the ack, the item is a tombstone: the extension's full sync, which still has it, can't bring it back, and
     its ops naming it are skipped. After the ack, starring the track again makes a new item.
 
+### 2026-10-29
+
+- **A selection download is one downloader run (user: "call command once like bc-download does … so only one
+  token is needed and parallel download runs"):**
+  - The job's releases go to the tool together with `--force`, so there's one login and one walk of the collection.
+    It used to run once per 12 releases, plus a forced re-run for releases the tool's cache skipped.
+  - Each release is indexed and located as soon as it finishes, on a separate thread, while the others download.
+  - Bandcamp's bot check, a 429 or the drive going away ends the run at once, and what hadn't finished fails
+    with that reason.
+
 ## App and extension (`app/`, `extension/`, `shared/`, branch `claude/local-collection-ui-e8f6f6`)
 
 *(Session B's notes go here.)*

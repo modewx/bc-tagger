@@ -57,6 +57,11 @@ def test_no_download_onto_an_unplugged_drive(make_service, tmp_path, monkeypatch
 
 
 def test_drive_unplugged_during_a_download_job(make_service, tmp_path, monkeypatch):
+    """The drive goes away after the first release of a run: the run is ended at once (the tool would create
+    the folders again, on the internal disk), and the release not yet written fails with the drive's message."""
+    import json
+    import time
+
     from bc_tagger_server import downloads
 
     owned = tmp_path / "owned"
@@ -69,21 +74,30 @@ def test_drive_unplugged_during_a_download_job(make_service, tmp_path, monkeypat
     with svc.store.tx() as c:
         for i in ("a1", "a2"):
             c.execute("INSERT INTO owned_ids(id, source, checked_at) VALUES(?, 'test', 'x')", (i,))
+    releases = tmp_path / "releases.json"
+    releases.write_text(json.dumps({"a1": {"artist": "A", "title": "Song", "year": 2024, "tracks": ["Song"]},
+                                    "a2": {"artist": "B", "title": "Other", "year": 2024, "tracks": ["Other"]}}))
     monkeypatch.setenv(downloader.STUB_ENV, str(Path(__file__).parent / "fixtures" / "stub_downloader.py"))
-    svc.settings.update({"download_parallel": 1})
-    monkeypatch.setattr(downloads, "CHUNK_FACTOR", 1)  # one release per downloader run
-    real = downloader.run_releases
+    monkeypatch.setenv("BC_TAGGER_STUB_RELEASES", str(releases))
+    monkeypatch.setenv("BC_TAGGER_STUB_DELAY", "1.5")  # before writing each release
+    monkeypatch.setattr(downloader, "DRIVE_CHECK_S", 0.05)
+    svc.settings.update({"download_parallel": 1})  # one release at a time, in one run
+    real = downloads._index_folder
 
-    def unplug_after_first(*a, **kw):
-        result = real(*a, **kw)
-        os.rename(owned, tmp_path / "unplugged")  # the root is gone now
-        return result
+    def unplug_after_first(svc_, folder):
+        n = real(svc_, folder)
+        if owned.exists():
+            os.rename(owned, tmp_path / "unplugged")  # the root is gone now
+        return n
 
-    monkeypatch.setattr(downloader, "run_releases", unplug_after_first)
+    monkeypatch.setattr(downloads, "_index_folder", unplug_after_first)
+    started = time.monotonic()
     result = downloads.run(svc, ["t1", "t2"])
+    assert time.monotonic() - started < 2.8  # the second release's 1.5 s never ran out
     items = {e["ref"]: e for e in result["items"]}
     assert items["t1"]["state"] == "done"
     assert items["t2"]["state"] == "failed" and "not mounted" in items["t2"]["message"]
+    assert "not mounted" in result["stopped"]
     assert not owned.exists()  # not re-created
 
 

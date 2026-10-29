@@ -10,6 +10,9 @@ retried; ``retry_wait``: seconds to wait after "Retrying (1/3)." (the other rele
 ``BC_TAGGER_STUB_DELAY=<seconds>``: wait that long before writing (to see progress in a UI).
 ``BC_TAGGER_STUB_RETRY=1``: every release's first attempt fails ("Read timed out") and is retried.
 ``BC_TAGGER_STUB_ARGS=<file>``: append each run's arguments there (one JSON list per line).
+``fail: "challenge"`` / ``"rate_limit"`` print Bandcamp's bot check / a 429 when that release's turn comes (the
+releases before it download), then wait ``BC_TAGGER_STUB_AFTER_STOP`` seconds (default 2) and carry on like a
+tool that didn't notice: the server must end the run itself, so nothing after it gets written.
 Download progress is printed like the tool does: "Progress: 42.00 %" ending in "\r", no newline. With
 ``--jobs`` > 1 the releases run "in parallel" like the tool's threads: each line starts with
 "[pool-1-thread-N] ", and progress reads "Progresses: [pool-1-thread-1] 12.50 % || [pool-1-thread-2] …".
@@ -71,14 +74,6 @@ def main() -> int:
     log(f"Items: {', '.join(ids)}")
     rels = {i: {"artist": "Stub Artist", "title": f"Stub Release {i}", "year": 2026, "tracks": ["Stub Track"],
                 **releases.get(i, {})} for i in ids}
-    for i, rel in rels.items():
-        if rel.get("fail") == "challenge":
-            log("<!DOCTYPE html><html><head><title>Client Challenge</title></head></html>")
-            print("ERROR: Could not perform task", file=sys.stderr, flush=True)
-            return 0
-        if rel.get("fail") == "rate_limit":
-            print("ERROR: HTTP error fetching URL. Status=429", file=sys.stderr, flush=True)
-            return 0
     missing = [i for i in ids if rels[i].get("fail") == "not_in_collection"]
     if missing:
         log(f"Not in the collection: {', '.join(missing)}")
@@ -95,6 +90,13 @@ def main() -> int:
     jobs = max(1, args.jobs)
     for start in range(0, len(todo), jobs):  # each group runs "at the same time", one per thread
         group = todo[start:start + jobs]
+        for i in [i for i in group if rels[i].get("fail") in ("challenge", "rate_limit")]:
+            if rels[i]["fail"] == "challenge":
+                log("<!DOCTYPE html><html><head><title>Client Challenge</title></head></html>")
+            else:
+                print("ERROR: HTTP error fetching URL. Status=429", file=sys.stderr, flush=True)
+            time.sleep(float(os.environ.get("BC_TAGGER_STUB_AFTER_STOP", "2")))
+            group.remove(i)
         thread = {i: (f"pool-1-thread-{k + 1}" if jobs > 1 else None) for k, i in enumerate(group)}
         names, folders = {}, {}
         for n, i in enumerate(group, start + 1):
