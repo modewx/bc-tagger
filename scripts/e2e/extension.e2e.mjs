@@ -4866,7 +4866,7 @@ const storageFirst = (page, { set = {}, remove = [] } = {}) =>
     [set, remove]
   );
 // The collection's kept selection and filters (and an import's hand-over): without them a bulk button acts on all of it.
-const COLLECTION_STATE = ["bc_app_selection", "bc_app_status_filter", "bc_app_source_filter", "bc_after_import"];
+const COLLECTION_STATE = ["bc_app_selection", "bc_app_status_filter", "bc_app_source_filter", "bc_after_import", "bc_app_sort"];
 
 test("Build previews (Tools ▾): the dry run asks first (what's left out, and why); then its progress (built/total, MB/s, ETA, file) and Cancel; the summary lists the errors (stubbed build)", async () => {
   const plan = {
@@ -5086,6 +5086,74 @@ const dropCollections = async () => {
 const optionTexts = (page, sel) => page.$$eval(`${sel} option`, (os) => os.map((o) => o.textContent));
 const shownKeys = (page) => page.$$eval("#collectionTable tbody tr[data-key]", (rs) => rs.map((r) => r.dataset.key));
 const shownName = (page) => page.$eval("#collectionSelect", (s) => s.selectedOptions[0].textContent);
+
+test("the sort is kept like the selection: per collection on the collection page (a reload, switching collections), and on an import preview (real server)", async () => {
+  const app = await context.newPage();
+  await storageFirst(app, { remove: [...COLLECTION_STATE, "bc_app_collection"] });
+  const pick = async (value) => {
+    await app.selectOption("#collectionSelect", String(value));
+    await app.waitForFunction(() => !document.getElementById("loadingState"));
+  };
+  const arrowOf = (page, col) => page.$eval(`#collectionTable thead th.col-${col}`, (th) => (th.querySelector(".sort-arrow") || {}).textContent || "");
+  const loaded = (page) => page.waitForFunction(() => document.querySelectorAll("#collectionTable tbody tr[data-key]").length > 0 && !document.getElementById("loadingState"));
+  let batchId = null;
+  try {
+    await app.goto(SERVER + "/");
+    await app.waitForSelector("#collectionsBar:not([hidden])");
+    await loaded(app);
+    assert.equal(await app.inputValue("#collectionSelect"), "all");
+    // All: Title, descending.
+    await app.click("#collectionTable thead th.col-title");
+    await app.click("#collectionTable thead th.col-title");
+    const allOrder = (await shownKeys(app)).slice(0, 8);
+    // Collection: its own sort ("#" until one is picked); Artist, ascending.
+    await pick(0);
+    await app.waitForFunction(() => /▲/.test(document.querySelector("#collectionTable thead th.col-index").textContent));
+    assert.equal(await arrowOf(app, "title"), "", "All's sort stays with All");
+    await app.click("#collectionTable thead th.col-artist");
+    const collectionOrder = (await shownKeys(app)).slice(0, 8);
+    // A reload: Collection, by Artist.
+    await app.reload();
+    await loaded(app);
+    assert.equal(await app.inputValue("#collectionSelect"), "0");
+    assert.equal(await arrowOf(app, "artist"), " ▲");
+    assert.deepEqual((await shownKeys(app)).slice(0, 8), collectionOrder);
+    // Back to All: by Title, descending, as left; and after a reload too.
+    await pick("all");
+    await app.waitForFunction(() => /▼/.test(document.querySelector("#collectionTable thead th.col-title").textContent));
+    assert.deepEqual((await shownKeys(app)).slice(0, 8), allOrder);
+    await app.reload();
+    await loaded(app);
+    assert.equal(await arrowOf(app, "title"), " ▼");
+    assert.deepEqual((await shownKeys(app)).slice(0, 8), allOrder);
+
+    // An import preview: its sort is kept per batch, across a reload and leaving it.
+    const items = ["Alpha", "Bravo", "Charlie"].map((t, i) => ({ line: i + 1, raw: `E2E Sort - ${t}`, artist: "E2E Sort", title: t, tags: ["must"] }));
+    ({ batch_id: batchId } = await post("/api/import", { file: { format: "bc-tagger-import/1", source: "e2e-sort.txt", items }, default_tags: [], name: "e2e-sort" }));
+    await waitFor(() => api(`/api/import/${batchId}`).then((b) => b.status === "ready"), { what: "the batch", timeout: 30000 });
+    const titles = () => app.$$eval("#collectionTable tbody tr[data-key] .col-title", (cs) => cs.map((c) => c.textContent));
+    const preview = async () => {
+      await app.goto(`${SERVER}/import/?batch=${batchId}`);
+      await app.waitForFunction(() => document.querySelectorAll("#collectionTable tbody tr[data-key]").length === 3);
+    };
+    await preview();
+    await app.click("#collectionTable thead th.col-title");
+    await app.click("#collectionTable thead th.col-title");
+    assert.deepEqual(await titles(), ["Charlie", "Bravo", "Alpha"]);
+    await app.reload();
+    await app.waitForFunction(() => document.querySelectorAll("#collectionTable tbody tr[data-key]").length === 3);
+    assert.deepEqual(await titles(), ["Charlie", "Bravo", "Alpha"]);
+    assert.equal(await arrowOf(app, "title"), " ▼");
+    await app.goto(SERVER + "/");
+    await loaded(app);
+    await preview();
+    assert.deepEqual(await titles(), ["Charlie", "Bravo", "Alpha"]);
+  } finally {
+    if (batchId) await api(`/api/import/${batchId}`, { method: "DELETE" });
+    await app.evaluate(() => ["bc_app_sort", "bc_app_collection"].forEach((k) => localStorage.removeItem(k))).catch(() => {});
+    await app.close();
+  }
+});
 
 test("Collections: the dropdown (All first, counts), Create / Rename / Delete, Import to Collection and Remove from collection on the selection, the Collections chips in All, the choice kept and ?collection=", async () => {
   await dropCollections();

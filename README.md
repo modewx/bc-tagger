@@ -38,6 +38,7 @@ sync.
     - **Tools ▾**: maintenance (Refresh player files, Refresh thumbnails, Fix artists, Fix album IDs, Refresh
       ownership); **Columns ▾**.
   - The selection is kept in this browser across pages and reloads.
+  - So is the sort (the column and its direction), per collection: each one, and All, opens in the order it was left.
   - **Collections** (Phase 8; shown once the server has them): the dropdown at the top lists **All** (every track
     in a collection, once: the union, not a collection of its own) and then each collection, with its count; the choice is kept in this browser, and `?collection=<id|all>`
     opens one. **Create Collection** (a new, empty one), **Rename**, **Delete** (asks first; the tracks stay in other

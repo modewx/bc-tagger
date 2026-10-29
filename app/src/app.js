@@ -110,6 +110,36 @@ async function downloadOwnedMissing(statusEl) {
   }
 }
 
+// The sort (column and direction) last used in each collection (its id, or All), kept in this browser like the
+// selection: back on the page, or on that collection, the rows are in the same order. None kept: "#".
+const SORT_KEY = "bc_app_sort";
+function keptSorts() {
+  try {
+    const v = JSON.parse(localStorage.getItem(SORT_KEY) || "{}");
+    return v && typeof v === "object" && !Array.isArray(v) ? v : {};
+  } catch (e) {
+    return {};
+  }
+}
+function keepSort(key, dir) {
+  const all = keptSorts();
+  all[String(shownCollection)] = { key, dir };
+  try {
+    localStorage.setItem(SORT_KEY, JSON.stringify(all));
+  } catch (e) {
+    /* not kept */
+  }
+}
+// Returns whether the sort changed.
+function restoreSort(render) {
+  const s = keptSorts()[String(shownCollection)];
+  const key = s && typeof s.key === "string" ? s.key : "index";
+  const dir = s && s.dir === -1 ? -1 : 1;
+  const was = page.getSort();
+  page.sortBy(key, dir, { render });
+  return was.key !== key || was.dir !== dir;
+}
+
 // The rows the bulk buttons act on: the selected ones (checkbox column) when
 // there are any, else the rows currently shown (search + tags + Show). The
 // selection is kept in this browser across pages and reloads.
@@ -196,7 +226,9 @@ async function pickCollection(v) {
   if (collectionsBar) collectionsBar.setCurrent(v);
   page.refreshColumns(); // the Collections column: shown in All
   updateCollectionActions();
+  const resorted = restoreSort(false); // this collection's own order
   await page.reload();
+  if (resorted) page.render(); // a reload that only patched rows in place kept the old order
   noteAllCount();
   updateShownButtons();
 }
@@ -352,6 +384,7 @@ function selectOnly(ids) {
   sourceFilter.reset();
   page.refilter();
   page.sortBy("modified", -1);
+  keepSort("modified", -1);
   updateShownButtons();
   const items = page.getItems();
   return ids.filter((id) => id in items).length;
@@ -556,7 +589,9 @@ async function refreshHealth() {
       noteAllCount(); // in All, its count follows rows added or removed
     },
     onItemsUpdated: () => updateShownButtons(), // e.g. a selected item got located
+    onSort: keepSort,
   });
+  restoreSort(false); // the first rows come in that order
 
   // Collections: the bar at the top (once the server says it has them), Import to Collection by Remove.
   collectionsBar = createCollectionsBar({ current: shownCollection, onPick: pickCollection, statusEl: () => page.statusEl, onDeleted: deletedInExtension });
@@ -630,6 +665,7 @@ async function refreshHealth() {
   if (!hasCollections && shownCollection !== ALL) {
     shownCollection = ALL; // a server without collections: everything, as before
     ds.collection = ALL;
+    restoreSort(true);
   }
   page.refreshColumns();
   noteAllCount();

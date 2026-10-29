@@ -1767,11 +1767,12 @@ export function createCollectionPage(opts) {
     rangeKeys,
     getView: () => currentView,
     render: () => renderCollectionTable(currentView),
-    // Sort by a column's sortKey; dir 1 = ascending, -1 = descending (newest first for dates).
-    sortBy(key, dir = 1) {
+    // Sort by a column's sortKey; dir 1 = ascending, -1 = descending (newest first for dates). {render: false}: only
+    // set it, for the next render (before the rows are in, or before a reload).
+    sortBy(key, dir = 1, { render = true } = {}) {
       sortColumn = key;
       sortDir = dir;
-      renderCollectionTable(currentView);
+      if (render) renderCollectionTable(currentView);
     },
     getSort: () => ({ key: sortColumn, dir: sortDir }),
     // opts.hideColumns changed: the columns shown again (a choice made in Columns ▾ stays).
