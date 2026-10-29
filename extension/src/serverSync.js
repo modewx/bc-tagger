@@ -103,23 +103,28 @@ function sameJson(a, b) {
   return JSON.stringify(a) === JSON.stringify(b);
 }
 
-// Record what changed between two taggedItems snapshots.
+// Record what changed between two taggedItems snapshots; returns it ({changed: {id: item}, deleted: [ids]}).
 export function queueItemsDiff(oldItems, newItems) {
   oldItems = oldItems || {};
   newItems = newItems || {};
+  const changed = {};
+  const deleted = [];
   Object.keys(newItems).forEach((id) => {
     if (!sameJson(oldItems[id], newItems[id])) {
       pending.items[id] = newItems[id];
       pending.deleted.delete(id);
+      changed[id] = newItems[id];
     }
   });
   Object.keys(oldItems).forEach((id) => {
     if (!(id in newItems)) {
       pending.deleted.add(id);
       delete pending.items[id];
+      deleted.push(id);
     }
   });
   schedulePush();
+  return { changed, deleted };
 }
 
 export function queueTags() {
@@ -434,15 +439,15 @@ export async function refreshOwnership() {
 // --- App tabs ----------------------------------------------------------------
 
 // Tell open local-app tabs (via the appBridge content script) that the server
-// mirror just changed, so they re-read it.
-async function notifyAppTabs(event) {
+// mirror just changed, so they re-read it; or that the tags changed (`data`: the tags).
+export async function notifyAppTabs(event, data) {
   try {
     const base = await getServerUrl();
     const port = new URL(base).port;
     const patterns = ["127.0.0.1", "localhost"].map((h) => `http://${h}${port ? ":" + port : ""}/*`);
     const tabs = await chrome.tabs.query({ url: patterns });
     tabs.forEach((tab) =>
-      chrome.tabs.sendMessage(tab.id, { type: "bridgeEvent", event }, () => void chrome.runtime.lastError)
+      chrome.tabs.sendMessage(tab.id, { type: "bridgeEvent", event, data }, () => void chrome.runtime.lastError)
     );
   } catch (e) {
     /* no app tabs */

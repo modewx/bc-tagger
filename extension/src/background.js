@@ -15,6 +15,7 @@ import {
   sameServerOrigin,
   syncTick,
   scheduleMembershipPush,
+  notifyAppTabs,
   refreshCollections,
   popupState,
   createCollection,
@@ -76,16 +77,22 @@ function ensureTagsComplete(cb) {
   });
 }
 
-// Push the current tag list to every tab so open Bandcamp pages can refresh
-// their annotation dropdowns without a reload.
-function broadcastTags(tags) {
+// A small notice to every tab's content script (tabs without one ignore it). Content scripts don't listen to
+// storage.onChanged: it would hand each of them the old and new taggedItems (1.6 MB each) on every write.
+function tellTabs(msg) {
   chrome.tabs.query({}, (tabs) => {
     tabs.forEach((tab) => {
-      chrome.tabs.sendMessage(tab.id, { type: "tagsUpdated", tags }, () => {
+      chrome.tabs.sendMessage(tab.id, msg, () => {
         void chrome.runtime.lastError; // ignore tabs with no content script
       });
     });
   });
+}
+
+// Push the current tag list to every tab so open Bandcamp pages can refresh
+// their annotation dropdowns without a reload.
+function broadcastTags(tags) {
+  tellTabs({ type: "tagsUpdated", tags });
 }
 
 // ---------------------------------------------------------------------------
@@ -358,10 +365,28 @@ async function handleAppBridge(op, payload, sender) {
 // Server sync triggers
 // ---------------------------------------------------------------------------
 
+// The one storage listener with the whole store in it (this worker's): pushes to the server, and small notices to
+// the pages (what changed, not the store).
 chrome.storage.onChanged.addListener((changes, area) => {
   if (area !== "local") return;
-  if (changes.taggedItems) queueItemsDiff(changes.taggedItems.oldValue, changes.taggedItems.newValue);
-  if (changes.tags) queueTags();
+  if (changes.taggedItems) {
+    const diff = queueItemsDiff(changes.taggedItems.oldValue, changes.taggedItems.newValue);
+    const n = Object.keys(diff.changed).length + diff.deleted.length;
+    // (A bulk change, e.g. an import: the pages read the store again, once, rather than get it all in a notice.)
+    if (n > 200) tellTabs({ type: "itemsChanged", reload: true });
+    else if (n) tellTabs({ type: "itemsChanged", ...diff });
+  }
+  if (changes.tags) {
+    queueTags();
+    const tags = changes.tags.newValue || [];
+    broadcastTags(tags);
+    notifyAppTabs("tagsChanged", tags);
+  }
+  if (changes.activeCollection || changes.collectionsCache) {
+    getStorage(["activeCollection", "collectionsCache"]).then(({ activeCollection, collectionsCache }) =>
+      tellTabs({ type: "collectionsShown", active: activeCollection == null ? "all" : activeCollection, cache: collectionsCache || null })
+    );
+  }
   // A membership change on its own (an item that exists already joins or leaves a collection).
   const ops = changes.pendingMembership;
   if (ops && ((ops.newValue || []).length > (ops.oldValue || []).length)) scheduleMembershipPush();

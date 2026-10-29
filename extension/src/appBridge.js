@@ -39,12 +39,8 @@ function activate() {
     }
   });
 
-  chrome.storage.onChanged.addListener((changes, area) => {
-    if (area !== "local") return;
-    if (changes.tags) post({ bcTagger: "event", event: "tagsChanged", data: changes.tags.newValue || [] });
-    if (changes.taggedItems) post({ bcTagger: "event", event: "itemsChanged" });
-  });
-
+  // Events come from the background (tagsChanged with the tags, synced): no storage.onChanged here, which would
+  // hand this page the whole store twice on every write.
   chrome.runtime.onMessage.addListener((msg) => {
     if (msg && msg.type === "bridgeEvent") post({ bcTagger: "event", event: msg.event, data: msg.data });
   });

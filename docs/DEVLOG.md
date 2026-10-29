@@ -252,6 +252,46 @@ npm run build:app && npm run build:dev   # the local app (served by the server a
 npm run test:e2e                         # Playwright e2e: own profile, server :8767, app in .e2e/app-dist
 ```
 
+### 2026-10-28
+
+- **Speed of stars and tags** (user: a star took seconds, letters typed after Enter appeared a second later).
+  Measured first with `scripts/perf/extension.perf.mjs` (new): a recorded album page, a 1,070-item store
+  (1.6 MB), the pre-Phase-9 server like the user's, no network. It compares before Phase 9 (`ab310d9`), `65f65aa`
+  and this change, with 1 tab, and with 4 tabs (3 Bandcamp, 1 app) with the Bandcamp tabs' CPU slowed 6×.
+  - No multi-second delay showed, and Phase 9 wasn't a measurable regression.
+  - The cost was the whole store moving around. Each star or tag change first fetched every item from the worker
+    (about 30 ms). Each write then handed every content script and app tab the old and new store through
+    `storage.onChanged`.
+  - Changes:
+    - The content script keeps the page's items in memory (read once with the page). A star or a tag change is
+      decided from them at once, and the star is drawn before anything is sent.
+    - Pages and the app bridge no longer listen to `storage.onChanged`. The worker, now the one listener, sends
+      small notices instead:
+      - `itemsChanged {changed, deleted}` (over 200 changes, `reload`: the page reads the store once);
+      - `collectionsShown`;
+      - `tagsUpdated`;
+      - and to the bridge, `tagsChanged` with the tags.
+    - The per-widget `console.log`s of the whole store are gone.
+  - Tried and dropped: the worker keeping the items in memory with debounced writes. It measured worse: worker CPU
+    per star went from 43 to 90 ms and writes landed later, because `chrome.storage.local.set` cost more from a
+    timer than inside the message's task.
+  - Results, medians of 2 rounds × 3 runs (ms; before Phase 9 / `65f65aa` / this change):
+
+    | | 1 tab | 4 tabs, CPU 6× |
+    |---|---|---|
+    | star on screen | 42 / 43 / **1** | 66 / 62 / **8** |
+    | star written to storage | 129 / 129 / 104 | 153 / 140 / 94 |
+    | page CPU per star | 31 / 39 / **8** | 196 / 252 / **45** |
+    | page CPU per un-star | 36 / 32 / **8** | 320 / 250 / **66** |
+    | worker CPU per star | 50 / 60 / 46 | 46 / 41 / 38 |
+    | slowest key while typing | 16 / 16 / 16 | 128 / 104 / 56 |
+    | page CPU, a tag + Enter + 5 letters | 56 / 55 / 34 | 622 / 579 / 398 |
+
+  - What's left while typing at 6× is the page's own style, layout and paint, plus chosen's and jQuery's
+    visibility and CSS checks. That was already there before Phase 9.
+  - Run it (scratch builds pointed at its own server on :8769):
+    `PERF_EXT=<e2e build> PERF_APP=<app build> PERF_TABS=4 PERF_THROTTLE=6 node --experimental-websocket scripts/perf/extension.perf.mjs`.
+
 ### 2026-10-27
 
 - **Our own player controls** (user: a click on the timeline still needed a second click). On the user's drive the

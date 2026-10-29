@@ -148,10 +148,10 @@ if (collectionPage) {
     }
 
         
-    getTaggedItems((taggedItems) => {
+    const withItems = (cb) => (pageReady ? cb(pageItems) : getTaggedItems(cb));
+    withItems((taggedItems) => {
 
       mutations.forEach((mutation) => {
-        console.log(mutation)
         mutation.addedNodes.forEach((addedNode) => {
           let tralbumId = addedNode.getAttribute('data-tralbumid');
           let itemType = addedNode.getAttribute("data-tralbumtype");
@@ -313,13 +313,16 @@ function getTaggedItems(callback) {
 // storage.onChanged; each star is a Set lookup.
 const ALL = "all";
 const shown = { active: ALL, cache: null, members: new Set() };
-let savedIds = new Set();
+// The saved items, read once with the page and then kept by the background's small notices (what changed): a star
+// or a tag change decides from here at once, with no fetch of the whole store first.
+let pageItems = {};
+let pageReady = false;
 function setShown(active, cache) {
   shown.active = active == null ? ALL : active;
   shown.cache = cache || null;
   shown.members = new Set(shown.active === ALL || !cache ? [] : (cache.members || {})[String(shown.active)] || []);
 }
-const starred = (id) => (shown.active === ALL ? savedIds.has(id) : shown.members.has(id));
+const starred = (id) => (shown.active === ALL ? id in pageItems : shown.members.has(id));
 // The collection a new item starred in All goes into: the first in the list (none known: the server's first).
 function firstCollectionId() {
   const list = ((shown.cache && shown.cache.list) || []).slice();
@@ -337,7 +340,8 @@ function getPageState(callback) {
   let collections = null;
   const done = () => {
     if (!items || !collections) return;
-    savedIds = new Set(Object.keys(items));
+    pageItems = items;
+    pageReady = true;
     setShown(collections.activeCollection, collections.collectionsCache);
     callback(items);
   };
@@ -350,22 +354,24 @@ function getPageState(callback) {
     done();
   });
 }
-// The popup's choice, the collections, or the saved items changed: the stars again (no reload, no fetch).
-chrome.storage.onChanged.addListener((changes, area) => {
-  if (area !== "local") return;
-  let redraw = false;
-  if (changes.taggedItems) {
-    savedIds = new Set(Object.keys(changes.taggedItems.newValue || {}));
-    redraw = shown.active === ALL;
+// The saved items, the popup's choice or the collections changed (the background says what, in a small notice; no
+// storage.onChanged here, which would hand this page the whole store twice on every write): the stars again.
+const redrawStars = () => document.querySelectorAll(".tag-button[data-item-id]").forEach((b) => setStar(b, starred(b.dataset.itemId)));
+chrome.runtime.onMessage.addListener((msg) => {
+  if (!msg) return;
+  if (msg.type === "itemsChanged" && msg.reload) {
+    getTaggedItems((items) => {
+      pageItems = items || {};
+      if (shown.active === ALL) redrawStars();
+    });
+  } else if (msg.type === "itemsChanged") {
+    Object.entries(msg.changed || {}).forEach(([id, item]) => (pageItems[id] = item));
+    (msg.deleted || []).forEach((id) => delete pageItems[id]);
+    if (shown.active === ALL) redrawStars();
+  } else if (msg.type === "collectionsShown") {
+    setShown(msg.active, msg.cache);
+    redrawStars();
   }
-  if (changes.activeCollection || changes.collectionsCache) {
-    setShown(
-      changes.activeCollection ? changes.activeCollection.newValue : shown.active,
-      changes.collectionsCache ? changes.collectionsCache.newValue : shown.cache
-    );
-    redraw = true;
-  }
-  if (redraw) document.querySelectorAll(".tag-button[data-item-id]").forEach((b) => setStar(b, starred(b.dataset.itemId)));
 });
 
 // When a tag is created/updated elsewhere (the popup, an import, the app), add
@@ -407,9 +413,6 @@ function refreshTagOptions(tags) {
 }
 chrome.runtime.onMessage.addListener((request) => {
   if (request && request.type === "tagsUpdated") refreshTagOptions(request.tags || []);
-});
-chrome.storage.onChanged.addListener((changes, area) => {
-  if (area === "local" && changes.tags) refreshTagOptions(changes.tags.newValue || []);
 });
 
 function extractMetadata(element) {
@@ -461,9 +464,6 @@ function createTagButton(taggedItems, element, itemUrl, trackdata) {
   tagButton.dataset.itemId = uniqueId;
   tagButton.appendChild(star);
   container.appendChild(tagButton);
-  console.log(`--- tagged unique ${uniqueId}`);
-  console.log(taggedItems);
-  console.log(taggedItem);
 
   $.get(chrome.runtime.getURL('/taggerTemplate.html'), (data) => {
 
@@ -520,8 +520,8 @@ function createTagButton(taggedItems, element, itemUrl, trackdata) {
       // the star button. The star stays the explicit save/un-save toggle.
       tagger.on("change", () => {
         const currentTags = $(container).find(".chosen-select").chosen().val() || [];
-        getTaggedItems((currentTaggedItems) => {
-          const existingItem = currentTaggedItems[uniqueId];
+        {
+          const existingItem = pageItems[uniqueId];
           // Tagging it while a collection is shown puts it in that collection too.
           const joins = shown.active !== ALL && !shown.members.has(uniqueId) ? shown.active : undefined;
           if (existingItem) {
@@ -532,6 +532,7 @@ function createTagButton(taggedItems, element, itemUrl, trackdata) {
               tags: currentTags,
             };
             chrome.runtime.sendMessage({ type: "addTaggedItem", item: updatedItem, collection: joins });
+            pageItems[uniqueId] = updatedItem;
           } else {
             // Not saved yet: annotating it saves it, and the star reflects that.
             const metadata = { ...trackdata };
@@ -541,9 +542,11 @@ function createTagButton(taggedItems, element, itemUrl, trackdata) {
               tags: currentTags,
             };
             chrome.runtime.sendMessage({ type: "addTaggedItem", item: newItem, collection: joins === undefined ? firstCollectionId() : joins });
+            pageItems[uniqueId] = newItem;
           }
+          if (joins !== undefined) shown.members.add(uniqueId);
           if (joins !== undefined || !existingItem) setStar(tagButton, true);
-        });
+        }
       });
 
       // .val(["hola","mundo","cruel"]).trigger('chosen:updated');
@@ -608,20 +611,24 @@ function createTagButton(taggedItems, element, itemUrl, trackdata) {
 
     // star.classList.toggle("filled");
 
-    getTaggedItems((currentTaggedItems) => {
-      const itemInCollection = currentTaggedItems[uniqueId];
+    {
+      const itemInCollection = pageItems[uniqueId];
       // A collection is shown: the star is its membership (tags stay; the item stays in All and elsewhere).
       if (shown.active !== ALL) {
         const collection = shown.active;
         if (shown.members.has(uniqueId)) {
           setStar(tagButton, false);
+          shown.members.delete(uniqueId);
           chrome.runtime.sendMessage({ type: "setMembership", op: "remove", collection, id: uniqueId });
         } else if (itemInCollection) {
           setStar(tagButton, true);
+          shown.members.add(uniqueId);
           chrome.runtime.sendMessage({ type: "setMembership", op: "add", collection, id: uniqueId });
         } else {
           const newItem = { ...trackdata, date_added: new Date().toISOString(), tags: tags };
           setStar(tagButton, true);
+          shown.members.add(uniqueId);
+          pageItems[uniqueId] = newItem;
           chrome.runtime.sendMessage({ type: "addTaggedItem", item: newItem, collection });
         }
         return;
@@ -639,6 +646,7 @@ function createTagButton(taggedItems, element, itemUrl, trackdata) {
           return;
         }
         setStar(tagButton, false);
+        delete pageItems[uniqueId];
         chrome.runtime.sendMessage({ type: "removeTaggedItem", id: uniqueId });
     
       }
@@ -655,13 +663,13 @@ function createTagButton(taggedItems, element, itemUrl, trackdata) {
             ...metadata,
             tags: tags
           };
-          console.log(newItem);
           // All: a new item goes into the first collection.
+          pageItems[uniqueId] = newItem;
           chrome.runtime.sendMessage({ type: "addTaggedItem", item: newItem, collection: firstCollectionId() });
 
       }
 
-    });
+    }
 
 
     // if (star.classList.contains("filled")) {
