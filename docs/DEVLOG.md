@@ -294,6 +294,14 @@ npm run test:e2e                         # Playwright e2e: own profile, server :
 
 ### 2026-10-29
 
+- **The sort is kept** (user: "save the last order in which a collection is displayed both for main collection page and
+  imported collection sessions. Save it like the selection ticks").
+  - Collection page: the sort (column and direction) in localStorage `bc_app_sort`, per shown collection (its id, or
+    `all`), restored on load and when switching collections. None kept: "#". A switch whose reload only patches rows
+    in place renders once more, so the new order shows. Select last import's Modified-newest-first is kept as well.
+    The shared page's `sortBy(key, dir, {render: false})` sets the sort for the next render (before the rows load).
+  - Import preview: `bc_import_view:<batch>` already kept the sort, and it holds on a real batch across a reload and
+    leaving the page; I couldn't make it lose it. The e2e now checks that on the real server too.
 - **Set file… on the collection's Located popup** (user: "the manual locate button for `Locate` popup in main
   collection (not only in import)"). The import preview's search + Browse… form and folder browser moved into
   `app/src/fileSetter.js`; both pages use it, each with its own `use(path)`.
