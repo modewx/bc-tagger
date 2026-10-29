@@ -1295,6 +1295,23 @@ test("popup: Checkout / PayPal automation is on by default; off, the checkout sc
 // Album pages: the header widget is the album (a<id>), each row its own track
 // (t<id>), paired by position with the page's data. If Bandcamp's markup ever
 // shifts that pairing, album items would be saved/removed under track ids.
+test("track page of a single (one-track player, no album): the tag box is below the player, visible", async () => {
+  const page = await context.newPage();
+  try {
+    await page.goto("https://e2e-single.bandcamp.com/track/one-track-e2e");
+    await page.waitForSelector("#tagger_t999000777 + .chosen-container", { timeout: 30000 });
+    const where = await page.evaluate(() => {
+      const box = document.querySelector(".tagger-container");
+      const player = document.querySelector(".inline_player");
+      const b = box.getBoundingClientRect();
+      return { after: box.previousElementSibling === player, visible: b.width > 0 && b.height > 0, below: b.top >= player.getBoundingClientRect().bottom - 1 };
+    });
+    assert.deepEqual(where, { after: true, visible: true, below: true });
+  } finally {
+    await page.close();
+  }
+});
+
 test("album page: the header widget is the album item; track rows never touch it (recorded album page)", async () => {
   const albumId = "a563830364"; // Synergy Trilogy (in the imported export)
   const trackId = "t3738475288"; // Holo Law, one of its tracks

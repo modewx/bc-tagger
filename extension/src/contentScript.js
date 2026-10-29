@@ -603,16 +603,16 @@ function createTagButton(element, itemUrl, trackdata) {
     }
   }
   else if (trackPage) {
-    var k = element.querySelectorAll(".inline_player table tbody tr")[0];
-    
-    // m_url = element.querySelector(".track_row_view .title-col .title a");
-    // console.log("==== url" )
-    // console.log(m_url)
-
-    // element.querySelectorAll(".inline_player table tbody tr")[0];
-    // title-col
-   
-    k.appendChild(container);
+    // Below the player, as on album pages, when its row has no room to the right: the one-track layout (its row is
+    // the play button and the title, across), or a row where it ends up with no width.
+    const player = element.querySelector(".inline_player");
+    const k = element.querySelector(".inline_player table tbody tr");
+    if (player && (player.classList.contains("one-track") || !k)) {
+      player.insertAdjacentElement("afterend", container);
+    } else {
+      k.appendChild(container);
+      if (player && !container.getBoundingClientRect().width) player.insertAdjacentElement("afterend", container);
+    }
     //element.querySelector(".track_info").children[0].insertAdjacentElement('beforebegin', container);
     
   }
@@ -872,7 +872,9 @@ function addWidgets(entries, done = null) {
     
     albumData = extractAlbumData(tralbum);
     if (trackPage) {
-      albumData.title = document.querySelector(".fromAlbum").innerHTML;
+      // (A single, on no album, has none.)
+      const fromAlbum = document.querySelector(".fromAlbum");
+      albumData.title = fromAlbum ? fromAlbum.innerHTML : null;
     }
   }
 

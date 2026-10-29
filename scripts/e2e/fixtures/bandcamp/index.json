@@ -24,5 +24,8 @@
   },
   "https://bandcamp.com/EmbeddedPlayer/track=999000404/size=large/": {
     "status": 404
+  },
+  "https://e2e-single.bandcamp.com/track/one-track-e2e": {
+    "file": "track-one-track.html"
   }
 }

@@ -267,6 +267,15 @@ npm run test:e2e                         # Playwright e2e: own profile, server :
 
 ### 2026-10-28
 
+- **The tag box on a single's track page** (user: none on e.g. a one-track page, "no space to the right").
+  - It wasn't there at all: a single (on no album) has no ".fromAlbum", and the content script read its innerHTML
+    unguarded, so it stopped before making any widget (checked on the coordinator's saved copy of that page: the
+    old build makes none).
+  - On `.inline_player.one-track` pages the box now goes right below the player, as on album pages; on other track
+    pages it stays in the player's row unless it ends up with no width there, then below the player too.
+  - e2e: a minimal made-up fixture of that layout (`track-one-track.html`): the box is right after the player,
+    visible, below it.
+
 - **Merged Session A's server half of the deletions** (`36de763`: dry run, `delete_orphans`, tombstones, pending
   deletes; 271 backend tests). The worker deletes locally, waits for any sync it built before that to be answered,
   and only then acks (an older sync sent after the ack would bring the item back); a sync answer naming `ignored`

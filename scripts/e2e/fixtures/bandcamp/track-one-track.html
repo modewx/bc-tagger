@@ -1,0 +1,35 @@
+<!doctype html>
+<!-- A minimal stand-in for a single's track page (no album, no ".fromAlbum"): Bandcamp's one-track player, whose
+     first row is the play button and the title across, with no room to its right. Made up for the e2e. -->
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>One Track E2E | E2E Single Artist</title>
+  <script type="text/javascript" data-tralbum='{"item_type":"track","id":999000777,"artist":"E2E Single Artist","url":"https://e2e-single.bandcamp.com/track/one-track-e2e","art_id":null,"album_release_date":null,"current":{"title":"One Track E2E","album_id":null,"band_id":1,"about":null,"publish_date":null,"art_id":null},"trackinfo":[{"track_id":999000777,"title":"One Track E2E","track_num":null,"file":null}]}'></script>
+  <style>.leftMiddleColumns { width: 340px; } .inline_player table { width: 100%; }</style>
+</head>
+<body>
+  <div class="leftMiddleColumns">
+    <div id="trackInfo" class="leftColumn">
+      <div id="trackInfoInner">
+        <div class="inline_player one-track" rel="tracknum=1">
+          <table>
+            <tr>
+              <td class="play_cell" rowspan="2"><a role="button" aria-label="Play/pause"><div class="playbutton"></div></a></td>
+              <td class="track_cell" colspan="3"><div class="track_info"><span class="title">One Track E2E</span></div></td>
+            </tr>
+            <tr>
+              <td class="progbar_cell"><div class="progbar"></div></td>
+              <td class="prev_cell"></td>
+              <td class="next_cell"></td>
+            </tr>
+          </table>
+        </div>
+        <ul class="tralbumCommands"><li class="buyItem digital">Digital Track</li></ul>
+        <h3 class="credits-label">credits</h3>
+        <div class="tralbumData tralbum-credits">released October 28, 2026</div>
+      </div>
+    </div>
+  </div>
+</body>
+</html>
