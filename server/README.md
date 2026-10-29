@@ -411,6 +411,12 @@ If you use rekordbox Cloud Library Sync, turn it off before opening the test lib
   Titles whose numbers differ ("Part 2" vs "Part 3", "File #1" vs "File #2") never match.
   Compilation titles like "Artist - Title" are split. If the artist clearly differs, a match can only
   be a candidate.
+- Edition-only qualifiers are a title variant on both sides (items and files): "(Bonus Digital)", "[Bonus
+  Track]", "(Bandcamp Exclusive)", "(Digital Only)", "(Explicit)", "(Remastered 2011)", "- 2011 Remaster"
+  (`normalize.strip_edition`), also composed with feat.- and vinyl-side stripping ("Glory to the Highest
+  (feat. The Eternal) (Bonus Digital)" → "Glory to the Highest"). A match on them keeps full confidence.
+  Version qualifiers (Remix, Edit, Dub, VIP, Live, Instrumental, Extended, Rework, Bootleg, any other "Mix")
+  are a different recording and stay.
 - Album items match whole release folders and expand to every track in the folder.
 - Matches at or above `match_threshold` are accepted. If several are within 0.1 of the best (the same
   track in several formats), the format preference picks one, so AIFF beats MP3. Lower scores
