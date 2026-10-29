@@ -275,6 +275,12 @@ Tests never touch Bandcamp, the music drive or a real rekordbox library: Bandcam
     and cache file safely between threads.
   - Each run's output is kept in `download-logs/<job>.log` (newest 30), and `GET /api/jobs/{id}/log` serves it.
     A release the output never mentions says "see the download log".
+- **"Set file…" for collection items (user: "add the manual locate button for `Locate` popup in main
+  collection (not only in import)"):**
+  - `POST /api/matches/{id}/set-file {path}` makes any audio file in the music roots the item's file, indexing
+    it first if needed. Files outside the roots are refused.
+  - `DELETE /api/matches/{id}/confirm` goes back to automatic.
+  - Item views say `local.manual`. The file stays through later scans and locates.
 
 ## App and extension (`app/`, `extension/`, `shared/`, branch `claude/local-collection-ui-e8f6f6`)
 

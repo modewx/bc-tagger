@@ -31,6 +31,11 @@ def _within(path: Path, roots: list[Path]) -> bool:
     return any(path == r or path.is_relative_to(r) for r in roots)
 
 
+def inside_roots(roots_cfg: list[dict[str, Any]], path: str | Path) -> bool:
+    """Whether ``path`` (symlinks and ``..`` resolved) is under a mounted root, as the browser offers it."""
+    return _within(_real(path), _mounted_roots(roots_cfg))
+
+
 def list_dir(store: Store, roots_cfg: list[dict[str, Any]], path: str | None = None) -> dict[str, Any]:
     """``{path, parent, dirs: [{name, path}], files: [{name, path, ext, size, mtime, indexed, title?, artist?,
     album?, format?}]}``.
