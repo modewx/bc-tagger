@@ -698,6 +698,16 @@ def create_app(service: Service | None = None) -> FastAPI:
             raise HTTPException(404, f"unknown job {job_id}")
         return j.to_dict()
 
+    @app.get("/api/jobs/{job_id}/log")
+    def job_log(job_id: str) -> Response:
+        """A download job's downloader output (redacted, no progress lines); kept across restarts."""
+        from . import downloads
+
+        path = downloads.log_dir(svc) / f"{job_id}.log"
+        if not re.fullmatch(r"[\w.-]+", job_id) or not path.is_file():
+            raise HTTPException(404, f"no download log for {job_id}")
+        return Response(path.read_text(encoding="utf-8", errors="replace"), media_type="text/plain; charset=utf-8")
+
     @app.get("/api/events")
     async def events(request: Request) -> StreamingResponse:
         queue = svc.jobs.bus.subscribe()

@@ -4,12 +4,20 @@ Run by the server instead of the jar when ``BC_TAGGER_DOWNLOADER_STUB=<this file
 jar's lines and writes ``<folder>/<artist>/<year> - <title>/NN <track>.aiff`` with tags.
 
 ``BC_TAGGER_STUB_RELEASES=<json file>``: ``{"a123": {"artist", "title", "year", "tracks": [..],
-"fail": "not_in_collection"|"challenge"|"rate_limit"|"error", "retry_error": "<exception text>", "retry_wait": s}}``;
-unknown ids get a generic release. ``retry_error``: that release's first attempt fails with it part way and is
+"fail": "not_in_collection"|"challenge"|"rate_limit"|"error"|"page_error"|"page_challenge"|"exception"|"silent",
+"retry_error": "<exception text>", "retry_wait": s, "preorder": "<release date>", "out": [tracks out now]}}``;
+unknown ids get a generic release. Like the tool since 2026-10-29, "Managing item N/M: <id> (p<sale id>)" says
+which item a thread's next lines are about (``BC_TAGGER_STUB_OLD=1``: the older "Managing item N/M").
+``page_error``: its download page keeps failing before "Found release" (retried, then "Could not download
+item: Could not perform task after 3 retries (last: …)"); ``page_challenge``: its download page is Bandcamp's
+bot check (the tool gives up that item, then carries on after ``BC_TAGGER_STUB_AFTER_STOP``); ``exception``:
+the thread hits an unexpected exception after "Found release"; ``silent``: nothing more is said about it after
+"Managing item". ``preorder``: without ``--preorders`` it's skipped; with it, only the ``out`` tracks come. ``retry_error``: that release's first attempt fails with it part way and is
 retried; ``retry_wait``: seconds to wait after "Retrying (1/3)." (the other releases have started by then).
 ``BC_TAGGER_STUB_DELAY=<seconds>``: wait that long before writing (to see progress in a UI).
 ``BC_TAGGER_STUB_RETRY=1``: every release's first attempt fails ("Read timed out") and is retried.
 ``BC_TAGGER_STUB_ARGS=<file>``: append each run's arguments there (one JSON list per line).
+``BC_TAGGER_STUB_ECHO=<line>``: print that line early (e.g. one with a cookie, to check it's redacted).
 ``fail: "challenge"`` / ``"rate_limit"`` print Bandcamp's bot check / a 429 when that release's turn comes (the
 releases before it download), then wait ``BC_TAGGER_STUB_AFTER_STOP`` seconds (default 2) and carry on like a
 tool that didn't notice: the server must end the run itself, so nothing after it gets written.
@@ -56,6 +64,7 @@ def main() -> int:
     p.add_argument("--item-id", action="append", default=[])
     p.add_argument("--user-agent")
     p.add_argument("--force", action="store_true")
+    p.add_argument("--preorders", action="store_true")
     p.add_argument("--cookies-file")
     p.add_argument("--jobs", type=int, default=4)
     p.add_argument("--timeout", type=int, default=50000)
@@ -70,6 +79,8 @@ def main() -> int:
     log(f"Target bandcamp account: {rest[-1] if rest else '?'}")
     log(f"Target download folder: {folder}")
     log(f"User-Agent: {args.user_agent}")
+    if os.environ.get("BC_TAGGER_STUB_ECHO"):
+        log(os.environ["BC_TAGGER_STUB_ECHO"])
     ids = [i for raw in args.item_id for i in raw.split(",") if i]
     log(f"Items: {', '.join(ids)}")
     rels = {i: {"artist": "Stub Artist", "title": f"Stub Release {i}", "year": 2026, "tracks": ["Stub Track"],
@@ -94,19 +105,45 @@ def main() -> int:
             if rels[i]["fail"] == "challenge":
                 log("<!DOCTYPE html><html><head><title>Client Challenge</title></head></html>")
             else:
-                print("ERROR: HTTP error fetching URL. Status=429", file=sys.stderr, flush=True)
+                log('Error while trying: "org.jsoup.HttpStatusException: HTTP error fetching URL. Status=429".')
             time.sleep(float(os.environ.get("BC_TAGGER_STUB_AFTER_STOP", "2")))
             group.remove(i)
         thread = {i: (f"pool-1-thread-{k + 1}" if jobs > 1 else None) for k, i in enumerate(group)}
         names, folders = {}, {}
+        gone = set()
         for n, i in enumerate(group, start + 1):
             rel, t = rels[i], thread[i]
-            log(f"Managing item {n}/{len(todo)}", t)
+            log(f"Managing item {n}/{len(todo)}" + ("" if os.environ.get("BC_TAGGER_STUB_OLD") else f": {i} (p{i[1:]})"), t)
+            if rel.get("fail") == "page_error":
+                for k in range(1, 4):
+                    log('Error while trying: "java.lang.NullPointerException: null".', t)
+                    log(f"Retrying ({k}/3).", t)
+                log('Error while trying: "java.lang.NullPointerException: null".', t)
+                log("Could not download item: Could not perform task after 3 retries "
+                    "(last: java.lang.NullPointerException: null).", t)
+                gone.add(i)
+                continue
+            if rel.get("fail") == "page_challenge":
+                log(f"Could not download item: Download page of p{i[1:]}: Client Challenge (Bandcamp's bot check); "
+                    "giving up", t)
+                time.sleep(float(os.environ.get("BC_TAGGER_STUB_AFTER_STOP", "2")))
+                gone.add(i)
+                continue
+            if rel.get("fail") == "silent":
+                gone.add(i)
+                continue
             names[i] = f'"{rel["title"]}" ({rel["year"]}) by {rel["artist"]}'
             log(f"Found release {names[i]} (Bandcamp ID: p{i[1:]}).", t)
-        for i in [i for i in group if rels[i].get("fail") == "error"]:
-            log("Could not download item: No URL found for item", thread[i])
-            group.remove(i)
+            if rel.get("preorder") and not args.preorders:
+                log(f"{names[i]} is a preorder; skipping.", t)
+                gone.add(i)
+            elif rel.get("preorder"):
+                log(f"{names[i]} is a preorder (out {rel['preorder']}); downloading what's out now.", t)
+        for i in [i for i in group if rels[i].get("fail") in ("error", "exception")]:
+            log("Could not download item: " + ("No URL found for item" if rels[i]["fail"] == "error" else
+                                               "java.lang.IllegalStateException: something unexpected"), thread[i])
+            gone.add(i)
+        group = [i for i in group if i not in gone]
         for i in group:
             folders[i] = folder / rels[i]["artist"] / f'{rels[i]["year"]} - {rels[i]["title"]}'
             log(f"Starting the download of {names[i]}.", thread[i])
@@ -135,7 +172,8 @@ def main() -> int:
             else:
                 folders[i].mkdir(parents=True, exist_ok=True)
                 for n, track in enumerate(rel["tracks"], 1):
-                    write_aiff(folders[i] / f"{n:02d} {track}.aiff", track, rel["artist"], rel["title"], n)
+                    if track in rel.get("out", rel["tracks"]):  # a preorder: only what's out now
+                        write_aiff(folders[i] / f"{n:02d} {track}.aiff", track, rel["artist"], rel["title"], n)
                 log(f"{names[i]} successfully downloaded.", thread[i])
             if "p" + i[1:] not in cache:
                 with cache_file.open("a") as f:

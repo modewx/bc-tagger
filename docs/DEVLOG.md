@@ -265,6 +265,16 @@ Tests never touch Bandcamp, the music drive or a real rekordbox library: Bandcam
   - Each release is indexed and located as soon as it finishes, on a separate thread, while the others download.
   - Bandcamp's bot check, a 429 or the drive going away ends the run at once, and what hadn't finished fails
     with that reason.
+- **Preorders, and every failure says why (user: "make sure to pass the preorder flag or check what went
+  wrong"):** the first real one-run download failed 4 of 6 releases, 3 of them with no message.
+  - Downloads pass `--preorders`: a preorder brings what's out now, and an item that isn't out yet says so.
+  - The downloader (the user's fork, branch `bc-tagger-item-id`) now names each item it starts on, so retries
+    and errors before "Found release" are tied to the right release. Before, they were tied to none.
+  - It also catches every error in a download thread, writes the HTTP status in its retry lines (a 429 used to
+    read only "HTTP error fetching URL"), gives up at once on a bot-check download page, and shares its maps
+    and cache file safely between threads.
+  - Each run's output is kept in `download-logs/<job>.log` (newest 30), and `GET /api/jobs/{id}/log` serves it.
+    A release the output never mentions says "see the download log".
 
 ## App and extension (`app/`, `extension/`, `shared/`, branch `claude/local-collection-ui-e8f6f6`)
 

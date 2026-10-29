@@ -4,7 +4,9 @@ Each ref is an item id (``t123``/``a456``) or an import row (``<batch_id>:<n>``)
 album when the album is owned (else the track itself if it was bought alone); releases are deduped and
 given to ONE downloader run per job (one login and one walk of the collection, like ``bc-download``),
 ``download_parallel`` at a time, with the tool's ``--force``: only releases that aren't located are queued
-(unless the user's ``force``), so the tool's cache must not skip them. One download job at a time.
+(unless the user's ``force``), so the tool's cache must not skip them; and ``--preorders``: a preorder's
+tracks that are out now. One download job at a time. Each run's output goes to ``download-logs/<job>.log`` in
+the data dir (the last ``KEEP_LOGS``; the job's result names it, ``GET /api/jobs/{id}/log`` serves it).
 Each release is indexed and its items and rows located as soon as it finishes, on a finisher thread, while
 the run goes on. Bandcamp's bot check or a rate limit in the output, or the drive going away, ends the run
 at once and fails the releases not finished yet.
@@ -13,7 +15,9 @@ at once and fails the releases not finished yet.
 from __future__ import annotations
 
 import queue
+import re
 import threading
+import time
 from pathlib import Path
 from typing import Any
 
@@ -24,6 +28,7 @@ from .store import now_iso
 from .tagread import AUDIO_EXTS
 
 _one_at_a_time = threading.Lock()
+KEEP_LOGS = 30  # download-logs/: the newest this many
 
 MESSAGES = {
     "downloaded": "downloaded",
@@ -33,6 +38,7 @@ MESSAGES = {
     "challenged": "Bandcamp answered with its bot check; downloads stopped",
     "rate_limited": "Bandcamp is rate-limiting; try again later",
     "failed": "the download failed",
+    "unreported": "the downloader didn't report on it; see the download log",
 }
 
 
@@ -180,15 +186,32 @@ def run(svc, refs: list[str], force: bool = False, ctx=None, full_release: bool 
     for e in p["items"]:
         publish(e)
     results: list[dict] = []
+    log = log_path(svc, job_id or time.strftime("run-%Y%m%d-%H%M%S")) if p["releases"] else None
     try:
-        stop = _run_releases(svc, p, by_ref, ctx, job_id, publish, results)
+        stop = _run_releases(svc, p, by_ref, ctx, job_id, publish, results, log)
     finally:
         order = [rel["release"] for rel in p["releases"]]
         results.sort(key=lambda r: order.index(r["release"]))  # the plan's order, not the finishing order
         _record(svc, p["items"], results, full_release, job_id)
     if ctx:
         ctx.progress(len(p["releases"]), len(p["releases"]), "downloads done")
-    return {"destination": p["destination"], "releases": results, "items": p["items"], "stopped": stop}
+    return {"destination": p["destination"], "releases": results, "items": p["items"], "stopped": stop,
+            "log": str(log) if log and log.exists() else None}
+
+
+def log_dir(svc) -> Path:
+    return svc.settings.path.parent / "download-logs"
+
+
+def log_path(svc, job_id: str) -> Path:
+    """Where a job's downloader output goes; the oldest logs beyond ``KEEP_LOGS`` are removed."""
+    if not re.fullmatch(r"[\w.-]+", job_id):
+        raise ValueError(f"not a job id: {job_id!r}")
+    folder = log_dir(svc)
+    if folder.is_dir():
+        for old in sorted(folder.glob("*.log"), key=lambda f: f.stat().st_mtime)[:-(KEEP_LOGS - 1)]:
+            old.unlink(missing_ok=True)
+    return folder / f"{job_id}.log"
 
 
 def _record(svc, entries: list[dict], results: list[dict], full_release: bool, job_id: str | None) -> None:
@@ -227,13 +250,18 @@ def _message(res: dict) -> str:
     if res["outcome"] == "failed" and errors and "not mounted" in errors[-1]:
         return errors[-1]  # the drive went away: say just that
     if res["outcome"] == "failed" and errors:
-        return f"{message}: {errors[-1]}"
-    if retries:
-        return f"{message} (after {len(retries)} retr{'y' if len(retries) == 1 else 'ies'}: {retries[-1]})"
+        message = f"{message}: {errors[-1]}"
+    elif res["outcome"] == "unreported" and errors:
+        message = f"{message} (the run's last error: {errors[-1]})"
+    elif retries:
+        message = f"{message} (after {len(retries)} retr{'y' if len(retries) == 1 else 'ies'}: {retries[-1]})"
+    if res.get("preorder"):
+        message = f"a preorder, out {res['preorder']}: {message}"
     return message
 
 
-def _run_releases(svc, p: dict, by_ref: dict, ctx, job_id, publish, results: list[dict]) -> str | None:
+def _run_releases(svc, p: dict, by_ref: dict, ctx, job_id, publish, results: list[dict],
+                  log: Path | None = None) -> str | None:
     """The plan's releases in one downloader run, ``download_parallel`` at a time. Each release is indexed and
     located on a finisher thread as soon as the tool says it finished (indexing on the thread reading the
     tool's output would stall the pipe, and the downloads with it). Returns why the run stopped, if it did."""
@@ -278,7 +306,10 @@ def _run_releases(svc, p: dict, by_ref: dict, ctx, job_id, publish, results: lis
         located = _locate_refs(svc, entries, release) if res["ok"] else {}
         message = _message(res)
         for e in entries:
-            e.update(state="done" if res["ok"] else "failed", message=message, located=located.get(e["ref"]))
+            said = message
+            if res["ok"] and res.get("preorder") and not located.get(e["ref"]):
+                said = f"a preorder, out {res['preorder']}: downloaded what's out now; this one isn't out yet"
+            e.update(state="done" if res["ok"] else "failed", message=said, located=located.get(e["ref"]))
             publish(e)
         results.append({**{k: v for k, v in res.items() if k != "log_tail"}, "indexed": indexed, "refs": [
             e["ref"] for e in entries]})
@@ -312,7 +343,7 @@ def _run_releases(svc, p: dict, by_ref: dict, ctx, job_id, publish, results: lis
         worker.start()
         try:
             run = downloader.run_releases(svc.settings, [{k: r[k] for k in ("release", "title", "artist")} for r in rels],
-                                          p["format"], True, on_line=report, on_done=on_done)
+                                          p["format"], True, on_line=report, on_done=on_done, log_path=log)
         except (DownloadRefused, OSError) as err:
             run = {"releases": {r["release"]: _failed(r["release"], err) for r in rels}, "folders": [],
                    "stray_errors": [], "stopped": None, "stop_error": None}

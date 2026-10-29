@@ -102,7 +102,7 @@ def test_download_then_locate(svc, tmp_path):
 def test_command_is_honest_and_keeps_cookies_out_of_output(svc):
     cmd = downloader.release_command(svc.settings, "a10")
     assert f"--user-agent={USER_AGENT}" in cmd and "--item-id=a10" in cmd and "--skip-hidden" in cmd and "--jobs=1" in cmd
-    assert "--audio-format=aiff-lossless" in cmd and "--force" not in cmd
+    assert "--audio-format=aiff-lossless" in cmd and "--force" not in cmd and "--preorders" in cmd
     with pytest.raises(downloader.DownloadRefused):
         downloader.release_command(svc.settings, "a10; rm -rf /")
 
@@ -219,6 +219,7 @@ def test_releases_download_in_parallel_in_one_run(svc, tmp_path, monkeypatch):
     assert [a for a in runs[0] if a.startswith("--item-id=")] == ["--item-id=a10", "--item-id=t200", "--item-id=a70"]
     assert "--jobs=3" in runs[0] and "--timeout=240000" in runs[0]  # at most one per release (setting: 4)
     assert "--force" in runs[0]  # only what isn't located is queued: the tool's cache mustn't skip it
+    assert "--preorders" in runs[0]  # a preorder's tracks that are out now
     assert [r["outcome"] for r in result["releases"]] == ["downloaded"] * 3 and result["stopped"] is None
     assert all(e["state"] == "done" and e["located"] for e in result["items"])
     # each release's own percent, read from the shared "Progresses: [thread] x % || …" line
@@ -237,8 +238,9 @@ def test_releases_download_in_parallel_in_one_run(svc, tmp_path, monkeypatch):
 
 
 def test_parallel_output_with_titles_we_cant_tell_apart(svc, tmp_path, monkeypatch):
-    """Release names in the output that match none of ours: every folder written is indexed and each item is
-    checked by locating it (one left over is matched by elimination)."""
+    """An older tool ("Managing item N/M" without ids), release names in the output that match none of ours:
+    every folder written is indexed and each item is checked by locating it."""
+    monkeypatch.setenv("BC_TAGGER_STUB_OLD", "1")
     rel = tmp_path / "releases.json"
     rel.write_text(json.dumps({**RELEASES,
                                "t200": {**RELEASES["t200"], "title": "Single (Edit)"},
@@ -249,6 +251,9 @@ def test_parallel_output_with_titles_we_cant_tell_apart(svc, tmp_path, monkeypat
     assert by_ref(result)["t200"]["located"]
     assert by_ref(result)["t100"]["message"] == ("the download failed: couldn't tell which release failed: "
                                                  "Could not download item: No URL found for item")
+    monkeypatch.delenv("BC_TAGGER_STUB_OLD")  # the tool now names each item it manages: no guessing
+    result = downloads.run(svc, ["t200", "t100"], force=True)
+    assert by_ref(result)["t100"]["message"] == "the download failed: Could not download item: No URL found for item"
 
 
 def test_download_settings_are_checked(svc):
@@ -435,3 +440,80 @@ def test_stub_retry_wait_keeps_the_retry_in_the_jobs_line(svc, tmp_path, monkeyp
     retry_at = next(t for t, m in seen if "Single: retry 1/3: read timed out" in m and "Album A: downloading" in m)
     after = next(t for t, m in seen if t > retry_at and "Single: downloading" in m)
     assert after - retry_at >= 0.25  # the retry stays on the job's line while the other release downloads
+
+
+def test_every_failure_says_why(svc, tmp_path, monkeypatch):
+    """Each thread's lines belong to the item its "Managing item N/M: <id> (p…)" line names: a download page
+    that keeps failing before "Found release", an unexpected exception, and an item nothing more is said about."""
+    _more_owned(svc, "t601")
+    rel = tmp_path / "releases.json"
+    rel.write_text(json.dumps({**RELEASES, "t200": {**RELEASES["t200"], "fail": "page_error"},
+                               "a10": {**RELEASES["a10"], "fail": "exception"},
+                               "t601": {"artist": "Artist F", "title": "Song t601", "year": 2026, "fail": "silent",
+                                        "tracks": ["Song t601"]}}))
+    result = downloads.run(svc, ["t200", "t100", "a70", "t601"])
+    items = by_ref(result)
+    assert items["t200"]["state"] == "failed" and items["t200"]["message"] == (
+        "the download failed: Could not download item: Could not perform task after 3 retries "
+        "(last: java.lang.NullPointerException: null).")
+    assert items["t100"]["message"] == ("the download failed: Could not download item: "
+                                        "java.lang.IllegalStateException: something unexpected")
+    assert items["t601"]["state"] == "failed"
+    assert items["t601"]["message"] == "the downloader didn't report on it; see the download log"
+    assert items["a70"]["state"] == "done" and items["a70"]["message"] == "downloaded"
+    outcomes = {r["release"]: r["outcome"] for r in result["releases"]}
+    assert outcomes == {"t200": "failed", "a10": "failed", "a70": "downloaded", "t601": "unreported"}
+
+
+def test_a_bot_check_on_a_download_page_ends_the_run(svc, tmp_path, monkeypatch):
+    svc.settings.update({"download_parallel": 1})
+    rel = tmp_path / "releases.json"
+    rel.write_text(json.dumps({**RELEASES, "a10": {**RELEASES["a10"], "fail": "page_challenge"}}))
+    started = time.monotonic()
+    result = downloads.run(svc, ["t200", "t100", "a70"])
+    assert time.monotonic() - started < 1.5  # not the stub's 2 s: it was stopped
+    items = by_ref(result)
+    assert result["stopped"] == downloads.MESSAGES["challenged"]
+    assert items["t200"]["state"] == "done"
+    assert items["t100"]["state"] == "failed" and "Client Challenge" in items["t100"]["message"]  # its own line
+    assert items["a70"]["state"] == "failed" and items["a70"]["message"] == result["stopped"]
+    assert not (tmp_path / "owned" / "Stub Artist").exists()
+
+
+def test_a_preorder_downloads_what_is_out_now(svc, tmp_path):
+    rel = tmp_path / "releases.json"
+    rel.write_text(json.dumps({**RELEASES, "a10": {**RELEASES["a10"], "preorder": "2026-10-30", "out": ["Song A"]}}))
+    result = downloads.run(svc, ["t100", "t101"])
+    items = by_ref(result)
+    assert result["releases"][0]["outcome"] == "downloaded" and result["releases"][0]["preorder"] == "2026-10-30"
+    assert items["t100"]["state"] == "done" and items["t100"]["located"] is True
+    assert items["t100"]["message"] == "a preorder, out 2026-10-30: downloaded"
+    assert items["t101"]["state"] == "done" and not items["t101"]["located"]
+    assert items["t101"]["message"] == "a preorder, out 2026-10-30: downloaded what's out now; this one isn't out yet"
+
+
+def test_each_run_keeps_its_output(svc, tmp_path, monkeypatch):
+    """The run's output, redacted and without progress lines, in download-logs/<job id>.log (the newest 30)."""
+    logs = svc.settings.path.parent / "download-logs"
+    logs.mkdir()
+    for n in range(35):  # older logs: only the newest are kept
+        old = logs / f"download-items-old{n}.log"
+        old.write_text("old")
+        os.utime(old, (1_000_000 + n, 1_000_000 + n))
+    monkeypatch.setenv("BC_TAGGER_STUB_ECHO", "Cookie: identity=SECRET123; session=abc")
+    with TestClient(create_app(svc)) as c:
+        job = c.post("/api/download", json={"ids": ["t200"]}).json()
+        done = svc.jobs.wait(job["job_id"], timeout=60)
+        assert done.status == "done", done.error
+        path = Path(done.result["log"])
+        assert path == logs / f"{job['job_id']}.log"
+        text = c.get(f"/api/jobs/{job['job_id']}/log").text
+        assert c.get("/api/jobs/download-items-nope/log").status_code == 404
+    assert text == path.read_text()
+    assert "Managing item 1/1: t200 (p200)" in text and "successfully downloaded" in text
+    assert "identity=<redacted>" in text and "SECRET123" not in text and "session=<redacted>" in text
+    assert "Progress" not in text  # thousands of those: not kept
+    assert "--cookies-file=<cookies file>" in text and str(svc.settings.get("cookies_file")) not in text
+    assert text.rstrip().endswith("# exit 0")
+    kept = sorted(logs.glob("*.log"))
+    assert len(kept) == downloads.KEEP_LOGS and path in kept and not (logs / "download-items-old5.log").exists()
