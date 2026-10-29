@@ -628,13 +628,13 @@ def create_app(service: Service | None = None) -> FastAPI:
 
     @app.post("/api/matches/{item_id}/set-file")
     def set_file(item_id: str, body: PathBody) -> dict:
-        """"Set file…": any audio file in the music roots becomes the item's confirmed file."""
+        """"Set file…": the file (indexed if it isn't, as for an import row) becomes the item's confirmed file."""
         return svc.set_item_file(item_id, body.path)
 
     @app.delete("/api/matches/{item_id}/confirm")
     def back_to_automatic(item_id: str) -> dict:
         """"Back to automatic": the confirmed file goes (rejects stay); returns the item view."""
-        return svc.clear_item_file(item_id)
+        return svc.set_match_override(item_id, None, "clear")["item"]
 
     # -- rekordbox ---------------------------------------------------------------------
 

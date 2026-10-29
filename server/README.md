@@ -416,15 +416,18 @@ If you use rekordbox Cloud Library Sync, turn it off before opening the test lib
   track in several formats), the format preference picks one, so AIFF beats MP3. Lower scores
   above `candidate_threshold` are kept as candidates to confirm in the UI
   (`POST /api/matches/{id}/confirm|reject {path}`; for albums the path is the release folder).
-- "Set file…" (collection items, any kind): `POST /api/matches/{id}/set-file {path}` takes any audio file inside
-  the music roots (symlinks and `..` resolved: 403 outside; 400 for a missing or non-audio file; 404 for an
-  unknown item), indexes it if it isn't, and makes it the item's one confirmed path, even with no title
-  overlap. An album item confirms the file's release folder. The item is located again and gets an SSE `item`
-  event; the answer is `{item_id, path, item: <item view>}`. A confirmed path is kept by every later locate,
-  scan and locate job while the file is indexed. `DELETE /api/matches/{id}/confirm` ("Back to automatic")
-  removes it, keeps the rejects, locates again and answers the item view. An item view's `local.manual` is true
-  when its best is a confirmed file (method `confirmed`/`manual`). Picking the file: `GET /api/index/search?q=`
-  (indexed files) and `GET /api/fs/list?path=` (folders and audio files under the roots).
+- "Set file…" (collection items, any kind) reuses the import row's way: `POST /api/matches/{id}/set-file {path}`
+  indexes the file if it isn't (`Service.index_picked_file`, also behind an import row's `path` patch: any audio
+  file; outside the roots its folder counts as a not-owned root; 400 for a missing or non-audio file, 404 for an
+  unknown item) and remembers its folder as `last_browse_dir`. Then it's the confirm an import commit writes
+  for a hand-set row (`set_match_override`): the item's one confirmed path, even with no title overlap (an album
+  item confirms the file's release folder). The item is located again and gets an SSE `item` event; the answer
+  is `{item_id, path, decision, item: <item view>}`. A confirmed path is kept by every later locate, scan and
+  locate job while the file is indexed. `DELETE /api/matches/{id}/confirm` ("Back to automatic", decision
+  `clear`) removes it, keeps the rejects, locates again and answers the item view. An item view's
+  `local.manual` is true when its best is a confirmed file (method `confirmed`/`manual`). Picking the file:
+  `GET /api/index/search?q=` (indexed files) and `GET /api/fs/list?path=` (folders and audio files under the
+  roots).
 
 ## Ownership
 

@@ -277,9 +277,10 @@ Tests never touch Bandcamp, the music drive or a real rekordbox library: Bandcam
     A release the output never mentions says "see the download log".
 - **"Set file…" for collection items (user: "add the manual locate button for `Locate` popup in main
   collection (not only in import)"):**
-  - `POST /api/matches/{id}/set-file {path}` makes any audio file in the music roots the item's file, indexing
-    it first if needed. Files outside the roots are refused.
-  - `DELETE /api/matches/{id}/confirm` goes back to automatic.
+  - Built from what the import uses (the user: "reuse what Import Collections use"): the import row's file
+    helper (indexed if needed, its folder remembered for the next Browse…), then the same confirm an import
+    commit writes. `POST /api/matches/{id}/set-file {path}`; `DELETE /api/matches/{id}/confirm` goes back to
+    automatic.
   - Item views say `local.manual`. The file stays through later scans and locates.
 
 ## App and extension (`app/`, `extension/`, `shared/`, branch `claude/local-collection-ui-e8f6f6`)
