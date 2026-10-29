@@ -123,43 +123,46 @@ export function planText(plan) {
 }
 
 // Plan → download, with progress in statusEl. Returns the finished job, or
-// null when nothing was started.
-export async function downloadFlow(ids, scope, { jobs, statusEl, fullRelease = false }) {
+// null when nothing was started. `note` (e.g. that ownership couldn't be
+// refreshed) stays at the end of each status.
+export async function downloadFlow(ids, scope, { jobs, statusEl, fullRelease = false, note = "" }) {
+  const say = (text) => (statusEl.textContent = note ? `${text} ${note}` : text);
   if (!ids.length) {
-    statusEl.textContent = "Download: nothing to download (no owned item that isn't on your drive).";
+    say("Download: nothing to download (no owned item that isn't on your drive).");
     return null;
   }
-  statusEl.textContent = fullRelease ? "Download: checking the full releases…" : "Download: checking what to download…";
+  say(fullRelease ? "Download: checking the full releases…" : "Download: checking what to download…");
   let plan;
   try {
     plan = await planDownload(ids, scope, fullRelease);
   } catch (e) {
-    statusEl.textContent = `Download: ${e.message}`;
+    say(`Download: ${e.message}`);
     return null;
   }
   const { text, notes, releases } = planText(plan);
   if (!releases) {
-    statusEl.textContent = `Download: nothing to download. ${text}`.trim();
+    say(`Download: nothing to download. ${text}`.trim());
     return null;
   }
-  statusEl.textContent = `Downloading ${text}`;
+  say(`Downloading ${text}`);
   let job;
   try {
     const { job_id } = await startDownload(ids, scope, fullRelease);
-    job = await jobs.watch(job_id, (j) => (statusEl.textContent = `Downloading: ${progressText(j)}`));
+    job = await jobs.watch(job_id, (j) => say(`Downloading: ${progressText(j)}`));
   } catch (e) {
-    statusEl.textContent = `Download: ${e.message}`;
+    say(`Download: ${e.message}`);
     return null;
   }
   const r = job.result || {};
   const done = (r.releases || []).filter((x) => x.ok).length;
   const failed = (r.releases || []).length - done;
-  statusEl.textContent =
+  say(
     job.status === "error"
       ? `Download failed: ${job.error || "error"}`
       : `Download: ${done} of ${(r.releases || []).length} releases downloaded${failed ? `, ${failed} failed` : ""}` +
         (r.stopped ? ` (stopped: ${r.stopped})` : "") +
         ` → ${plan.destination}.` +
-        (notes ? ` ${notes}` : "");
+        (notes ? ` ${notes}` : "")
+  );
   return job;
 }

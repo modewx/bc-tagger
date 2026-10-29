@@ -13,6 +13,7 @@ import { buildPreviews, followPreviews, followRunning } from "./previewBuild";
 import { ALL, chosenCollection, keepCollection, createCollectionsBar, listCollections, serverDeletes, confirmDeletes } from "./collections";
 import { confirmDialog } from "./dialog";
 import { downloadFlow, fullReleasesToggle } from "./downloads";
+import { refreshOwnership, ownershipFirst, lastCheck, staleNote, challengeText, nothingText } from "./ownershipCheck";
 import { startDevReload } from "./devReload";
 import { createStatusFilter, createSourceFilter, sourceOf, playableItem } from "./statusFilter";
 import { runExport } from "./exportFlow";
@@ -80,15 +81,33 @@ function jobButton(id, label, title, start) {
   };
 }
 
-// Ownership comes from the extension (live Bandcamp session) when it's
-// connected, otherwise from the server's cookie-file fallback job.
-async function refreshOwnership(onProgress) {
-  if (bridge.connected) {
-    onProgress({ status: "running", progress: { message: "fetching your Bandcamp collection via the extension" } });
-    const result = await bridge.call("refreshOwnership", {}, 120000);
-    return { status: "done", result };
+// Download owned missing: ownership refreshed first (items bought since the last check count), then the selected
+// (or shown) items owned and not on the drive; when there are none, why, with counts.
+async function downloadOwnedMissing(statusEl) {
+  const targets = targetIds(); // what was selected or shown when clicked
+  if (!targets.length) {
+    statusEl.textContent = nothingText([]); // nothing to check ownership for
+    return;
   }
-  return jobs.run("/api/ownership/refresh", {}, onProgress);
+  const check = await ownershipFirst({ bridge, jobs }, statusEl, () => page.reload());
+  const items = page.getItems();
+  const shown = targets.filter((k) => k in items);
+  const checkedAt = lastCheck(shown.map((k) => items[k].owned));
+  if (check.stop) {
+    statusEl.textContent = challengeText(check.stop, checkedAt);
+    return;
+  }
+  const note = check.failed ? staleNote(check.failed, checkedAt) : "";
+  const keys = shown.filter((k) => downloadable(items[k]));
+  if (!keys.length) {
+    const rows = shown.map((k) => ({ owned: items[k].owned, located: isLocated(items[k]), other: sourceOf(items[k]) === "other" }));
+    statusEl.textContent = [nothingText(rows), note].filter(Boolean).join(" ");
+    return;
+  }
+  if (await downloadFlow(keys, "collection", { jobs, statusEl, fullRelease: fullReleases.checked(), note })) {
+    await page.reload();
+    keys.forEach((k) => page.refreshRow(k));
+  }
 }
 
 // The rows the bulk buttons act on: the selected ones (checkbox column) when
@@ -448,18 +467,17 @@ async function refreshHealth() {
         id: "downloadOwnedMissing",
         label: "Download owned missing",
         title:
-          "Download the selected (or shown) items you own on Bandcamp that aren't on your drive. " +
+          "Download the selected (or shown) items you own on Bandcamp that aren't on your drive " +
+          "(checks what you own on Bandcamp first). " +
           "With Download Full Releases ticked: each track's whole album or EP.",
         className: "job-btn",
         run: async (statusEl, button) => {
           button.disabled = true;
-          const items = page.getItems();
-          const keys = targetIds().filter((k) => downloadable(items[k]));
-          if (await downloadFlow(keys, "collection", { jobs, statusEl, fullRelease: fullReleases.checked() })) {
-            await page.reload();
-            keys.forEach((k) => page.refreshRow(k));
+          try {
+            await downloadOwnedMissing(statusEl);
+          } finally {
+            button.disabled = false;
           }
-          button.disabled = false;
         },
       },
       selectLastImportButton(async (ids, last) => {
@@ -499,7 +517,10 @@ async function refreshHealth() {
           await page.reload();
         },
       },
-      { ...jobButton("refreshOwnership", "Refresh ownership", "Check which items you own on Bandcamp", refreshOwnership), group: "tools" },
+      {
+        ...jobButton("refreshOwnership", "Refresh ownership", "Check which items you own on Bandcamp", (onProgress) => refreshOwnership({ bridge, jobs }, onProgress)),
+        group: "tools",
+      },
       {
         id: "buildPreviews",
         label: "Build previews",

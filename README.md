@@ -30,8 +30,9 @@ sync.
   off by default), and **Modified** (when an item's tags last changed) next to **Added**.
   - The toolbar, in groups:
     - What to do with the selected rows (or the rows shown when none are selected): **Locate**, **Export selected to
-      RB** (always a dry run, then confirm), **Download owned missing** (with **Download Full Releases** ticked: each
-      track's whole album or EP), **Select last import** (exactly the last committed import's items), **Clear
+      RB** (always a dry run, then confirm), **Download owned missing** (refreshes ownership first, so items bought
+      since the last check count; with **Download Full Releases** ticked: each track's whole album or EP), **Select
+      last import** (exactly the last committed import's items), **Clear
       selection**;
     - **Rescan drive**;
     - **Tools ▾**: maintenance (Refresh player files, Refresh thumbnails, Fix artists, Fix album IDs, Refresh
@@ -80,7 +81,7 @@ sync.
   - **Nothing runs unasked:** the app reads the music drive or Bandcamp only when you click (Play, Locate, Tools,
     Refresh ownership) or rest on a player: passing over players loads nothing, resting on one for a moment loads
     its length (so a click on its timeline plays from there). Rows without stored art show a placeholder (Tools →
-    Refresh thumbnails fetches art), and the extension checks ownership only on Refresh ownership.
+    Refresh thumbnails fetches art), and ownership is checked only on Refresh ownership or Download owned missing.
   - **One connection per tab:** Chrome allows 6 connections to the server across all tabs, and each open page's live
     updates hold one. A page uses a single stream, closes it while its tab is hidden, and catches up when shown.
     The collection loads without waiting for the extension, and says "Loading collection…" until its rows are in.

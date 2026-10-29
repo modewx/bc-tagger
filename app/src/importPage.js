@@ -18,6 +18,7 @@ import { createTags, mapTagsUrl, getBatch, updateRow, commitBatch, discardBatch,
 import { statsLine } from "./importTab";
 import { rememberImport } from "./openImport";
 import { downloadFileTitle, downloadFlow, fullReleaseOf, fullReleasesToggle, stateLabel, trackDownloads, troubled } from "./downloads";
+import { ownershipFirst, lastCheck, staleNote, challengeText, nothingText } from "./ownershipCheck";
 import { playableItem, sourceOf } from "./statusFilter";
 import { logNote } from "./importLogs";
 import { tickTargets } from "./rowTicks";
@@ -638,11 +639,34 @@ const dlState = trackDownloads(events, (d) => {
   if (!String(d.ref).startsWith(`${batchId}:`)) return;
   page.refreshRow(`r${String(d.ref).split(":").pop()}`);
 });
-const downloadRows = async (rows, fullRelease = false) => {
-  if (!(await downloadFlow(rows.map(refOf), "import", { jobs, statusEl: page.statusEl, fullRelease }))) return;
+const downloadRows = async (rows, fullRelease = false, note = "") => {
+  if (!(await downloadFlow(rows.map(refOf), "import", { jobs, statusEl: page.statusEl, fullRelease, note }))) return;
   await page.reload(); // what the server located, even if a live update was missed
   rows.forEach((r) => page.refreshRow(`r${r.n}`));
   renderInfo();
+};
+// Download owned missing: ownership refreshed first (items bought since the last check count), then the selected
+// rows owned and not on the drive; when there are none, why, with counts.
+const downloadOwnedMissing = async (statusEl) => {
+  if (!batch.rows.some((r) => r.checked)) {
+    statusEl.textContent = nothingText([]); // nothing to check ownership for
+    return;
+  }
+  const check = await ownershipFirst({ bridge, jobs }, statusEl, () => page.reload());
+  const rows = batch.rows.filter((r) => r.checked);
+  const checkedAt = lastCheck(rows.map((r) => r.owned));
+  if (check.stop) {
+    statusEl.textContent = challengeText(check.stop, checkedAt);
+    return;
+  }
+  const note = check.failed ? staleNote(check.failed, checkedAt) : "";
+  const ok = rows.filter(downloadableRow);
+  if (!ok.length) {
+    const facts = rows.map((r) => ({ owned: r.owned, located: !!(r.local && r.local.status === "located"), unmatched: r.source !== "bandcamp" || !r.item }));
+    statusEl.textContent = [nothingText(facts), note].filter(Boolean).join(" ");
+    return;
+  }
+  await downloadRows(ok, fullReleases.checked(), note);
 };
 
 // --- Located: where the row's file is; locate again, pick, or set it by hand -----------
@@ -1216,12 +1240,15 @@ async function discard(statusEl) {
         id: "downloadOwnedMissing",
         label: "Download owned missing",
         title:
-          "Download the selected rows you own on Bandcamp that aren't on your drive. " +
+          "Download the selected rows you own on Bandcamp that aren't on your drive (checks what you own on Bandcamp first). " +
           "With Download Full Releases ticked: each track's whole album or EP.",
         run: async (statusEl, button) => {
           button.disabled = true;
-          await downloadRows(batch.rows.filter((r) => r.checked && downloadableRow(r)), fullReleases.checked());
-          button.disabled = false;
+          try {
+            await downloadOwnedMissing(statusEl);
+          } finally {
+            button.disabled = false;
+          }
           await page.reload();
           renderInfo();
         },

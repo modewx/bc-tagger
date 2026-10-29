@@ -265,6 +265,26 @@ npm run build:app && npm run build:dev   # the local app (served by the server a
 npm run test:e2e                         # Playwright e2e: own profile, server :8767, app in .e2e/app-dist
 ```
 
+### 2026-10-29
+
+- **Download owned missing refreshes ownership first** (user: five items bought today weren't downloaded, as the last
+  Refresh ownership was from two days before). Both pages' button (collection and import preview):
+  - first runs Refresh ownership (the extension when connected, else the server's cookie-file job), with "Download:
+    checking ownership on Bandcamp…" in the status. It then reads the rows again, so the Owned column shows the new
+    state, and filters. A refresh already running is joined; one that finished in the last minute is reused (per tab,
+    across both pages), so repeated clicks don't each go to Bandcamp. Tools → Refresh ownership always checks again.
+  - A refresh that fails (not logged in, no extension and the cookie file failing) doesn't block the download: it
+    goes on with the stored ownership, and the status ends "Couldn't refresh ownership (<reason>); using the check
+    from <date, time>".
+  - The bot check stops it: nothing is downloaded, the status says so with the stored check's time and the way on
+    (Tools → Refresh ownership, then Download). It isn't asked again for a minute.
+  - Nothing to download now says why, with counts: "3 not owned (ownership checked <date, time>), 2 already on your
+    drive" (also: ownership unknown, not matched to a Bandcamp item, not from Bandcamp).
+  - Per-row Download File is unchanged (owned rows only).
+  - e2e: the download tests' recorded collection summary includes their owned items; new tests for an item bought
+    since the last check (refreshed, downloaded, shown owned; a second click within a minute makes no request), a
+    failed refresh (stored check named, the download goes on) and the bot check (stopped; not asked again).
+
 ### 2026-10-28
 
 - **"Now playing" tagger on album pages** (user: an annotator right below the player for whatever track is played).

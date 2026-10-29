@@ -3150,6 +3150,21 @@ const FULLDL = {
   boxed: { id: "t1042405552", q: "Lords Of Gwaranjar", album: { id: "a3440228500", artist: "Smogo", title: "Sharp Knowledge EP", tracks: ["Lords Of Gwaranjar", "Two"] } },
 };
 
+// Bandcamp's collection summary as Refresh ownership reads it (the one Download owned missing runs first): the
+// recorded one, with these items owned too. Its requests are counted; stop() removes it.
+const SUMMARY_URL = "https://bandcamp.com/api/fan/2/collection_summary";
+async function summaryOwning(ids) {
+  const data = JSON.parse(fs.readFileSync(path.join(FIXTURES, "collection_summary.json"), "utf8"));
+  ids.forEach((id) => (data.collection_summary.tralbum_lookup[id] = { item_type: id[0], item_id: Number(id.slice(1)), purchased: true }));
+  const requests = [];
+  const handler = (route) => {
+    requests.push(route.request().url());
+    return route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(data) });
+  };
+  await context.route(SUMMARY_URL, handler);
+  return { requests, stop: () => context.unroute(SUMMARY_URL, handler) };
+}
+
 async function downloadSetup({ releases = [], owned = [] } = {}) {
   fs.rmSync(OWNED, { recursive: true, force: true });
   fs.mkdirSync(OWNED, { recursive: true });
@@ -3170,8 +3185,11 @@ async function downloadSetup({ releases = [], owned = [] } = {}) {
   const before = await api("/api/settings").then((d) => d.settings || d);
   const saved = await put({ owned_root: OWNED, cookies_file: cookies, downloads_dir: "", download_format: "aiff-lossless" });
   assert.ok(!saved.detail, `settings: ${JSON.stringify(saved.detail)}`);
-  await post("/api/ownership", { owned_ids: [...Object.values(DL).map((r) => r.id), ...owned], source: "e2e", full: false });
+  const ownedIds = [...Object.values(DL).map((r) => r.id), ...owned];
+  await post("/api/ownership", { owned_ids: ownedIds, source: "e2e", full: false });
+  const summary = await summaryOwning(ownedIds); // what Bandcamp says when Download owned missing checks first
   return async () => {
+    await summary.stop();
     await put({ owned_root: before.owned_root, cookies_file: before.cookies_file, downloads_dir: before.downloads_dir || "" });
     fs.rmSync(OWNED, { recursive: true, force: true });
   };
@@ -3419,6 +3437,108 @@ test("Download File only for owned items; Download Full Release for a track whos
   } finally {
     await app.evaluate(() => localStorage.removeItem("bc_download_full_releases")).catch(() => {});
     if (batchId) await api(`/api/import/${batchId}`, { method: "DELETE" });
+    await restore();
+    await app.close();
+  }
+});
+
+// Download owned missing checks ownership on Bandcamp first (Refresh ownership, here the recorded summary), so
+// items bought since the last check are downloaded too; within a minute it reuses that check.
+const BOUGHT = { id: "a4225305807", artist: "Elektorni", title: "Daniel Savio - Noel Skum" }; // bought after the last check
+const STORED = { id: "a4259874658", artist: "Stanze Fredde Records", title: "Stanze Fredde Vol. 2" }; // owned in the stored check
+const statusLine = (page) => page.textContent("#refreshStatus");
+async function onlyRow(app, { id, title }) {
+  if (await app.isVisible("#clearSelection")) await app.click("#clearSelection"); // the buttons act on the row shown
+  await app.fill("#searchInput", title);
+  await app.waitForFunction((id) => document.querySelectorAll("#collectionTable tbody tr").length === 1 && document.querySelector(`tr[data-key="${id}"]`), id);
+}
+const downloadPosts = (page) => {
+  const bodies = [];
+  page.on("request", (r) => r.method() === "POST" && r.url().endsWith("/api/download") && bodies.push(r.postDataJSON()));
+  return bodies;
+};
+
+test("Download owned missing checks ownership first: an item bought since the last check is downloaded and shows owned; a second click within a minute doesn't ask Bandcamp again", async () => {
+  const restore = await downloadSetup({ releases: [BOUGHT] });
+  const dlIds = Object.values(DL).map((r) => r.id);
+  await post("/api/ownership", { owned_ids: dlIds, source: "e2e", full: true }); // the last check: before it was bought
+  const summary = await summaryOwning([...dlIds, BOUGHT.id]); // Bandcamp now: bought
+  const app = await context.newPage();
+  const bodies = downloadPosts(app);
+  try {
+    await app.goto(SERVER + "/");
+    await app.waitForFunction(() => document.querySelectorAll("#collectionTable tbody tr").length > 0);
+    await onlyRow(app, BOUGHT);
+    const ownedCell = () => app.textContent(`tr[data-key="${BOUGHT.id}"] .col-owned`);
+    assert.equal((await ownedCell()).trim(), "—", "not owned in the stored check");
+    await app.evaluate(() => {
+      const seen = (window.__status = []);
+      const el = document.getElementById("refreshStatus");
+      new MutationObserver(() => seen.push(el.textContent)).observe(el, { childList: true, characterData: true, subtree: true });
+    });
+    await app.click("#downloadOwnedMissing");
+    await app.waitForFunction(() => /^Download: 1 of 1 releases downloaded/.test(document.getElementById("refreshStatus").textContent), null, { timeout: 60000 });
+    assert.ok((await app.evaluate(() => window.__status)).includes("Download: checking ownership on Bandcamp…"));
+    assert.equal(summary.requests.length, 1, "Bandcamp asked once");
+    assert.deepEqual(bodies[0].ids, [BOUGHT.id], "the bought item, now owned");
+    await app.waitForFunction((id) => /owned/.test(document.querySelector(`tr[data-key="${id}"] .col-owned`).textContent), BOUGHT.id);
+    // Again within the minute: that check is reused. It's on the drive now, and the status says so.
+    await waitFor(() => api(`/api/items/${BOUGHT.id}`).then((it) => it.local && it.local.status === "located"), { what: "the download located", timeout: 30000 });
+    await app.click("#downloadOwnedMissing");
+    await app.waitForFunction(() => /^Download: nothing to download: /.test(document.getElementById("refreshStatus").textContent));
+    assert.equal(await statusLine(app), "Download: nothing to download: 1 already on your drive.");
+    assert.equal(summary.requests.length, 1, "no second request to Bandcamp");
+    assert.equal(bodies.filter((b) => b.dry_run).length, 1, "nothing more asked of the server");
+  } finally {
+    await summary.stop();
+    await restore();
+    await app.close();
+  }
+});
+
+test("Download owned missing: a refresh that fails goes on with the stored ownership and says from when; the bot check stops it, and isn't asked again within a minute", async () => {
+  const restore = await downloadSetup({ releases: [STORED], owned: [STORED.id] });
+  const notLoggedIn = (route) => route.fulfill({ status: 200, contentType: "application/json", body: "{}" });
+  let challenges = 0;
+  const challenge = (route) => {
+    challenges += 1;
+    return route.fulfill({ status: 200, contentType: "text/html", body: CHALLENGE_HTML });
+  };
+  const app = await context.newPage();
+  const bodies = downloadPosts(app);
+  try {
+    await context.route(SUMMARY_URL, notLoggedIn);
+    await app.goto(SERVER + "/");
+    await app.waitForFunction(() => document.querySelectorAll("#collectionTable tbody tr").length > 0);
+    await onlyRow(app, STORED);
+    const when = await app.evaluate((iso) => new Date(iso).toLocaleString(), (await api(`/api/items/${STORED.id}`)).owned.checked_at);
+    await app.click("#downloadOwnedMissing");
+    await app.waitForFunction(() => /^Download: 1 of 1 releases downloaded/.test(document.getElementById("refreshStatus").textContent), null, { timeout: 60000 });
+    const status = await statusLine(app);
+    assert.ok(status.endsWith(` Couldn't refresh ownership (not logged in to Bandcamp in this browser); using the check from ${when}.`), status);
+    assert.deepEqual(bodies[0].ids, [STORED.id]);
+    await context.unroute(SUMMARY_URL, notLoggedIn);
+
+    // The bot check: stop and say so; nothing goes to the downloader, and a second click doesn't ask Bandcamp again.
+    await context.route(SUMMARY_URL, challenge);
+    const posted = bodies.length;
+    for (let i = 0; i < 2; i++) {
+      await app.click("#downloadOwnedMissing");
+      await app.waitForFunction(() => /^Download: stopped/.test(document.getElementById("refreshStatus").textContent) && !document.getElementById("downloadOwnedMissing").disabled);
+      assert.match(await statusLine(app), /^Download: stopped, nothing downloaded\. Bandcamp is showing its bot check .*Tools → Refresh ownership/);
+      await app.evaluate(() => (document.getElementById("refreshStatus").textContent = ""));
+    }
+    assert.equal(challenges, 1, "asked once");
+    assert.equal(bodies.length, posted, "no download asked for");
+    // Tools → Refresh ownership always asks again; once Bandcamp answers, the bot check is cleared.
+    await context.unroute(SUMMARY_URL, challenge);
+    await tool(app, "refreshOwnership");
+    await app.waitForFunction(() => /owned: \d+/.test(document.getElementById("refreshStatus").textContent), null, { timeout: 30000 });
+    const after = await probe.evaluate(() => chrome.storage.session.get("bcSyncStatus").then((s) => s.bcSyncStatus));
+    assert.ok(!after.ownership.challenge);
+  } finally {
+    await context.unroute(SUMMARY_URL, notLoggedIn).catch(() => {});
+    await context.unroute(SUMMARY_URL, challenge).catch(() => {});
     await restore();
     await app.close();
   }
