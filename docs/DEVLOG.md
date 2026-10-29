@@ -291,6 +291,11 @@ Tests never touch Bandcamp, the music drive or a real rekordbox library: Bandcam
     changed its match. Index build is 1–4% slower and a full locate 2–3% slower.
   - Tried and left out: treating any trailing "(…)" as a possible match. On the real collection it only
     suggested other versions or noise.
+- **Playlist mappings per rekordbox library (user: "mappings should be per collection so when I select `Test
+  Library` vs `Main Library` both may have different target folders saved"):**
+  - `playlist_mappings` holds a folder, a mode, a map and the saved per-folder mappings for each of Test and Main.
+  - An export uses the mapping of the library it goes to. Existing settings start both libraries from the
+    current mapping. The old single keys keep working as the mapping of the library in use.
 
 ## App and extension (`app/`, `extension/`, `shared/`, branch `claude/local-collection-ui-e8f6f6`)
 

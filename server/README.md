@@ -344,6 +344,26 @@ playlists; a tag with no playlists isn't exported.
 | `Genres/Acid` | `/<playlist_folder>/Genres/Acid` |
 | `/DJ/Status/Must` | that path from the library root |
 
+Each rekordbox library has its own mapping in `playlist_mappings` (the source of truth):
+
+```
+playlist_mappings: {
+  "test": {"folder": str, "mode": "auto"|"custom", "map": {tag: [playlist, ...]},
+           "saved": {<folder>: {"mode": ..., "map": {...}}}},
+  "main": { ...same... }
+}
+```
+
+An export (dry run, the confirm, `tag_playlists`, a name lookup with `?target=`, the item views' playlist
+marks) uses the entry of the library it goes to or reads. `saved` keeps a mapping per Target folder for the UI
+(the server only validates and stores it). Validation: libraries `test`/`main` only, folder names trimmed and not
+empty, mode `auto`/`custom`, maps cleaned as `tag_playlist_map`; anything else is a 400 naming the spot. A PUT of
+`playlist_mappings` replaces only the libraries it names. The flat `playlist_folder` / `tag_playlist_mode` /
+`tag_playlist_map` stay as aliases of the library in use (`rekordbox_target`): read, they show its entry; written
+without `playlist_mappings`, they edit it (after any target switch in the same PUT). Settings from before are
+migrated: both libraries start from the flat keys, with nothing saved. `derived.mapping_warnings` has a warning
+per library (`mapping_warning`: the one in use).
+
 Missing playlists and folders are created. A name that resolves to a smart playlist, a folder,
 or two entries with the same name is an error, and nothing is written. A track gets the union of
 the playlists of all its tags. `./bct rb-playlists` (or `GET /api/rekordbox/playlists`) lists the

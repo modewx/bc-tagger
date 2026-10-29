@@ -481,3 +481,22 @@ def test_main_reexports_never_duplicate_the_song(svc, library, main_db):
     after = read_back(svc.target(), FOLDER, keys)["mapped"]
     assert after["/DJ/Status/Must"] == [library["user"], library["alpha"][0], theirs, a]
     assert after[f"/{FOLDER}/Keepers"] == [a, mine]
+
+
+def test_each_library_exports_with_its_own_mapping(svc, main_db, test_db):
+    """playlist_mappings: main keeps the fixture's folder and map; test gets its own. Each export, dry run and
+    name lookup uses the entry of the library it goes to."""
+    svc.settings.update({"rekordbox_db_path": str(test_db), "playlist_mappings": {
+        "test": {"folder": "bct-test", "mode": "custom", "map": {"pool": ["Test Pool"]}}}})
+    main_dry = svc.export(ids=["a100", "t200"], dry_run=True)  # the library in use: main
+    assert main_dry["target"] == "main" and main_dry["playlists_created"] == [f"/{FOLDER}/Keepers", f"/{FOLDER}/Genres/Pool"]
+    assert svc.resolve_playlist_names(["Keepers"], "test")[0]["path"] == "/bct-test/Keepers"
+    assert svc.resolve_playlist_names(["Keepers"], "main")[0]["path"] == f"/{FOLDER}/Keepers"
+    svc.settings.update({"rekordbox_target": "test"})
+    assert svc.settings.get("playlist_folder") == "bct-test"  # the flat keys follow the library in use
+    test_dry = svc.export(ids=["a100", "t200"], dry_run=True)
+    assert test_dry["target"] == "test" and test_dry["folders_created"] == ["/bct-test"]
+    assert test_dry["playlists_created"] == ["/bct-test/Test Pool"]
+    assert {t["tag"]: t["playlists"] for t in test_dry["tag_playlists"]}["must"] == []  # not in test's map
+    main = svc.playlist_mapping("main")
+    assert main["folder"] == FOLDER and main["map"]["must"] == ["/DJ/Status/Must", "Keepers"]
