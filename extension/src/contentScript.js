@@ -493,7 +493,7 @@ const loadWidgetParts = () =>
   widgetParts ||
   (widgetParts = new Promise((resolve) => $.get(chrome.runtime.getURL('/taggerTemplate.html'), (data) => pullTags(() => resolve(data)))));
 
-// `opts.now`: the now-playing box (below an album's player); `opts.label`: a label before it; `opts.place(container)`:
+// `opts.now`: the now-playing box (below an album's player); `opts.label`: a small label below it; `opts.place(container)`:
 // where it goes.
 function createTagButton(element, itemUrl, trackdata, opts = {}) {
   const uniqueId = itemUrl;//hashCode(itemUrl);
@@ -611,7 +611,7 @@ function createTagButton(element, itemUrl, trackdata, opts = {}) {
     const label = document.createElement("span");
     label.className = "bct-now-label";
     label.textContent = opts.label;
-    container.prepend(label);
+    container.append(label); // under the star and tags (tagger.css), wherever the tags land
   }
 
   // element.appendChild(container);

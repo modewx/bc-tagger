@@ -1339,11 +1339,14 @@ test("album page: a now-playing tag box below the player follows the track it ha
     });
     const now = () => page.evaluate(() => {
       const box = document.querySelector(".tagger-container.bct-now");
-      return { label: box.querySelector(".bct-now-label").textContent, id: box.querySelector(".tag-button").dataset.nowId, after: box.previousElementSibling.classList.contains("inline_player"), before: box.nextElementSibling.classList.contains("tralbumCommands") };
+      const label = box.querySelector(".bct-now-label");
+      // The label is on its own line under the star and tags (a long title mustn't push them right).
+      const bottom = Math.max(...[".tag-button", ".chosen-container"].map((s) => box.querySelector(s).getBoundingClientRect().bottom));
+      return { label: label.textContent, id: box.querySelector(".tag-button").dataset.nowId, after: box.previousElementSibling.classList.contains("inline_player"), before: box.nextElementSibling.classList.contains("tralbumCommands"), below: label.getBoundingClientRect().top >= bottom - 1 };
     });
     const press = (sel) => page.locator(sel).dispatchEvent("click"); // (the recorded page's controls have no size)
     const nowIs = (label) => page.waitForFunction((l) => (document.querySelector(".tagger-container.bct-now .bct-now-label") || {}).textContent === l, label, { timeout: 5000 });
-    assert.deepEqual(await now(), { label: "Now playing: 8. E2E stand-in track", id: "t3738475200", after: true, before: true });
+    assert.deepEqual(await now(), { label: "Now playing: 8. E2E stand-in track", id: "t3738475200", after: true, before: true, below: true });
     await press(".nextbutton");
     await nowIs("Now playing: 9. Holo Law");
     await press(".prevbutton");
