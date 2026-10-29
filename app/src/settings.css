@@ -131,6 +131,17 @@ section[hidden] { display: none; }
 
 /* Tag → playlists mapping */
 .mapping-auto { display: flex; gap: 8px; align-items: center; cursor: pointer; }
+.mapping-auto-row { display: flex; flex-wrap: wrap; gap: 6px 12px; align-items: center; }
+.mapping-save-note { font-size: 12px; color: #666; }
+.folder-chooser { display: flex; gap: 4px; align-items: center; position: relative; }
+.folder-chooser input { flex: 1; min-width: 0; }
+.folder-chooser .folder-arrow { align-self: stretch; padding: 0 10px; font-size: 11px; }
+.folder-menu { position: absolute; top: 100%; left: 0; right: 0; z-index: 20; margin-top: 2px; background: #fff; border: 1px solid #bbb;
+  border-radius: 4px; box-shadow: 0 4px 12px rgba(0, 0, 0, 0.12); max-height: 240px; overflow-y: auto; }
+.folder-menu button { display: block; width: 100%; text-align: left; padding: 5px 9px; border: 0; border-bottom: 1px solid #f0f0f0;
+  background: none; color: inherit; font: inherit; cursor: pointer; }
+.folder-menu button:hover, .folder-menu button:focus { background: #eef3ff; outline: none; }
+.folder-menu .folder-menu-empty { padding: 6px 9px; color: #777; font-size: 12px; }
 .mapping-panel { margin-top: 10px; border: 1px solid #e3e3e3; border-radius: 6px; padding: 8px 12px 12px; background: #fcfcfc; }
 .mapping-panel[hidden] { display: none; }
 .mapping-panel code { font-size: 12px; background: #f1f1f1; padding: 0 4px; border-radius: 3px; }

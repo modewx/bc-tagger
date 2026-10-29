@@ -308,6 +308,33 @@ npm run test:e2e                         # Playwright e2e: own profile, server :
 
 ### 2026-10-29
 
+- **A tag → playlist mapping per Target folder, per rekordbox library** (user: "each mapping should be able to be
+  saved … a button Save Mapping should appear (next to the Auto: checkbox) … allow the Target Folder input to
+  autocomplete with previously saved ones, or click an arrow and serve as a dropdown"; and, to A: "mappings should be
+  per collection so when I select `Test Library` vs `Main Library` both may have different target folders saved").
+  It's built on A's `playlist_mappings` (`{test|main: {folder, mode, map, saved: {folder: {mode, map}}}}`, `55ec5d7`).
+  `app/src/savedMappings.js` does the folder list and Save mapping.
+  - **Per library:** the Target folder and the mapping shown are the entry of the library picked in the Target radios,
+    before it's saved. Each library keeps its edits while the other is shown, and Save settings sends both. The page no
+    longer writes the flat `playlist_folder` / `tag_playlist_*` keys, which the server mirrors from the library in use.
+  - **Save mapping** (next to Auto, while it's unticked) stores the editor's mapping under the Target folder shown,
+    at once, in that library's `saved`. It sends the library's stored folder, mode and map unchanged. The page's other
+    unsaved settings wait for Save settings: they may include the switch to the Main library.
+  - **Save settings** also keeps each changed library's own folder entry up to date (when the mapping is custom, or
+    the folder has one already). A later pick of the folder then brings back what was saved last, not an older Save
+    mapping.
+  - **The Target folder** has `autocomplete="off"` (no more Chrome form history) and a datalist of the shown
+    library's saved folders, plus a ▼ that lists them in a menu.
+  - **Picking a saved folder** (the menu, a suggestion, or typing it and leaving the field) loads its mapping. Custom
+    mappings give unnamed tags their own name, as on load. When the editor has changes not saved since it was loaded
+    or saved, one question asks first ("Load the mapping saved for “B”?"); Cancel keeps the editor's mapping for the
+    new name. A new name keeps the editor as it is.
+  - e2e:
+    - Test: Save mapping under A, then under B; ▼ lists both; picking A brings A's back. Unsaved changes ask first.
+      Save settings makes B active, and after a reload typing A loads A's.
+    - Main (the radio): its own folder, nothing saved; Save mapping keeps one for it without touching Test's. Back
+      to Test, its folder and mapping are as left.
+    - The marks test now gives both libraries the same mapping.
 - **The sort is kept** (user: "save the last order in which a collection is displayed both for main collection page and
   imported collection sessions. Save it like the selection ticks").
   - Collection page: the sort (column and direction) in localStorage `bc_app_sort`, per shown collection (its id, or

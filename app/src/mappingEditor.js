@@ -12,6 +12,9 @@
 // Missing playlists/folders are created by the export (shown in yellow); a
 // folder or a smart playlist can't take songs (red). Tags with no names
 // aren't exported.
+//
+// `onSave` (optional): a "Save mapping" button next to Auto, shown while Auto
+// is unticked (Settings keeps a mapping per target folder with it).
 
 const norm = (p) => String(p || "").replace(/^\/+|\/+$/g, "");
 
@@ -22,7 +25,7 @@ function el(tag, cls, text) {
   return e;
 }
 
-export function createMappingEditor({ onChange }) {
+export function createMappingEditor({ onChange, onSave }) {
   let mode = "auto";
   let map = {};
   let vocab = [];
@@ -38,6 +41,17 @@ export function createMappingEditor({ onChange }) {
   autoBox.type = "checkbox";
   autoBox.id = "mappingAuto";
   autoLabel.append(autoBox, " Auto: one playlist per tag, named like the tag (inside the target folder)");
+  const autoRow = el("div", "mapping-auto-row");
+  autoRow.appendChild(autoLabel);
+  const saveBtn = el("button", "secondary", "Save mapping");
+  saveBtn.type = "button";
+  saveBtn.id = "saveMapping";
+  const saveNote = el("span", "mapping-save-note");
+  saveNote.id = "saveMappingNote";
+  if (onSave) {
+    saveBtn.addEventListener("click", () => onSave());
+    autoRow.append(saveBtn, saveNote);
+  }
 
   const panel = el("div", "mapping-panel");
   const help = el("p", "help");
@@ -60,7 +74,7 @@ export function createMappingEditor({ onChange }) {
   panel.append(help, head, warning, source, datalist, rows);
   const focusNote = el("div", "mapping-focus-note");
   focusNote.hidden = true;
-  root.append(autoLabel, focusNote, panel);
+  root.append(autoRow, focusNote, panel);
 
   // --- name resolution ----------------------------------------------------------
 
@@ -208,6 +222,7 @@ export function createMappingEditor({ onChange }) {
     warning.hidden = mode !== "custom" || mapped > 0;
     panel.hidden = mode !== "custom";
     autoBox.checked = mode !== "custom";
+    saveBtn.hidden = saveNote.hidden = mode !== "custom";
     focusNote.hidden = !focus.length;
     focusNote.textContent = !focus.length
       ? ""
@@ -250,6 +265,19 @@ export function createMappingEditor({ onChange }) {
       refreshMeta();
     },
     getMap: () => JSON.parse(JSON.stringify(map)),
+    // A saved mapping ({mode, map}) in the editor; in custom mode, tags it doesn't name start with their own name.
+    load(saved) {
+      mode = saved && saved.mode === "custom" ? "custom" : "auto";
+      map = saved && saved.map && typeof saved.map === "object" ? JSON.parse(JSON.stringify(saved.map)) : {};
+      if (mode === "custom") prefill();
+      render();
+    },
+    // What the editor holds, comparable (the map's tags in order).
+    stateKey: () => JSON.stringify([mode, Object.keys(map).sort().map((t) => [t, map[t]])]),
+    saveButton: saveBtn,
+    setSaveNote(text) {
+      saveNote.textContent = text || "";
+    },
     setMap(v) {
       map = v && typeof v === "object" ? JSON.parse(JSON.stringify(v)) : {};
       render();

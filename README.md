@@ -126,7 +126,9 @@ sync.
 - **Settings → General:** music folders, matching, downloads (folder and format), Bandcamp request pacing, the
   lookup source (Bandcamp / MusicBrainz / both), the import log folder (not inside a music folder or on the music
   drive); **Rekordbox:** the Target library (Test / Main), whether bc-tagger may write to the main one, and the tag →
-  playlist mapping; **Previews:** their space (GB; saving a lower value drops the least recently played at once;
+  playlist mapping. Each library has its own Target folder and mapping (the section follows the Library radios), and
+  keeps mappings per Target folder (**Save mapping** next to Auto; the folder's ▼ lists the saved ones, and picking
+  one brings its mapping back); **Previews:** their space (GB; saving a lower value drops the least recently played at once;
   0 turns them off), bitrate and parallel encoders, what they take (and the Mac's free space, with the 2 GB the
   server keeps free), and **Clear previews** (asks first).
 - **Main library:** picking Main is safe on its own: exports to it stop at the dry run, which says writes are

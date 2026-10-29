@@ -8,6 +8,7 @@ import { buildNav } from "./nav";
 import { startDevReload } from "./devReload";
 import { confirmDialog } from "./dialog";
 import { createMappingEditor } from "./mappingEditor";
+import { attachSavedMappings } from "./savedMappings";
 import { createTestTab } from "./testTab";
 import { createImportTab } from "./importTab";
 import { createPreviewUsage } from "./previewUsage";
@@ -119,6 +120,7 @@ const FIELDS = {
   },
   tag_playlist_mode: { section: "rb_playlists", type: "mapping", label: "Tags → playlists" },
   tag_playlist_map: { section: "rb_playlists", type: "part" }, // edited by the mapping editor
+  playlist_mappings: { section: "rb_playlists", type: "part" }, // per library: the folder and mapping above, and Save mapping
   xml_output_dir: {
     section: "rb_files",
     type: "path",
@@ -513,6 +515,7 @@ function targetEditor() {
       if (!r.checked) return;
       target = value;
       paint();
+      showLibrary(target); // its own Target folder and mapping
       changed();
       loadMappingData(target); // the Playlists marks follow the chosen library
     });
@@ -578,9 +581,10 @@ function mainWarning() {
 }
 
 let mapping = null;
+let savedMaps = null; // the mappings kept per Target folder (a server with playlist_mappings)
 
 function mappingEditor() {
-  mapping = createMappingEditor({ onChange: changed });
+  mapping = createMappingEditor({ onChange: changed, onSave: "playlist_mappings" in loaded ? () => savedMaps && savedMaps.save() : null });
   return {
     node: mapping.node,
     parts: {
@@ -590,6 +594,46 @@ function mappingEditor() {
   };
 }
 
+// Each rekordbox library's own Target folder and mapping (a server with playlist_mappings: {test|main: {folder, mode,
+// map, saved}}). The page shows the library picked in the Target radios, before it's saved, and keeps the other's
+// edits meanwhile; Save settings sends both. (The flat playlist_folder / tag_playlist_* keys mirror the library in
+// use on the server: the page doesn't edit them then.)
+let libMaps = null; // the page's copy
+let shownLib = null;
+const folderField = () => document.getElementById("f_playlist_folder");
+
+function syncShown() {
+  if (!libMaps || !libMaps[shownLib]) return;
+  Object.assign(libMaps[shownLib], { folder: folderField().value.trim(), mode: mapping.getMode(), map: mapping.getMap() });
+}
+
+function loadLibrary(lib) {
+  shownLib = libMaps[lib] ? lib : Object.keys(libMaps)[0];
+  const e = libMaps[shownLib] || { folder: "", mode: "auto", map: {} };
+  folderField().value = e.folder || "";
+  mapping.load({ mode: e.mode, map: e.map });
+  mapping.setTargetFolder(folderField().value);
+  mapping.setSaveNote("");
+  if (savedMaps) savedMaps.reset();
+}
+
+function showLibrary(lib) {
+  if (!libMaps || lib === shownLib) return;
+  syncShown();
+  loadLibrary(lib);
+}
+
+const libraryMappings = {
+  get() {
+    syncShown();
+    return JSON.parse(JSON.stringify(libMaps));
+  },
+  set(v) {
+    libMaps = JSON.parse(JSON.stringify(v || {}));
+    loadLibrary(editors.rekordbox_target ? editors.rekordbox_target.get() : "test");
+  },
+};
+
 // Vocabulary and the target library's playlists for the mapping editor.
 // `target`: the library to read the playlists from (the Target radios, before
 // they're saved); none: the saved one.
@@ -598,9 +642,15 @@ async function loadMappingData(target) {
   if (!mapping) return;
   const load = ++mappingLoads; // a slower earlier load (quick radio switches) mustn't win
   mapping.loading();
+  // New tags start with their own name in a custom mapping: not a change of the user's (for Save mapping's question).
+  const vocabulary = (tags) => {
+    const clean = savedMaps && savedMaps.isClean();
+    mapping.setVocabulary(tags);
+    if (clean) savedMaps.reset();
+  };
   apiJson("/api/tags")
-    .then(mapping.setVocabulary)
-    .catch(() => mapping.setVocabulary([]));
+    .then(vocabulary)
+    .catch(() => vocabulary([]));
   let playlists = null; // null: not available (older server, library unreadable)
   try {
     playlists = await apiJson(`/api/rekordbox/playlists${target ? `?target=${target}` : ""}`);
@@ -664,12 +714,39 @@ function render(main, data) {
   SECTIONS.forEach(([id]) => {
     if (!sections[id].children.length) document.getElementById(`sec_${id}`).remove();
   });
+  if ("playlist_mappings" in data && mapping && editors.playlist_folder) {
+    ["playlist_folder", "tag_playlist_mode", "tag_playlist_map"].forEach((k) => delete editors[k]);
+    editors.playlist_mappings = libraryMappings;
+    document.querySelectorAll("#sec_rb_playlists .field").forEach((f) => (f.dataset.keys = "playlist_mappings"));
+  }
 
   // Plain mapping names resolve inside the target folder.
   const folderInput = document.getElementById("f_playlist_folder");
   if (mapping && folderInput) {
     mapping.setTargetFolder(folderInput.value);
     folderInput.addEventListener("input", () => mapping.setTargetFolder(folderInput.value));
+    if (editors.playlist_mappings) {
+      savedMaps = attachSavedMappings({
+        input: folderInput,
+        mapping,
+        saved: () => (libMaps && libMaps[shownLib] && libMaps[shownLib].saved) || {},
+        // Only the shown library's saved mappings (its folder, mode and map as stored): the page's other unsaved
+        // settings stay unsaved.
+        store: async (maps) => {
+          const lib = shownLib;
+          const body = { playlist_mappings: { [lib]: { ...loaded.playlist_mappings[lib], saved: maps } } };
+          const s = await apiJson("/api/settings", { method: "PUT", body });
+          loaded.playlist_mappings = { ...loaded.playlist_mappings, [lib]: s.playlist_mappings[lib] };
+          libMaps[lib].saved = JSON.parse(JSON.stringify(s.playlist_mappings[lib].saved));
+          changed();
+          return s.playlist_mappings[lib].saved;
+        },
+        onLoaded: () => {
+          mapping.setTargetFolder(folderInput.value);
+          changed();
+        },
+      });
+    }
   }
   const previewsBody = document.querySelector("#sec_previews .section-body");
   if (previewsBody) previewUsage = createPreviewUsage(previewsBody);
@@ -698,7 +775,22 @@ function showTab(id, arg) {
 function fill(data) {
   Object.entries(editors).forEach(([k, ed]) => ed.set(data[k]));
   if (mapping && "playlist_folder" in data) mapping.setTargetFolder(document.getElementById("f_playlist_folder").value);
+  if (savedMaps) savedMaps.reset();
   changed();
+}
+
+// Save settings keeps each changed library's mapping among its saved ones too (when it's custom, or its folder has
+// one already), so a later pick of that folder brings back what was saved, not an older Save mapping.
+function withSavedMaps(body) {
+  if (!body.playlist_mappings) return body;
+  const libs = JSON.parse(JSON.stringify(body.playlist_mappings));
+  Object.entries(libs).forEach(([lib, e]) => {
+    const was = (loaded.playlist_mappings || {})[lib] || {};
+    const same = was.folder === e.folder && was.mode === e.mode && JSON.stringify(was.map) === JSON.stringify(e.map);
+    if (same || !e.folder || (e.mode !== "custom" && !(e.folder in (e.saved || {})))) return;
+    e.saved = { ...(e.saved || {}), [e.folder]: { mode: e.mode, map: e.map } };
+  });
+  return { ...body, playlist_mappings: libs };
 }
 
 async function save() {
@@ -712,7 +804,7 @@ async function save() {
   state.className = "";
   state.textContent = "Saving…";
   try {
-    const saved = await apiJson("/api/settings", { method: "PUT", body });
+    const saved = await apiJson("/api/settings", { method: "PUT", body: withSavedMaps(body) });
     delete saved.presets;
     delete saved.derived; // read-only, computed by the server
     loaded = saved;

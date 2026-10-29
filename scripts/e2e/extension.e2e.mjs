@@ -814,6 +814,113 @@ test("Settings: unticking Auto prefills unmapped tags (saved ones untouched); a 
   }
 });
 
+test("Settings: a mapping per Target folder: Save mapping under one folder, another under the next, and picking the first brings its mapping back; ▼ lists them; Main has its own; through the server", async () => {
+  const before = await settingsNow();
+  const A = "E2E Folder A";
+  const B = "E2E Folder B";
+  const M = "E2E Main Folder";
+  const fresh = (folder) => ({ folder, mode: "auto", map: {}, saved: {} });
+  // Main is the e2e sandbox (its playlists are read when the radio picks it); nothing reads ~/Library/Pioneer.
+  const set = await put({ rekordbox_main_db_path: SANDBOX_MAIN, rekordbox_target: "test", playlist_mappings: { test: fresh(A), main: fresh(M) } });
+  assert.ok(!set.detail, `settings: ${JSON.stringify(set.detail)}`);
+  const page = await context.newPage();
+  const pool = () => page.locator('.map-row[data-tag="pool"] input').first();
+  const poolIs = (v) => page.waitForFunction((v) => document.querySelector('.map-row[data-tag="pool"] input').value === v, v);
+  const noteIs = (re) => page.waitForFunction((src) => new RegExp(src).test(document.getElementById("saveMappingNote").textContent), re.source);
+  const folder = "#f_playlist_folder";
+  const leaveFolder = async (name) => {
+    await page.fill(folder, name);
+    await page.press(folder, "Tab"); // typed and left
+  };
+  try {
+    await page.goto(SERVER + "/settings/#rekordbox");
+    await mappingLoaded(page);
+    // Our own suggestions, not the browser's.
+    assert.equal(await page.getAttribute(folder, "autocomplete"), "off");
+    assert.equal(await page.getAttribute(folder, "list"), "savedPlaylistFolders");
+    assert.equal(await page.isVisible("#saveMapping"), false, "not in Auto");
+    await page.uncheck("#mappingAuto");
+    assert.equal(await page.isVisible("#saveMapping"), true, "next to Auto, once it's unticked");
+
+    // A: pool → "Pool A", Save mapping (only the mapping: the unticked Auto isn't saved as the active mode).
+    await pool().fill("Pool A");
+    await page.click("#saveMapping");
+    await noteIs(/^Saved for “E2E Folder A”\.$/);
+    let s = await settingsNow();
+    assert.equal(s.playlist_mappings.test.saved[A].mode, "custom");
+    assert.deepEqual(s.playlist_mappings.test.saved[A].map.pool, ["Pool A"]);
+    assert.equal(s.tag_playlist_mode, "auto", "Save mapping saves nothing else");
+    assert.equal(await page.isDisabled("#saveBtn"), false, "the mode change is still to save");
+
+    // B, a new name: the editor stays as it is; pool → "Pool B", Save mapping.
+    await leaveFolder(B);
+    assert.equal(await pool().inputValue(), "Pool A");
+    await pool().fill("Pool B");
+    await page.click("#saveMapping");
+    await noteIs(/^Saved for “E2E Folder B”\.$/);
+    assert.deepEqual(await page.$$eval("#savedPlaylistFolders option", (os) => os.map((o) => o.value)), [A, B]);
+
+    // ▼ lists both; A brings A's mapping back.
+    await page.click("#playlistFolderMenuBtn");
+    assert.deepEqual(await page.$$eval("#playlistFolderMenu .folder-option", (bs) => bs.map((b) => b.textContent)), [A, B]);
+    if (process.env.E2E_SHOTS) await page.locator("#sec_rb_playlists").screenshot({ path: path.join(process.env.E2E_SHOTS, "saved-mappings.png") });
+    await page.click(`#playlistFolderMenu .folder-option[data-folder="${A}"]`);
+    await poolIs("Pool A");
+    assert.equal(await page.inputValue(folder), A);
+    assert.equal(await page.isHidden("#playlistFolderMenu"), true);
+
+    // Changes not saved: asked first (typing B and leaving); loading replaces them.
+    await pool().fill("Pool A, edited");
+    await leaveFolder(B);
+    await page.waitForSelector("#replaceMappingConfirm");
+    assert.match(await page.textContent("#replaceMappingConfirm"), /Load the mapping saved for “E2E Folder B”\?/);
+    await page.click("#replaceMappingConfirm .dialog-confirm");
+    await poolIs("Pool B");
+
+    // Save settings: B and its mapping are the active ones.
+    await page.click("#saveBtn");
+    await page.waitForFunction(() => /Saved/.test(document.getElementById("saveState").textContent));
+    s = await settingsNow();
+    assert.equal(s.playlist_folder, B);
+    assert.equal(s.tag_playlist_mode, "custom");
+    assert.deepEqual(s.tag_playlist_map.pool, ["Pool B"]);
+    assert.deepEqual(s.playlist_mappings.test.map.pool, ["Pool B"]);
+    assert.deepEqual(s.playlist_mappings.test.saved[A].map.pool, ["Pool A"], "A's as saved");
+
+    // After a reload (from the server): A again, by typing it.
+    await page.reload();
+    await mappingLoaded(page);
+    assert.equal(await page.inputValue(folder), B);
+    await leaveFolder(A);
+    await poolIs("Pool A");
+    assert.equal(await page.isChecked("#mappingAuto"), false);
+
+    // Main (the Target radio, not saved yet): its own folder, nothing saved for it; Save mapping keeps one for it.
+    await page.check("#f_target_main");
+    await page.waitForFunction((m) => document.getElementById("f_playlist_folder").value === m, M);
+    assert.equal(await page.isChecked("#mappingAuto"), true);
+    await page.click("#playlistFolderMenuBtn");
+    assert.match(await page.textContent("#playlistFolderMenu"), /No saved mappings yet/);
+    await page.click("#playlistFolderMenuBtn");
+    await page.uncheck("#mappingAuto");
+    await pool().fill("Pool M");
+    await page.click("#saveMapping");
+    await noteIs(/^Saved for “E2E Main Folder”\.$/);
+    s = await settingsNow();
+    assert.deepEqual(s.playlist_mappings.main.saved[M].map.pool, ["Pool M"]);
+    assert.equal(s.playlist_mappings.main.mode, "auto", "Main's active mapping unchanged");
+    assert.deepEqual(Object.keys(s.playlist_mappings.test.saved).sort(), [A, B], "Test's untouched");
+    assert.equal(s.rekordbox_target, "test", "Save mapping doesn't save the radio");
+    // Back to Test: its folder and mapping as left.
+    await page.check("#f_target_test");
+    await page.waitForFunction((a) => document.getElementById("f_playlist_folder").value === a, A);
+    await poolIs("Pool A");
+  } finally {
+    await put({ rekordbox_main_db_path: before.rekordbox_main_db_path, rekordbox_target: before.rekordbox_target, playlist_mappings: before.playlist_mappings });
+    await page.close();
+  }
+});
+
 test("Settings → Rekordbox: Library (Test / Main) and Allow writes are separate; unticking Allow keeps Main; the header says read-only or writes enabled", async () => {
   await put({ rekordbox_main_db_path: SANDBOX_MAIN, rekordbox_target: "test", allow_main_writes: false });
   const page = await context.newPage();
@@ -889,14 +996,15 @@ test("Settings → Rekordbox: the Playlists marks follow the Library radios befo
       .trim();
   const testDb = sandbox("test", "/E2E Marks/Only Test", "--test-marker");
   const mainDb = sandbox("main", "/E2E Marks/Only Main");
-  const { rekordbox_db_path: savedTestDb } = await api("/api/settings");
+  const { rekordbox_db_path: savedTestDb, playlist_mappings: savedMappings } = await api("/api/settings");
+  // The same mapping for both libraries (each has its own): only the marks differ.
+  const marked = { folder: "bc-tagger", mode: "custom", map: { must: ["/E2E Marks/Only Test"], pool: ["/E2E Marks/Only Main"] }, saved: {} };
   await put({
     rekordbox_db_path: testDb,
     rekordbox_main_db_path: mainDb,
     rekordbox_target: "test",
     allow_main_writes: false,
-    tag_playlist_mode: "custom",
-    tag_playlist_map: { must: ["/E2E Marks/Only Test"], pool: ["/E2E Marks/Only Main"] },
+    playlist_mappings: { test: marked, main: marked },
   });
   const page = await context.newPage();
   const marks = () =>
@@ -932,8 +1040,7 @@ test("Settings → Rekordbox: the Playlists marks follow the Library radios befo
       rekordbox_db_path: savedTestDb,
       rekordbox_main_db_path: SANDBOX_MAIN,
       rekordbox_target: "test",
-      tag_playlist_mode: "auto",
-      tag_playlist_map: {},
+      playlist_mappings: savedMappings,
     });
     await page.close();
     fs.rmSync(dir, { recursive: true, force: true });
