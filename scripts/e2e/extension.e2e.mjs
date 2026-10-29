@@ -3000,6 +3000,9 @@ test("collection: Set file… by search, then by Browse; the chip says set manua
   const before = await api("/api/settings").then((d) => d.settings || d);
   const saved = await put({ extra_roots: [{ path: E2E_MUSIC, kind: "not_owned" }] });
   assert.ok(!saved.detail, `settings: ${JSON.stringify(saved.detail)}`);
+  // Indexed, as Rescan drive does (the item has no tag date, so Locate's quick scan doesn't look).
+  const scan = await post("/api/index/scan", {});
+  await waitFor(() => api(`/api/jobs/${scan.job_id}`).then((j) => j.status === "done" || j.status === "error"), { what: "the scan", timeout: 60000 });
   const app = await context.newPage();
   const chip = `tr[data-key="${ITEM_SET.id}"] .col-located .chip`;
   const chipStatus = () => app.$eval(chip, (c) => c.dataset.status);
@@ -3016,9 +3019,12 @@ test("collection: Set file… by search, then by Browse; the chip says set manua
     await app.waitForFunction((id) => document.querySelectorAll("#collectionTable tbody tr").length === 1 && document.querySelector(`tr[data-key="${id}"]`), ITEM_SET.id);
     await app.click(chip);
     assert.equal(await app.textContent(".popover #setFile"), "Set file…");
-    assert.ok(await app.$(".popover button:has-text('Locate')"), "Locate stays");
     assert.equal(await app.$(".popover #backToAutomatic"), null, "nothing set by hand yet");
-    await app.keyboard.press("Escape");
+    // Locate first: the matcher doesn't find this track.
+    await app.click(".popover button:has-text('Locate')");
+    await app.waitForFunction((id) => new RegExp(`^${id}: locating… (done|failed)`).test(document.getElementById("refreshStatus").textContent), ITEM_SET.id, { timeout: 60000 });
+    const auto = (await api(`/api/items/${ITEM_SET.id}`)).local.status;
+    assert.notEqual(auto, "located");
 
     // By search: the box starts with the item's artist and title.
     await openSetFile();
@@ -3056,8 +3062,8 @@ test("collection: Set file… by search, then by Browse; the chip says set manua
     await app.waitForFunction((c) => !/-manual$/.test((document.querySelector(c) || {}).dataset?.status || "-manual"), chip, { timeout: 30000 });
     local = (await api(`/api/items/${ITEM_SET.id}`)).local;
     assert.ok(!local.manual, "no longer set by hand");
-    assert.notEqual(local.status, "located");
-    assert.equal(await chipStatus(), local.status, "the chip shows the matcher's result");
+    assert.equal(local.status, auto, "what the matcher said before");
+    assert.equal(await chipStatus(), auto, "the chip shows it");
     assert.notEqual(await app.textContent(chip), "✓ set manually");
   } finally {
     await put({ extra_roots: [], ...("last_browse_dir" in before ? { last_browse_dir: before.last_browse_dir || "" } : {}) });
