@@ -1231,26 +1231,34 @@ test("after the extension reloads (a dev rebuild, an update), open pages get a f
   }
 });
 
-test("popup: Checkout / PayPal automation is on by default; off, the checkout script does nothing (fixture page)", async () => {
-  // A stand-in PayPal page with the buttons checkout.js clicks; each click is recorded.
+test("popup: Checkout / PayPal automation is on by default; off, the checkout script does nothing (fixture pages: a USD PayPal order, Bandcamp's checkout)", async () => {
+  // Stand-ins with the buttons checkout.js may click; each click is recorded. Each part runs on its own site only:
+  // PayPal's (a USD order: Pay, never Bandcamp's button) and Bandcamp's (its button, never Pay).
   const FIXTURE = `<!doctype html><html><body>
     <script>window.__clicked = [];</script>
     <div class="footer-button"><button onclick="window.__clicked.push('footer')">Continue</button></div>
     <button id="one-time-cta" onclick="window.__clicked.push('pay')">Pay</button>
   </body></html>`;
-  const URL = "https://www.paypal.com/checkoutnow?token=e2e";
+  const PAYPAL = "https://www.paypal.com/checkoutnow?token=e2e";
+  const BANDCAMP = "https://e2e.bandcamp.com/cart/checkout";
   const popup = await context.newPage();
-  const shop = await context.newPage();
-  await shop.route("**/*", (route) => route.fulfill({ status: 200, contentType: "text/html", body: FIXTURE })); // nothing leaves the browser
+  const paypal = await context.newPage();
+  const bandcamp = await context.newPage();
+  for (const p of [paypal, bandcamp]) await p.route("**/*", (route) => route.fulfill({ status: 200, contentType: "text/html", body: FIXTURE })); // nothing leaves the browser
   const logs = [];
-  shop.on("console", (m) => logs.push(m.text()));
+  [paypal, bandcamp].forEach((p) => p.on("console", (m) => logs.push(m.text())));
   try {
-    // On by default: the script clicks through.
+    // On by default: each page's part clicks through.
     await popup.goto(extPage("popup.html"));
     await popup.waitForFunction(() => document.getElementById("checkoutAutomation"));
     assert.equal(await popup.isChecked("#checkoutAutomation"), true);
-    await shop.goto(URL);
-    await shop.waitForFunction(() => window.__clicked.includes("footer") && window.__clicked.includes("pay"), null, { timeout: 10000 });
+    await paypal.goto(PAYPAL);
+    await bandcamp.goto(BANDCAMP);
+    await paypal.waitForFunction(() => window.__clicked.includes("pay"), null, { timeout: 10000 });
+    await bandcamp.waitForFunction(() => window.__clicked.includes("footer"), null, { timeout: 10000 });
+    assert.deepEqual(await paypal.evaluate(() => window.__clicked), ["pay"], "PayPal: Pay only");
+    assert.deepEqual(await bandcamp.evaluate(() => window.__clicked), ["footer"], "Bandcamp: its button only");
+    assert.ok(logs.some((t) => t === "[bc-tagger] paypal: Pay (no conversion offered)"));
 
     // Off (remembered): the next load does nothing at all.
     await popup.uncheck("#checkoutAutomation");
@@ -1259,12 +1267,15 @@ test("popup: Checkout / PayPal automation is on by default; off, the checkout sc
     await popup.waitForFunction(() => document.getElementById("checkoutAutomation"));
     await waitFor(async () => !(await popup.isChecked("#checkoutAutomation")), { what: "the box unticked after a reload" });
     logs.length = 0;
-    await shop.reload();
-    await waitFor(async () => logs.some((t) => /checkout automation is off/.test(t)), { what: "the script saying it's off" });
-    assert.deepEqual(await shop.evaluate(() => window.__clicked), [], "no clicks");
+    await paypal.reload();
+    await bandcamp.reload();
+    await waitFor(async () => logs.filter((t) => /checkout automation is off/.test(t)).length === 2, { what: "both pages saying it's off" });
+    await sleep(1500); // past PayPal's settle
+    assert.deepEqual(await paypal.evaluate(() => window.__clicked), [], "no clicks");
+    assert.deepEqual(await bandcamp.evaluate(() => window.__clicked), [], "no clicks");
   } finally {
     await probe.evaluate(() => chrome.storage.local.remove("checkoutAutomation"));
-    await Promise.all([popup.close(), shop.close()]);
+    await Promise.all([popup.close(), paypal.close(), bandcamp.close()]);
   }
 });
 

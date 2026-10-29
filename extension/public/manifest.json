@@ -58,7 +58,6 @@
       ],
       "run_at": "document_idle",
       "js": [
-        "jquery_2.1.1_jquery.min.js",
         "checkout.js"
       ]
     },

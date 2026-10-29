@@ -15,7 +15,8 @@
     "format": "prettier --write --ignore-unknown \"{extension,shared,app}/**/*.{html,css,js,ts,json}\"",
     "build:e2e": "webpack --mode=development --env e2e --config extension/config/webpack.config.js",
     "test:e2e": "node --test --test-concurrency=1 scripts/e2e/extension.e2e.mjs",
-    "test:unit": "node --disable-warning=MODULE_TYPELESS_PACKAGE_JSON --test scripts/unit/"
+    "test:unit": "node --disable-warning=MODULE_TYPELESS_PACKAGE_JSON --test scripts/unit/",
+    "test:paypal": "node --test scripts/e2e/paypalCheckout.test.mjs"
   },
   "devDependencies": {
     "adm-zip": "^0.5.10",

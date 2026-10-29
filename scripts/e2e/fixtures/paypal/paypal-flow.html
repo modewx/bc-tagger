@@ -1,0 +1,171 @@
+<!doctype html>
+<!--
+  A sanitized stand-in for PayPal's pay flow, for scripts/e2e/paypalCheckout.test.mjs: only the elements
+  extension/src/paypalCheckout.js reads, with their attributes as on PayPal's pages (2026-10; no data from a real
+  checkout: made-up amounts, rates and token). Each screen is a <template>; the script below plays PayPal's part:
+  the order details open in place, "Available currency options" and "Use …" go to the next screen (in place, or a
+  full load with mode=full), the currency tabs switch like Radix tabs (on mousedown or Enter, never on click), and
+  every click is recorded (sessionStorage "fixture-clicks", kept across loads).
+
+  ?screen=   pay-collapsed (default) | pay-expanded | options | pay-chosen | pay-still | pay-usd
+  ?mode=     spa (default) | full
+  ?tabs=     the currency tabs (default USD,EUR); ?selected= the one selected at first (default USD)
+  ?frozen=1  the tabs never switch; ?keysOnly=1 they switch on Enter only
+  ?stuck=1   the order details and the currency options link do nothing
+  ?after=    where "Use …" leads: pay-chosen (default) | pay-still (PayPal's rate still shown)
+-->
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>Pay with PayPal (stand-in)</title>
+  <style>
+    body { font: 14px/1.4 -apple-system, system-ui, sans-serif; margin: 24px; }
+    button { font: inherit; margin: 4px 0; }
+    [role="tablist"] button[aria-selected="true"] { font-weight: 700; }
+  </style>
+</head>
+<body>
+  <div id="app"></div>
+
+  <template id="pay-collapsed">
+    <section aria-label="Order summary">
+      <button type="button" aria-expanded="false" data-state="closed" data-orientation="vertical" id="radix-trigger"
+        data-dd-action-name="Order details Tab" data-radix-collection-item="">
+        <div><div aria-label="Order details" data-dd-privacy="allow"><span>▸</span></div></div>
+        <div><div><span>$3.00</span><div><span aria-label="PayPal rate: 1 USD = 0.75000 GBP" role="text"></span><span
+          aria-hidden="true">PayPal rate: 1 USD = 0.75000 GBP</span></div><div>Conversion options available</div></div></div>
+      </button>
+    </section>
+    <button aria-disabled="false" data-id="one-time-cta" id="one-time-cta" type="submit" data-atomic-wait-intent="Pay_With_PayPal"
+      data-atomic-wait-task="select_pay"><div><span>Pay</span></div></button>
+  </template>
+
+  <template id="pay-expanded">
+    <section aria-label="Order summary">
+      <button type="button" aria-expanded="true" data-state="open" data-orientation="vertical" id="radix-trigger"
+        data-dd-action-name="Order details Tab" data-radix-collection-item="" aria-controls="radix-content">
+        <div><div aria-label="Order details" data-dd-privacy="allow">Order details</div></div>
+      </button>
+      <div id="radix-content" role="region">
+        <div>$3.00</div>
+        <div>PayPal’s conversion rate: 1.00 USD = 0.75000 GBP</div>
+        <div><div><a data-atomic-wait-intent="Open_Currency_Conversion_Options_Screen"
+          data-atomic-wait-task="view_currency_conversion_options_screen" href="#options">Available currency options</a></div></div>
+      </div>
+    </section>
+    <button aria-disabled="false" data-id="one-time-cta" id="one-time-cta" type="submit" data-atomic-wait-intent="Pay_With_PayPal"
+      data-atomic-wait-task="select_pay"><div><span>Pay</span></div></button>
+  </template>
+
+  <template id="options">
+    <h1>Currency options</h1>
+    <div role="tablist" aria-orientation="horizontal" tabindex="0" data-orientation="horizontal"></div>
+    <p id="rate-note"></p>
+    <button aria-disabled="false" data-atomic-wait-intent="Submit_Currency_Conversion_Options"
+      data-atomic-wait-task="submit_currency_conversion_option"><div id="use-label">Use USD</div></button>
+    <a data-atomic-wait-intent="Cancel_Currency_Conversion_Options_Screen" href="#back">Back</a>
+  </template>
+
+  <template id="pay-chosen">
+    <section aria-label="Order summary">
+      <button type="button" aria-expanded="false" data-state="closed" data-orientation="vertical" id="radix-trigger"
+        data-dd-action-name="Order details Tab" data-radix-collection-item="">
+        <div><div aria-label="Order details" data-dd-privacy="allow"><span>▸</span></div></div>
+        <div><div><span>€2.80</span><div>Card issuer’s conversion rate applies</div><div>Conversion options available</div></div></div>
+      </button>
+    </section>
+    <button aria-disabled="false" data-id="one-time-cta" id="one-time-cta" type="submit" data-atomic-wait-intent="Pay_With_PayPal"
+      data-atomic-wait-task="select_pay"><div><span>Pay</span></div></button>
+  </template>
+
+  <template id="pay-usd">
+    <section aria-label="Order summary"><div>$3.00 USD</div></section>
+    <button aria-disabled="false" data-id="one-time-cta" id="one-time-cta" type="submit" data-atomic-wait-intent="Pay_With_PayPal"
+      data-atomic-wait-task="select_pay"><div><span>Pay</span></div></button>
+  </template>
+
+  <script>
+    const q = new URLSearchParams(location.search);
+    const opt = (k, d) => (q.has(k) ? q.get(k) : d);
+    const app = document.getElementById("app");
+    const record = (what) => {
+      const clicks = JSON.parse(sessionStorage.getItem("fixture-clicks") || "[]");
+      clicks.push(what);
+      sessionStorage.setItem("fixture-clicks", JSON.stringify(clicks));
+    };
+    window.__clicks = () => JSON.parse(sessionStorage.getItem("fixture-clicks") || "[]");
+
+    // The next screen: in place (PayPal's client-side routes), or a full load.
+    function go(screen) {
+      if (opt("mode", "spa") === "full") {
+        const next = new URLSearchParams(q);
+        next.set("screen", screen);
+        location.search = next.toString();
+      } else render(screen);
+    }
+
+    function render(screen) {
+      const name = screen === "pay-still" ? "pay-collapsed" : screen;
+      app.innerHTML = document.getElementById(name).innerHTML;
+      app.dataset.screen = screen;
+      if (screen === "options") buildTabs();
+    }
+
+    // Radix-like tabs: switch on mousedown (left button, no ctrl) or Enter/Space; a click alone does nothing.
+    function buildTabs() {
+      const list = app.querySelector('[role="tablist"]');
+      opt("tabs", "USD,EUR").split(",").forEach((c) => {
+        const b = document.createElement("button");
+        Object.entries({ type: "button", role: "tab", "aria-controls": `radix-content-${c}`, id: `radix-trigger-${c}`, "data-orientation": "horizontal", "data-radix-collection-item": "" })
+          .forEach(([k, v]) => b.setAttribute(k, v));
+        b.textContent = c;
+        list.appendChild(b);
+      });
+      select(opt("selected", "USD"), false);
+    }
+    function select(currency, byUser = true) {
+      app.querySelectorAll('[role="tab"]').forEach((t) => {
+        const on = t.textContent === currency;
+        t.setAttribute("aria-selected", String(on));
+        t.setAttribute("data-state", on ? "active" : "inactive");
+        t.tabIndex = on ? 0 : -1;
+      });
+      app.querySelector("#use-label").textContent = `Use ${currency}`;
+      app.querySelector("#rate-note").textContent = currency === "USD" ? "PayPal’s conversion rate applies." : "Card issuer’s conversion rate applies.";
+      if (byUser) record(`tab:${currency}`);
+    }
+    app.addEventListener("mousedown", (e) => {
+      const tab = e.target.closest('[role="tab"]');
+      if (!tab || opt("frozen") || opt("keysOnly")) return;
+      if (e.button === 0 && !e.ctrlKey) select(tab.textContent);
+    });
+    app.addEventListener("keydown", (e) => {
+      const tab = e.target.closest('[role="tab"]');
+      if (tab && !opt("frozen") && (e.key === "Enter" || e.key === " ")) select(tab.textContent);
+    });
+
+    app.addEventListener("click", (e) => {
+      const el = e.target.closest("button, a");
+      if (!el) return;
+      if (el.matches('[data-dd-action-name="Order details Tab"]')) {
+        record("trigger");
+        if (!opt("stuck") && el.getAttribute("aria-expanded") === "false" && app.dataset.screen === "pay-collapsed") render("pay-expanded");
+      } else if (el.matches('[data-atomic-wait-intent="Open_Currency_Conversion_Options_Screen"]')) {
+        e.preventDefault();
+        record("link");
+        if (!opt("stuck")) go("options");
+      } else if (el.matches('[data-atomic-wait-intent="Submit_Currency_Conversion_Options"]')) {
+        record(`use:${app.querySelector("#use-label").textContent.replace(/^Use /, "")}`);
+        go(opt("after", "pay-chosen"));
+      } else if (el.matches("#one-time-cta")) {
+        e.preventDefault();
+        record("pay");
+      } else if (el.getAttribute("href")) {
+        e.preventDefault();
+      }
+    });
+
+    render(opt("screen", "pay-collapsed"));
+  </script>
+</body>
+</html>

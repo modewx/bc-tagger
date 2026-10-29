@@ -268,6 +268,16 @@ npm run test:e2e                         # Playwright e2e: own profile, server :
   that has started swaps its source at the same moment and keeps playing (`swapSource`), the others when they
   next load. "▶ preview / original / Bandcamp stream" says what the track playing is heard from (the toggle and
   `local.best.preview`). Play/pause are SVG icons (the text glyphs rendered as a square in the docked player).
+- **PayPal: the card issuer's currency, never PayPal's conversion** (user: PayPal's page changed, and the old
+  automation paid at PayPal's rate: `#one-time-cta` is enabled before any currency is chosen, the old
+  `currency-conversion-option-link` is gone, so the "US site" branch paid after 1 s). `paypalCheckout.js`: a state
+  machine read from the page (order details trigger → "Available currency options" → the non-USD tab, pressed with
+  pointer/mouse events since Radix tabs ignore click, then focus+Enter → "Use <it>", never "Use USD" → Pay), driven by
+  a MutationObserver and a 250 ms poll; each step once, retried once after 3 s, then a notice on the page. Pay only
+  for a USD order or after the choice when PayPal's rate is gone, once the page held still 1.2 s. Progress in
+  sessionStorage by the checkout's token. checkout.js runs it on paypal.com only, the Bandcamp part elsewhere (no
+  jQuery any more). Tests: `npm run test:paypal` (a sanitized stand-in with a mousedown-only tab, in-place and full
+  loads; 9 tests, ~7 s); the e2e switch test now has a PayPal and a Bandcamp page.
 - **Phase 9 e2e under budget** (27.3 s → 19.2 s): one storage write (one push, one wait) to set tracks aside and
   put them back, server checks by id, 100 ms polling in the Phase 9 waits, no fixed settles (popup, timing). The
   "#" collision test still fails without A's max_order fix.

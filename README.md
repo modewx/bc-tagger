@@ -144,6 +144,10 @@ server/bct serve     # local server + app on http://127.0.0.1:8765
   new build.
 - The popup's **Checkout / PayPal automation** box (on by default) turns off the automatic steps on Bandcamp
   checkout and PayPal pages: with it off, `checkout.js` does nothing on those pages from their next load.
+  On PayPal (`paypalCheckout.js`) it chooses the card issuer's currency, never PayPal's conversion: order details
+  → Available currency options → the non-USD tab → Use it → Pay. A USD order is paid at once. Pay is never clicked
+  while the page shows PayPal's rate; when it can't choose, it says so on the page and leaves Pay to you. Its
+  progress is kept per checkout (by its token), so it never loops. Test: `npm run test:paypal` (fixtures, no network).
 - **Collections in the tagger** (Phase 9): the popup's **Collection** dropdown (All, then the collections with
   their counts, then **New collection…**) says what the stars on Bandcamp pages show and where starring puts a
   track; the choice is kept by the extension (default All) and open Bandcamp tabs redraw their stars at once. In a
