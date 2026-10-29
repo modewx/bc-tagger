@@ -228,8 +228,8 @@ export async function refreshCollections(timeoutMs = 4000) {
 }
 
 // For the popup, as it opens: one localhost request (the collections read) says whether the server answers and
-// brings the collections up to date. The rest comes from the store. All's count is every item, as in the app (the
-// extension's and those only in a collection, e.g. Other items): with one collection, the same as it.
+// brings the collections up to date. The rest comes from the store. All's count is the tracks in any collection
+// (Other items too): every track is in one, so with one collection it's the same as it.
 export async function popupState() {
   const url = await getServerUrl();
   let up = false;

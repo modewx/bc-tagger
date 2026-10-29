@@ -155,11 +155,12 @@ server/bct serve     # local server + app on http://127.0.0.1:8765
 - **Collections in the tagger** (Phase 9, 9b): the popup's **Collection** dropdown (All, then the collections with
   their counts, then **New collection…**) says what the stars on Bandcamp pages show and where starring puts a
   track; the choice is kept by the extension (default: the first collection, "Collection"), and a Bandcamp tab
-  redraws its stars when it's next shown or focused. In a collection, the star is membership (tags stay; the track
-  stays in All). **All** is a mode of its own, said in the popup while chosen, with amber stars marked "all" on
+  redraws its stars when it's next shown or focused. In a collection, the star is membership: un-starring takes the
+  track out of it (tags kept), and deletes it with its tags when it was its last collection, so every track is in
+  at least one. **All** is a mode of its own, said in the popup while chosen, with amber stars marked "all" on
   Bandcamp pages: a star puts the track into every collection, a star is filled when it's in any, a tag on an
   unstarred track stars it everywhere, and un-starring deletes it from all of them (asking first when it's in two or
-  more). All's count is every track, as in the app. New collection… makes it on the server (the app shows it at
+  more). All's count is the tracks in any collection (with one collection, its count). New collection… makes it on the server (the app shows it at
   once; one made in the app reaches the extension through an open app tab, else at the next check). Starring works
   with the server off: the changes go when it's back. The built-in See Collection page shows the chosen collection.
 - **Copy timings** (popup) copies how long the last 100 tagger actions took (star, un-star, tags; on Bandcamp pages

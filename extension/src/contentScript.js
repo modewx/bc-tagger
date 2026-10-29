@@ -284,10 +284,11 @@ function hashCode(str) {
 // changed), so a tab in the background does no work. A star or a tag change here is drawn at once and sent as a
 // change; the worker queues it and writes it later, with others.
 //
-// Stars (Phase 9b): in a collection, filled when the item is in it; in All (chosen in the popup, never the
-// default), filled when it's in any collection, and drawn differently (`.bct-all`): a star puts the item into every
-// collection, un-starring deletes it from all of them. No collection known yet (the server never reached): filled
-// when saved.
+// Stars (Phase 9b): in a collection, filled when the item is in it; un-starring takes it out, and deletes it (with
+// its tags) when that was its last collection (the worker decides, from its own copy). In All (chosen in the popup,
+// never the default), filled when it's in any collection, and drawn differently (`.bct-all`): a star puts the item
+// into every collection, un-starring deletes it from all of them. No collection known yet (the server never
+// reached): filled when saved.
 const ALL = "all";
 const page = {
   rev: null, // the worker's version of what's below
@@ -389,10 +390,10 @@ const actionStart = () => (performance.now() - lastInputAt < 1000 ? lastInputAt 
 // A change to the worker, with what the timing log needs: the page's own time from the action (`event.timeStamp`)
 // to the next frame showing it.
 let opSeq = 0;
-function sendChange(msg, kind, since) {
+function sendChange(msg, kind, since, answered = null) {
   const opId = `${Date.now().toString(36)}-${++opSeq}`;
   page.changed = true;
-  send({ ...msg, kind, opId, page: pageType, widgets: page.ids.size });
+  send({ ...msg, kind, opId, page: pageType, widgets: page.ids.size }, answered);
   requestAnimationFrame(() => setTimeout(() => send({ type: "timing", opId, screenMs: performance.now() - since }), 0));
 }
 
@@ -646,11 +647,17 @@ function createTagButton(element, itemUrl, trackdata) {
         if (members.has(collection)) {
           setStar(tagButton, false);
           page.member.set(uniqueId, new Set([...members].filter((c) => c !== collection)));
-          sendChange({ type: "setMembership", op: "remove", collections: [collection], id: uniqueId }, "unstar", since);
+          // Its last collection: the worker deletes it (and says so).
+          sendChange({ type: "setMembership", op: "remove", collections: [collection], id: uniqueId }, "unstar", since, (res) => {
+            if (res && res.deleted) {
+              delete page.items[uniqueId];
+              page.member.delete(uniqueId);
+            }
+          });
         } else if (saved) {
           setStar(tagButton, true);
           page.member.set(uniqueId, new Set([...members, collection]));
-          sendChange({ type: "setMembership", op: "add", collections: [collection], id: uniqueId }, "star", since);
+          sendChange({ type: "setMembership", op: "add", collections: [collection], id: uniqueId, item: saved }, "star", since);
         } else {
           const newItem = { ...trackdata, date_added: new Date().toISOString(), tags: tags };
           setStar(tagButton, true);
@@ -682,7 +689,7 @@ function createTagButton(element, itemUrl, trackdata) {
         setStar(tagButton, true);
         page.member.set(uniqueId, new Set([...memberOf(uniqueId), ...collections]));
         if (saved) {
-          sendChange({ type: "setMembership", op: "add", collections, id: uniqueId }, "star", since);
+          sendChange({ type: "setMembership", op: "add", collections, id: uniqueId, item: saved }, "star", since);
         } else {
           const newItem = { ...trackdata, date_added: new Date().toISOString(), tags: tags };
           page.items[uniqueId] = newItem;

@@ -254,6 +254,21 @@ npm run test:e2e                         # Playwright e2e: own profile, server :
 
 ### 2026-10-28
 
+- **Un-starring in a track's last collection deletes it** (user: "Yes, delete it", so All is always the union).
+  - Un-star in a collection the track shares with others: out of that one only, its tags kept.
+  - In its last collection: the track and its tags are deleted, one change sent to the server as a deletion (which
+    drops its memberships), with no confirm, as before collections.
+  - The worker decides from its own membership copy (a page's may be older since it was last focused); the page
+    empties the star at once either way and forgets the track when the worker says it deleted it. A star again on a
+    track deleted meanwhile in another tab saves it again from the page's copy.
+  - A deleted track's ids leave the queued membership ops too (a queued add would show it again until sent).
+  - The popup's All counts the tracks in any collection (the union of the members); with one collection, its count.
+  - The app's Remove from collection and Delete collection are unchanged for now (the coordinator is asking the
+    user whether a track left in no collection should go too).
+  - e2e: the album page's un-star in Collection deletes the track here and on the server (item and membership), and
+    the popup's All equals Collection after it; in the Phase 9 test, un-starring in one of two collections keeps the
+    track and its tags; the popup test's All equals Collection again.
+
 - **Many tabs open: one owner of the data, nothing sent to tabs that aren't in use.**
   - The user: un-starring and adding tags were slow, and unrelated Bandcamp tabs jumped to the top of the CPU
     list for a few seconds.
@@ -292,7 +307,8 @@ npm run test:e2e                         # Playwright e2e: own profile, server :
       - un-starring deletes the track from all of them, asking first when it's in 2 or more;
       - a tag on an unstarred track stars it everywhere.
     - In All, the stars are amber and marked "all", and the popup says what All does.
-    - All's count is every item, as in the app: Collection's count plus the items in no collection.
+    - All's count is every item, as in the app: Collection's count plus the items in no collection (later the same
+      day: the tracks in any collection; see above).
     - New items saved without naming a collection (an import) go into the first one, in the extension's copy at
       once.
   - **Copy timings** (popup) copies the last 100 actions with their times: on screen, queue, write and push, plus

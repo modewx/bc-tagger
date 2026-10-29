@@ -16,7 +16,7 @@ import {
   popupState,
   createCollection,
 } from "./serverSync";
-import { ALL, MAIN, queueMembership, removeItem, setActive, readCollections, activeOf, memberIndex, sortedList, firstCollection } from "./collectionsStore";
+import { ALL, MAIN, queueMembership, removeItem, unstar, setActive, readCollections, activeOf, memberIndex, sortedList, firstCollection } from "./collectionsStore";
 import { withItems, change, read, flush, replaceItems, rev, tagsRev, nowIso, sameTags, fillOrder, nextOrder, orderFloorOf } from "./itemsStore";
 import { noteOp, noteScreen, timingsText } from "./timings";
 import { isChallengePage } from "../../shared/bandcampChallenge";
@@ -186,35 +186,41 @@ function collectionsOf(request) {
 // (`order: null`) when it's starred into others only, until it joins Collection (setMembership); an item keeps its
 // number. Queued at once (the store's queue), so a page's next read sees it.
 function saveTaggedItem(incoming, collections = []) {
-  const numbered = !collections.length || collections.includes(MAIN);
   const ids = [incoming.id];
-  const write = (items, s) => {
-    const prev = items[incoming.id];
-    const item = { ...incoming };
-    item.modified_at = !prev || !sameTags(prev.tags, item.tags) ? nowIso() : prev.modified_at || item.modified_at;
-    if (!item.modified_at) delete item.modified_at;
-    fillOrder(items, ids); // older items first, should they still have none
-    if (prev && prev.order != null) item.order = prev.order;
-    else item.order = numbered ? nextOrder(items, orderFloorOf(s)) : null;
-    items[item.id] = item;
-  };
+  const write = (items, s) => writeItem(items, s, incoming, collections, ids);
   if (!collections.length) return withItems(write, ids);
   return queueMembership(collections.map((cid) => ({ op: "add", collection_id: cid, ids: [incoming.id] })), write, ids);
 }
 
-// An item joins or leaves collections (tags kept). Joining Collection numbers it, if it has no "#" yet.
-function setMembership(op, collections, id) {
+// `incoming` saved in `items`; `ids` gets the items it numbers.
+function writeItem(items, s, incoming, collections, ids) {
+  const numbered = !collections.length || collections.includes(MAIN);
+  const prev = items[incoming.id];
+  const item = { ...incoming };
+  item.modified_at = !prev || !sameTags(prev.tags, item.tags) ? nowIso() : prev.modified_at || item.modified_at;
+  if (!item.modified_at) delete item.modified_at;
+  fillOrder(items, ids); // older items first, should they still have none
+  if (prev && prev.order != null) item.order = prev.order;
+  else item.order = numbered ? nextOrder(items, orderFloorOf(s)) : null;
+  items[item.id] = item;
+}
+
+// A saved item joins collections (tags kept). Joining Collection numbers it, if it has no "#" yet. Gone meanwhile
+// (un-starred in its last collection in another tab): saved again as the page has it (`item`), when it sent one.
+function joinCollections(collections, id, item = null) {
   const ids = [id];
-  const number =
-    op === "add" && collections.includes(MAIN)
-      ? (items, s) => {
-          const it = items[id];
-          if (!it || it.order != null) return false;
-          fillOrder(items, ids);
-          it.order = nextOrder(items, orderFloorOf(s));
-        }
-      : null;
-  return queueMembership(collections.map((cid) => ({ op, collection_id: cid, ids: [id] })), number, ids);
+  const write = (items, s) => {
+    const it = items[id];
+    if (!it) {
+      if (!item || item.id !== id) return false;
+      writeItem(items, s, item, collections, ids);
+      return;
+    }
+    if (!collections.includes(MAIN) || it.order != null) return false;
+    fillOrder(items, ids);
+    it.order = nextOrder(items, orderFloorOf(s));
+  };
+  return queueMembership(collections.map((cid) => ({ op: "add", collection_id: cid, ids: [id] })), write, ids);
 }
 
 function updateItemTags(id, tags) {
@@ -557,12 +563,15 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
   }
 
   if (request.type === "setMembership") {
-    // Starring (or tagging) an item that exists, or un-starring it, in a collection (in All: every collection).
+    // Starring (or tagging) an item that exists in a collection (in All: every collection), or un-starring it there:
+    // out of it, or deleted when it was its last collection ({deleted: true}).
     noteAction(request, request.kind || (request.op === "add" ? "star" : "unstar"), [request.id], sender);
-    setMembership(request.op, collectionsOf(request), request.id).then(
-      (r) => sendResponse(r && r.queued ? { ok: true } : { ok: false, error: "not a valid change" }),
-      (e) => sendResponse({ ok: false, error: e.message })
-    );
+    const collections = collectionsOf(request);
+    const done =
+      request.op === "remove"
+        ? unstar(collections, request.id)
+        : joinCollections(collections, request.id, request.item).then((r) => (r && r.queued ? { ok: true } : { ok: false, error: "not a valid change" }));
+    done.then(sendResponse, (e) => sendResponse({ ok: false, error: e.message }));
     return true;
   }
 

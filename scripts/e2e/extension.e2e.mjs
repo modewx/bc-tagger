@@ -1318,14 +1318,18 @@ test("album page: the header widget is the album item; track rows never touch it
   let items = (await storage("taggedItems")).taggedItems;
   assert.equal(items[trackId].album_id, albumId);
   assert.deepEqual(items[albumId], before, "the album item is untouched");
-  // Un-starred in the collection shown (Collection, the default): out of it, its item kept.
+  // Un-starred in its last collection (Collection, the default): deleted with its tags, here and on the server (the
+  // item and its membership); the popup's All is still Collection's count.
   await trackStar.click();
-  await waitFor(async () => !(((await storage("collectionsCache")).collectionsCache.members || {})["0"] || []).includes(trackId), { what: "the track out of Collection" });
+  await waitFor(async () => !(await storage("taggedItems")).taggedItems[trackId], { what: "the track deleted" });
   items = (await storage("taggedItems")).taggedItems;
   assert.deepEqual(items[albumId], before, "still untouched after un-starring the track");
+  await waitFor(() => fetch(`${SERVER}/api/items/${trackId}`).then((r) => r.status === 404), { what: "the track deleted on the server" });
+  assert.equal((await membersOf(0)).includes(trackId), false, "not in Collection on the server");
+  const popupNow = await probe.evaluate(() => new Promise((r) => chrome.runtime.sendMessage({ type: "popupState" }, r)));
+  assert.deepEqual(popupNow.cache.list.map((c) => c.id), [0], "one collection");
+  assert.equal(popupNow.allCount, popupNow.cache.list[0].count, "All: Collection's count");
   await page.close();
-  // Later tests start without the track.
-  await probe.evaluate((id) => new Promise((r) => chrome.runtime.sendMessage({ type: "removeTaggedItem", id }, r)), trackId);
 });
 
 test("Bandcamp page: one link-candidates request for all its items (recorded album page)", async () => {
@@ -5097,13 +5101,12 @@ test("Collections in the extension: the popup lists All (every item, as the app 
   await extensionCaughtUp();
   const inCollection = (await collectionsNow()).find((c) => c.id === 0).count;
   const { taggedItems } = await storage("taggedItems");
-  // All counts every item, as the app does: the extension's and those only in a collection (Other items, from the
-  // import test); with one collection, Collection's count plus the items taken out of it (kept, in no collection).
+  // All counts the tracks in any collection (each once), Other items too (from the import test): here, with E2E Crates
+  // empty, Collection's count.
   const members = await membersOf(0);
   const others = members.filter((id) => !(id in taggedItems));
   assert.ok(others.length, "Collection holds an item the extension doesn't (an Other item)");
-  const all = new Set([...Object.keys(taggedItems), ...members]).size;
-  const inNone = Object.keys(taggedItems).filter((id) => !members.includes(id)).length;
+  const all = new Set([...members, ...(await membersOf(crates.id))]).size;
   const popup = await context.newPage();
   const asked = [];
   const record = (r) => r.url().startsWith(SERVER) && asked.push(new URL(r.url()).pathname);
@@ -5122,7 +5125,7 @@ test("Collections in the extension: the popup lists All (every item, as the app 
       "E2E Crates (0)",
       "New collection…",
     ]);
-    assert.equal(all, inCollection + inNone, "All: Collection (its Other items too) and the items in no collection");
+    assert.equal(all, inCollection, "one collection holding the tracks: All and Collection count the same");
     assert.equal(await popup.inputValue("#collectionPicker"), "0", "the first collection by default (an old \"all\" too)");
     assert.equal(await popup.isVisible("#allWarning"), false);
     assert.equal(await popup.isVisible("#copyTimings"), true);
@@ -5146,7 +5149,7 @@ test("Collections in the extension: the popup lists All (every item, as the app 
   }
 });
 
-test("Collections in the extension: a Bandcamp page's stars follow the popup's choice when it's shown again (no reload); star and un-star in a collection (membership only); All: stars into every collection, filled when in any, drawn apart, a tag on an unstarred track stars it everywhere, un-starring deletes it (asking when it's in two or more)", async () => {
+test("Collections in the extension: a Bandcamp page's stars follow the popup's choice when it's shown again (no reload); star and un-star in one of two collections (membership only); All: stars into every collection, filled when in any, drawn apart, a tag on an unstarred track stars it everywhere, un-starring deletes it (asking when it's in two or more)", async () => {
   await dropCollections();
   const crates = await post("/api/collections", { name: "E2E Crates" });
   const page = await context.newPage();
@@ -5191,11 +5194,12 @@ test("Collections in the extension: a Bandcamp page's stars follow the popup's c
     await starIs(page, TRACK, true);
     await waitSoon(async () => (await membersOf(crates.id)).sort().join() === [ALBUM, TRACK].sort().join(), { what: "both in E2E Crates" });
     assert.deepEqual((await storage("taggedItems")).taggedItems[ALBUM].tags, albumCopy.tags);
-    // Un-starring in a collection: out of it only (still saved, still in Collection).
+    // Un-starring in one of its two collections: out of it only (still saved with its tags, still in Collection).
+    const trackTags = (await storage("taggedItems")).taggedItems[TRACK].tags;
     await starOf(page, TRACK).click();
     await starIs(page, TRACK, false);
     await waitSoon(async () => !(await membersOf(crates.id)).includes(TRACK), { what: "the track out of E2E Crates" });
-    assert.ok(await saved(TRACK), "still saved");
+    assert.deepEqual((await storage("taggedItems")).taggedItems[TRACK].tags, trackTags, "still saved, its tags kept");
     assert.ok((await membersOf(0)).includes(TRACK), "still in Collection");
     // All: filled when in any collection, drawn apart (still no reload).
     await chooseAll();

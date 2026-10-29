@@ -10,7 +10,8 @@
 // the server has them.
 //
 // All (Phase 9b) is a special mode, never the default: a star puts the item into every collection, a star is filled
-// when the item is in any, and un-starring deletes it (and its tags) from all of them.
+// when the item is in any, and un-starring deletes it (and its tags) from all of them. Every track is in at least one
+// collection: un-starring it in its last one deletes it too.
 
 import { change, read, rev } from "./itemsStore";
 import { splitOps, withoutOps } from "./membershipOps";
@@ -63,17 +64,15 @@ export function memberIndex(s) {
   return index;
 }
 
-// All's count, as the app counts All: every item, the extension's and those only in a collection (Other items).
-// Counted again only after a change (rev).
+// All's count: the tracks in any collection (Other items too), each once; with one collection, its count. No
+// collection known yet (the server never reached): the extension's items. Counted again only after a change (rev).
 let countedAt = null;
 let allCount = 0;
 export function allCountOf(s) {
   if (countedAt === rev()) return allCount;
-  let n = Object.keys(s.taggedItems).length;
-  memberIndex(s).forEach((_, id) => !(id in s.taggedItems) && n++);
+  allCount = cacheOf(s).list.length ? memberIndex(s).size : Object.keys(s.taggedItems).length;
   countedAt = rev();
-  allCount = n;
-  return n;
+  return allCount;
 }
 
 /** `ops` applied to `members` (a copy). */
@@ -110,30 +109,54 @@ export function queueMembership(ops, writeItems = null, ids = []) {
   const { good, bad } = splitOps(ops);
   if (bad.length) console.warn("[collections] not queued (malformed):", bad);
   return change((s) => {
-    const values = {};
-    if (good.length) {
-      const cache = cacheOf(s);
-      values.pendingMembership = [...pendingOf(s), ...good];
-      values.collectionsCache = recount({ ...cache, members: applyOps(cache.members, good) });
-    }
+    const values = queued(s, good);
     const wrote = writeItems ? writeItems(s.taggedItems, s) !== false : false;
     return { values, changed: wrote ? ids.filter((id) => id in s.taggedItems) : [], result: { queued: good.length, dropped: bad.length } };
   });
 }
 
+// The values a queued change gives: the ops in the queue, and in the copy shown.
+function queued(s, ops) {
+  if (!ops.length) return {};
+  const cache = cacheOf(s);
+  return { pendingMembership: [...pendingOf(s), ...ops], collectionsCache: recount({ ...cache, members: applyOps(cache.members, ops) }) };
+}
+
+// An item deleted: gone from the items, from every collection in the copy shown, and from the ops still queued (the
+// server drops its memberships with it; a queued add would show it again until sent).
+function forget(s, id) {
+  const had = id in s.taggedItems;
+  delete s.taggedItems[id];
+  const values = {};
+  if ((memberIndex(s).get(id) || []).length) {
+    const cache = cacheOf(s);
+    const members = {};
+    Object.entries(cache.members).forEach(([cid, ids]) => (members[cid] = ids.filter((i) => i !== id)));
+    values.collectionsCache = recount({ ...cache, members });
+  }
+  const pending = pendingOf(s);
+  if (pending.some((op) => op.ids.includes(id))) {
+    values.pendingMembership = pending.map((op) => ({ ...op, ids: op.ids.filter((i) => i !== id) })).filter((op) => op.ids.length);
+  }
+  return { deleted: had ? [id] : [], values };
+}
+
 /** Un-starring in All: the item and its tags go, and from every collection (the server drops its memberships with it). */
 export function removeItem(id) {
+  return change((s) => forget(s, id));
+}
+
+/**
+ * Un-starring in `collections` (the one shown): out of them, its tags kept; a track left in no collection is deleted
+ * with its tags (one change, sent as a deletion), as un-starring was before collections. Decided from the worker's
+ * own copy (a page's may be older). Resolves to {ok, deleted}.
+ */
+export function unstar(collections, id) {
+  const { good } = splitOps(collections.map((cid) => ({ op: "remove", collection_id: cid, ids: [id] })));
   return change((s) => {
-    const had = id in s.taggedItems;
-    delete s.taggedItems[id];
-    const cache = cacheOf(s);
-    const values = {};
-    if ((memberIndex(s).get(id) || []).length) {
-      const members = {};
-      Object.entries(cache.members).forEach(([cid, ids]) => (members[cid] = ids.filter((i) => i !== id)));
-      values.collectionsCache = recount({ ...cache, members });
-    }
-    return { deleted: had ? [id] : [], values };
+    const left = (memberIndex(s).get(id) || []).filter((c) => !collections.includes(c));
+    if (!left.length) return { ...forget(s, id), result: { ok: true, deleted: true } };
+    return { values: queued(s, good), result: { ok: true, deleted: false } };
   });
 }
 
