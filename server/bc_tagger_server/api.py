@@ -123,6 +123,11 @@ class ItemIdsBody(BaseModel):
     ids: list[str] = Field(max_length=20000)
 
 
+class RemoveItemsBody(ItemIdsBody):
+    delete_orphans: bool = False  # also delete the items this leaves in no collection
+    dry_run: bool = False  # change nothing: say what would be deleted
+
+
 class CommitBody(BaseModel):
     collection_id: int = 0
 
@@ -298,16 +303,16 @@ def create_app(service: Service | None = None) -> FastAPI:
         return _collection_call(svc.collection_update, collection_id, body.name, body.pos)
 
     @app.delete("/api/collections/{collection_id}")
-    def collections_delete(collection_id: int) -> dict:
-        return _collection_call(svc.collection_delete, collection_id)
+    def collections_delete(collection_id: int, delete_orphans: bool = False, dry_run: bool = False) -> dict:
+        return _collection_call(svc.collection_delete, collection_id, delete_orphans, dry_run)
 
     @app.post("/api/collections/{collection_id}/items")
     def collections_add(collection_id: int, body: ItemIdsBody) -> dict:
         return _collection_call(svc.collection_add, collection_id, body.ids)
 
     @app.delete("/api/collections/{collection_id}/items")
-    def collections_remove(collection_id: int, body: ItemIdsBody) -> dict:
-        return _collection_call(svc.collection_remove, collection_id, body.ids)
+    def collections_remove(collection_id: int, body: RemoveItemsBody) -> dict:
+        return _collection_call(svc.collection_remove, collection_id, body.ids, body.delete_orphans, body.dry_run)
 
     @app.get("/api/items/{item_id}")
     def item(item_id: str) -> dict:
@@ -554,6 +559,20 @@ def create_app(service: Service | None = None) -> FastAPI:
         from .collection import ack_adds
 
         return {"acked": ack_adds(svc.store, body.ids)}
+
+    @app.get("/api/tagger/pending-deletes")
+    def pending_deletes() -> list[dict]:
+        """Bandcamp items the app deleted, for the extension to delete too: ``[{delete_id, item_id}]``. Until
+        acked, each is a tombstone: ``POST /api/sync/items`` ignores the item."""
+        from .collection import pending_deletes as pending
+
+        return pending(svc.store)
+
+    @app.post("/api/tagger/pending-deletes/ack")
+    def pending_deletes_ack(body: AckBody) -> dict:
+        from .collection import ack_deletes
+
+        return {"acked": ack_deletes(svc.store, body.ids)}
 
     # -- ownership ---------------------------------------------------------------------
 

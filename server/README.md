@@ -225,9 +225,25 @@ ownership, previews and rekordbox stay per item.
   `PATCH /api/collections/<id> {name?, pos?}`; `DELETE /api/collections/<id>` (memberships only; 409 for 0);
   `POST /api/collections/<id>/items {ids}` → `{added, already, unknown}` (a copy); `DELETE …/items {ids}` →
   `{removed}`. Every item view has `collections: [ids]`. Names are unique (any case), trimmed, up to 100 characters.
+- **Tracks left in no collection** (the app's Remove from collection and Delete collection; the user's rule: All is
+  the union of the collections). Both calls take `dry_run` and `delete_orphans` (`DELETE …/items {ids, dry_run?,
+  delete_orphans?}`, `DELETE /api/collections/<id>?dry_run=…&delete_orphans=…`):
+  - `dry_run` changes nothing and returns `{would_delete: [{id, title, artist, kind: "bandcamp"|"other"}],
+    would_remove: n}`: the members it would take out, and those of them in no other collection.
+  - `delete_orphans` deletes those, in the same transaction, and the response adds `deleted_items: [ids]` and
+    `pending_deletes: [{delete_id, item_id}]` (the items route also has `deleted`, the same list; on the collection
+    route `deleted` was already the collection's id). Other items go on the server, with their locate results and
+    match decisions; files, previews and rekordbox stay. Bandcamp items leave the mirror (an unacked pending add or
+    tag edit for them is called off) and are queued for the extension: `GET /api/tagger/pending-deletes` →
+    `[{delete_id, item_id}]`, `POST /api/tagger/pending-deletes/ack {ids}`. The row keeps the item's data.
+  - Until acked, a pending delete is a **tombstone**: `POST /api/sync/items` ignores the item (a full sync or a stale
+    push): not re-created, not auto-added, and ops naming it are skipped (`skipped: [{index, op, collection_id,
+    reason: "deleted", ids}]`; the rest of the op applies). The response's `ignored: [ids]` names them. The ack ends
+    it, so a later star of the same track is a new item.
+  - Without the flags nothing is deleted: items left in no collection stay in All.
 - **Events:** SSE `collections` `{action: created|renamed|reordered|deleted|items, id, collection?, added?, removed?,
-  version}` from every path that changes the list or membership (the API, import commits, the extension's sync), and
-  `item` `{id}` for each membership change.
+  items_deleted?, version}` from every path that changes the list or membership (the API, import commits, the
+  extension's sync), and `item` `{id}` for each membership change and deleted item.
 - **For the extension:** `GET /api/collections/membership` → `{version, collections, members: {"<id>": [item ids by
   "#"]}}` in one read (15 KB for 1,090 members). `collections_version` (in `GET /api/health`, one row) goes up on any
   change to the collections or their members, whatever the path (triggers), and only then.
