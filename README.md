@@ -37,10 +37,11 @@ sync.
     - **Tools ▾**: maintenance (Refresh player files, Refresh thumbnails, Fix artists, Fix album IDs, Refresh
       ownership); **Columns ▾**.
   - The selection is kept in this browser across pages and reloads.
-  - **Collections** (Phase 8; shown once the server has them): the dropdown at the top lists **All** (every track,
-    once) and then each collection, with its count; the choice is kept in this browser, and `?collection=<id|all>`
-    opens one. **Create Collection** (a new, empty one), **Rename**, **Delete** (asks first; the tracks stay in All
-    and in other collections, and no file, preview or rekordbox entry is touched; "Collection" can't be deleted).
+  - **Collections** (Phase 8; shown once the server has them): the dropdown at the top lists **All** (every track
+    in a collection, once: the union, not a collection of its own) and then each collection, with its count; the choice is kept in this browser, and `?collection=<id|all>`
+    opens one. **Create Collection** (a new, empty one), **Rename**, **Delete** (asks first; the tracks stay in other
+    collections, and no file, preview or rekordbox entry is touched; "Collection" can't be deleted). A change made
+    elsewhere (a star on a Bandcamp page) puts its row in, or takes it out, at once.
     On the selection: **Import to Collection…** copies the tracks into another collection (and says how many were
     already there), **Remove from collection** (asks first; not in All). In All, a **Collections** column of chips
     (Columns ▾). Tags, files and everything else stay per track. An import's tracks go into the collection picked

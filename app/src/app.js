@@ -504,6 +504,7 @@ async function refreshHealth() {
     onView: (shown, total) => {
       statusFilter.onView(shown, total);
       updateShownButtons();
+      noteAllCount(); // in All, its count follows rows added or removed
     },
     onItemsUpdated: () => updateShownButtons(), // e.g. a selected item got located
   });

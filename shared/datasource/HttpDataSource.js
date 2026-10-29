@@ -64,7 +64,7 @@ export class HttpDataSource {
   }
 
   // Only these items (those the server just announced), in the collection shown: an id missing from the answer is
-  // gone from it.
+  // gone from it (deleted, or no longer in the collection shown; in All, in no collection).
   async getItemsById(ids) {
     return this._items(`ids=${ids.map(encodeURIComponent).join(",")}`);
   }
@@ -82,8 +82,12 @@ export class HttpDataSource {
     const list = Array.isArray(data) ? data : (data && data.items) || [];
     const items = {};
     this.sources = this.sources || {};
+    const shown = one ? Number(this.collection) : null;
     list.forEach((it) => {
       if (!it || it.id == null) return;
+      // In the collection shown (the server's answer says so; checked here too); All is the union of the collections,
+      // so an item in none isn't in it. (A server without collections lists none: everything, as before.)
+      if (Array.isArray(it.collections) && (one ? !it.collections.includes(shown) : !it.collections.length)) return;
       this.sources[it.id] = it.source || "bandcamp";
       if (pendingIds.has(it.id)) it._tagsPending = true;
       items[it.id] = it;

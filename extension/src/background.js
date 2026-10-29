@@ -252,7 +252,8 @@ function pageState(ids, since) {
   });
 }
 
-// The bundled collection page: the items of the collection shown (All: every item here), and the versions.
+// The bundled collection page: the items of the collection shown, or in All the items in any collection (the union;
+// no collection known yet: every item here), and the versions.
 function shownItems() {
   return read((s) => {
     const active = activeOf(s);
@@ -260,6 +261,10 @@ function shownItems() {
     if (active !== ALL && active != null) {
       items = {};
       ((s.collectionsCache.members || {})[String(active)] || []).forEach((id) => id in s.taggedItems && (items[id] = s.taggedItems[id]));
+    } else if (active === ALL && sortedList(s.collectionsCache).length) {
+      const index = memberIndex(s);
+      items = {};
+      Object.keys(s.taggedItems).forEach((id) => index.has(id) && (items[id] = s.taggedItems[id]));
     }
     return { rev: rev(), tagsRev: tagsRev(), active, items };
   });

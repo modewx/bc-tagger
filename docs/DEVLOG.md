@@ -254,6 +254,21 @@ npm run test:e2e                         # Playwright e2e: own profile, server :
 
 ### 2026-10-28
 
+- **The app's rows follow membership** (user: starred a track, saw it in the app, un-starred it, and the row stayed).
+  - The app tab was on All, which listed every item, in a collection or not: the un-starred track (in no
+    collection, under 610e554's rule) was still in it, so the patch kept its row.
+  - All is the union of the collections, in the app too: an item in none isn't in it (the full load and the row
+    patch alike; a server without collections lists none, so everything shows as before). In a collection, an item
+    whose `collections` lacks it is out of it (the server's answer says so; checked on the page too).
+  - So a patched item that's deleted, out of the collection shown, or (in All) in no collection loses its row; one
+    that joined gets a row at its "#" place; All's count in the dropdown follows the rows (the collections' counts
+    already follow the server's item events). The bundled See Collection page's All is the union too.
+  - With 4b6fbc9 an un-star in a track's last collection deletes it, so its row goes in any view. Tracks already in
+    no collection (one on the live data) stay as they are, out of All until starred again.
+  - e2e (new, 7.2 s): an app tab on Collection; a star on the album page puts the row in (where a full load puts it)
+    and the count up; un-starred, the row goes and the count comes back; then in All, a track taken out of its only
+    collection on the server leaves All and All's count.
+
 - **All is every collection at once ("*"), not a collection** (user: "when `All` is selected … operations apply to
   all collections. Tagging and adding tracks adds to all available collections; deleting deletes from all").
   - In All, any tag edit now puts the track into every collection it isn't in, a starred one too (9b left a

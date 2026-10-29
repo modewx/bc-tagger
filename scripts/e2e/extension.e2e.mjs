@@ -5364,3 +5364,51 @@ test("Collections in the extension: a track with no \"#\" that joins Collection 
     for (const back of putBack.reverse()) await back();
   }
 });
+
+test("local app on Collection: a track starred on a Bandcamp page shows up at its place, and goes when it's un-starred (its last collection: deleted); the counts follow", async () => {
+  await dropCollections();
+  const putBack = await tracksAside([TRACK]);
+  await extensionCaughtUp();
+  const app = await context.newPage();
+  const page = await context.newPage();
+  const selected = () => app.$eval("#collectionSelect", (s) => s.selectedOptions[0].textContent);
+  const selectedIs = (t) => app.waitForFunction((x) => document.getElementById("collectionSelect").selectedOptions[0].textContent === x, t, { timeout: 10000 });
+  try {
+    await app.goto(`${SERVER}/?collection=0`);
+    await app.waitForSelector("#collectionTable tbody tr[data-key]");
+    await app.waitForFunction(() => /extension connected/.test(document.getElementById("navExt").textContent));
+    const n = (await collectionsNow()).find((c) => c.id === 0).count;
+    await selectedIs(`Collection (${n})`);
+    assert.equal(await app.$(`tr[data-key="${TRACK}"]`), null);
+    await page.goto(ALBUM_URL);
+    await page.waitForSelector(`.tag-button[data-item-id="${TRACK}"]`, { timeout: 30000 });
+    // Starred: the app hears it from its server and puts the row in, where a full load puts it.
+    await starOf(page, TRACK).click();
+    await app.waitForSelector(`tr[data-key="${TRACK}"]`, { timeout: 10000 });
+    await selectedIs(`Collection (${n + 1})`);
+    const patched = await shownKeys(app);
+    await app.reload();
+    await app.waitForSelector(`tr[data-key="${TRACK}"]`);
+    assert.deepEqual(await shownKeys(app), patched, "the row at its place");
+    // Un-starred in its last collection: deleted, and the row goes.
+    await starOf(page, TRACK).click();
+    await app.waitForSelector(`tr[data-key="${TRACK}"]`, { state: "detached", timeout: 10000 });
+    await selectedIs(`Collection (${n})`);
+    // All is the union of the collections: starred again, then taken out of its only collection on the server (the
+    // app's Remove from collection), its row leaves All, and All's count follows.
+    await starOf(page, TRACK).click();
+    await waitSoon(async () => (await membersOf(0)).includes(TRACK), { what: "the track in Collection again" });
+    await app.selectOption("#collectionSelect", "all");
+    await app.waitForSelector(`tr[data-key="${TRACK}"]`);
+    const all = await app.$$eval("#collectionTable tbody tr[data-key]", (rs) => rs.length);
+    await selectedIs(`All (${all})`);
+    await app.evaluate((id) => fetch("/api/collections/0/items", { method: "DELETE", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ ids: [id] }) }), TRACK);
+    await app.waitForSelector(`tr[data-key="${TRACK}"]`, { state: "detached", timeout: 10000 });
+    await selectedIs(`All (${all - 1})`);
+  } finally {
+    await page.close();
+    await app.evaluate(() => localStorage.removeItem("bc_app_collection")).catch(() => {});
+    await app.close();
+    await putBack();
+  }
+});
