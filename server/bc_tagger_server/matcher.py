@@ -18,7 +18,8 @@ from urllib.parse import urlparse
 from rapidfuzz import fuzz
 
 from .items import album_name, album_url, bandcamp_host, is_album, item_url
-from .normalize import looks_like_label, norm, norm_title, numbers, strip_feat, strip_side, unslug
+from .normalize import (has_edition_hint, looks_like_label, norm, norm_title, numbers, strip_edition, strip_feat,
+                        strip_side, unslug)
 from .store import Store, now_iso
 
 # A located match within this distance of the best score counts as "the same track"
@@ -94,7 +95,8 @@ def _clean(values: Iterable[str | None]) -> list[str]:
 
 
 def _with_variants(titles: Iterable[str | None], artists: Iterable[str | None]) -> tuple[list[str], list[str]]:
-    """Add 'Artist - Title' splits and feat.-stripped forms to title/artist variants."""
+    """Add 'Artist - Title' splits, feat.-/side-stripped forms and edition-stripped forms (also composed:
+    'Glory (feat. X) (Bonus Digital)' -> 'Glory') to title/artist variants."""
     titles, artists = _clean(titles), _clean(artists)
     for t in list(titles):
         split = _split_artist_title(t)
@@ -104,7 +106,11 @@ def _with_variants(titles: Iterable[str | None], artists: Iterable[str | None]) 
             last = t.rsplit(" - ", 1)[-1].strip()  # "Dub Squad - Dub Squad - Blown Fruit"
             if last and last != split[1]:
                 titles.append(last)
-    titles = _clean(titles + [strip_feat(t) for t in titles] + [strip_side(t) for t in titles])
+    sides = [strip_side(t) for t in titles]
+    titles = _clean(titles + [strip_feat(t) for t in titles] + sides
+                    + [strip_feat(s) for s, t in zip(sides, titles) if s != t])  # "B1 Song (feat. X)" -> "Song"
+    if has_edition_hint("\n".join(titles)):  # one look per file at index build; most have none
+        titles = _clean(titles + [strip_edition(t) for t in titles])
     artists = _clean(artists + [strip_feat(a) for a in artists])
     return titles, artists
 

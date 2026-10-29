@@ -81,6 +81,41 @@ def strip_feat(s: str | None) -> str:
     return " ".join(_FEAT.sub(" ", s or "").split())
 
 
+# Edition-only qualifiers mark the same recording sold another way: "(Bonus Digital)", "[Bonus Track]",
+# "(Bandcamp Exclusive)", "(Digital Only)", "(Explicit)", "(Remastered 2011)", "- 2011 Remaster". A bracket (or a
+# " - " suffix) of these words alone, with at least one marker, is dropped. Version qualifiers (Remix, Edit, Dub,
+# VIP, Live, Instrumental, Extended, Rework, Bootleg, "Mix") are a different recording: never dropped.
+_EDITION_MARKERS = {"bonus", "exclusive", "only", "explicit", "remaster", "remastered"}
+_EDITION_WORDS = _EDITION_MARKERS | {"digital", "bandcamp", "cd", "vinyl", "track", "tracks", "cut", "version"}
+_BRACKETED = re.compile(r"\s*[\(\[]([^\(\)\[\]]*)[\)\]]")
+_DASH_SUFFIX = re.compile(r"\s+[-–]\s+([^-–]+)$")
+
+
+def has_edition_hint(s: str) -> bool:
+    """Whether ``s`` (one title, or several joined) might hold an edition qualifier: a quick first look (plain
+    substring checks: ten times faster than a case-insensitive regex, and it runs on every file at index build)."""
+    s = s.lower()
+    return "bonus" in s or "only" in s or "exclusive" in s or "explicit" in s or "remaster" in s
+
+
+def _is_edition(text: str) -> bool:
+    words = norm(text).split()
+    return (bool(words) and any(w in _EDITION_MARKERS for w in words)
+            and all(w in _EDITION_WORDS or (len(w) == 4 and w.isdigit()) for w in words))
+
+
+def strip_edition(s: str | None) -> str:
+    """'Close Enemies (Bonus Digital)' -> 'Close Enemies', 'Song - 2011 Remaster' -> 'Song'; 'Song (X Remix)'
+    stays. Never strips a title to nothing. Not memoized: it runs on every file title at index build (mostly
+    unique strings), and the keyword look below is cheaper than a cache lookup."""
+    s = s or ""
+    if not has_edition_hint(s):
+        return s
+    out = _BRACKETED.sub(lambda m: " " if _is_edition(m.group(1)) else m.group(0), s)
+    out = _DASH_SUFFIX.sub(lambda m: "" if _is_edition(m.group(1)) else m.group(0), out.rstrip())
+    return " ".join(out.split()) or s
+
+
 def unslug(s: str | None) -> str:
     return _SLUG_SEP.sub(" ", s or "").strip()
 

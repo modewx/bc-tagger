@@ -344,6 +344,26 @@ playlists; a tag with no playlists isn't exported.
 | `Genres/Acid` | `/<playlist_folder>/Genres/Acid` |
 | `/DJ/Status/Must` | that path from the library root |
 
+Each rekordbox library has its own mapping in `playlist_mappings` (the source of truth):
+
+```
+playlist_mappings: {
+  "test": {"folder": str, "mode": "auto"|"custom", "map": {tag: [playlist, ...]},
+           "saved": {<folder>: {"mode": ..., "map": {...}}}},
+  "main": { ...same... }
+}
+```
+
+An export (dry run, the confirm, `tag_playlists`, a name lookup with `?target=`, the item views' playlist
+marks) uses the entry of the library it goes to or reads. `saved` keeps a mapping per Target folder for the UI
+(the server only validates and stores it). Validation: libraries `test`/`main` only, folder names trimmed and not
+empty, mode `auto`/`custom`, maps cleaned as `tag_playlist_map`; anything else is a 400 naming the spot. A PUT of
+`playlist_mappings` replaces only the libraries it names. The flat `playlist_folder` / `tag_playlist_mode` /
+`tag_playlist_map` stay as aliases of the library in use (`rekordbox_target`): read, they show its entry; written
+without `playlist_mappings`, they edit it (after any target switch in the same PUT). Settings from before are
+migrated: both libraries start from the flat keys, with nothing saved. `derived.mapping_warnings` has a warning
+per library (`mapping_warning`: the one in use).
+
 Missing playlists and folders are created. A name that resolves to a smart playlist, a folder,
 or two entries with the same name is an error, and nothing is written. A track gets the union of
 the playlists of all its tags. `./bct rb-playlists` (or `GET /api/rekordbox/playlists`) lists the
@@ -411,6 +431,12 @@ If you use rekordbox Cloud Library Sync, turn it off before opening the test lib
   Titles whose numbers differ ("Part 2" vs "Part 3", "File #1" vs "File #2") never match.
   Compilation titles like "Artist - Title" are split. If the artist clearly differs, a match can only
   be a candidate.
+- Edition-only qualifiers are a title variant on both sides (items and files): "(Bonus Digital)", "[Bonus
+  Track]", "(Bandcamp Exclusive)", "(Digital Only)", "(Explicit)", "(Remastered 2011)", "- 2011 Remaster"
+  (`normalize.strip_edition`), also composed with feat.- and vinyl-side stripping ("Glory to the Highest
+  (feat. The Eternal) (Bonus Digital)" → "Glory to the Highest"). A match on them keeps full confidence.
+  Version qualifiers (Remix, Edit, Dub, VIP, Live, Instrumental, Extended, Rework, Bootleg, any other "Mix")
+  are a different recording and stay.
 - Album items match whole release folders and expand to every track in the folder.
 - Matches at or above `match_threshold` are accepted. If several are within 0.1 of the best (the same
   track in several formats), the format preference picks one, so AIFF beats MP3. Lower scores

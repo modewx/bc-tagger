@@ -282,6 +282,20 @@ Tests never touch Bandcamp, the music drive or a real rekordbox library: Bandcam
     commit writes. `POST /api/matches/{id}/set-file {path}`; `DELETE /api/matches/{id}/confirm` goes back to
     automatic.
   - Item views say `local.manual`. The file stays through later scans and locates.
+- **Auto-locate ignores edition-only suffixes (user: "improve the autolocate … Though lest also focus on it being
+  as fast as it is now"):**
+  - "Close Enemies (Bonus Digital)" now finds "15 Close Enemies.aiff". The suffixes covered include Bonus Track,
+    Bandcamp Exclusive, Digital Only, Explicit and Remastered, also combined with "feat.".
+  - Version suffixes (Remix, Edit, Dub, Live, Instrumental, …) still mean another recording.
+  - On a copy of the live database: three Chino Amobi bonus tracks went from missing to located, and nothing else
+    changed its match. Index build is 1–4% slower and a full locate 2–3% slower.
+  - Tried and left out: treating any trailing "(…)" as a possible match. On the real collection it only
+    suggested other versions or noise.
+- **Playlist mappings per rekordbox library (user: "mappings should be per collection so when I select `Test
+  Library` vs `Main Library` both may have different target folders saved"):**
+  - `playlist_mappings` holds a folder, a mode, a map and the saved per-folder mappings for each of Test and Main.
+  - An export uses the mapping of the library it goes to. Existing settings start both libraries from the
+    current mapping. The old single keys keep working as the mapping of the library in use.
 
 ## App and extension (`app/`, `extension/`, `shared/`, branch `claude/local-collection-ui-e8f6f6`)
 

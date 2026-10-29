@@ -106,22 +106,31 @@ class Service:
     def test_db_path(self) -> str:
         return str(Path(self.settings.get("rekordbox_db_path")).expanduser())
 
-    def playlist_rule(self):
+    def playlist_mapping(self, library: str | None = None) -> dict[str, Any]:
+        """A rekordbox library's tag → playlist mapping, ``{folder, mode, map, saved}`` (``playlist_mappings``);
+        ``library`` "test"/"main", default the one in use (``rekordbox_target``)."""
+        mappings = self.settings.get("playlist_mappings")
+        return mappings[library or self.settings.get("rekordbox_target")]
+
+    def playlist_rule(self, library: str | None = None):
+        """tag → canonical playlist keys under ``library``'s mapping (default: the library in use)."""
         from .playlists import playlists_for_tag
 
-        s = self.settings.all()
-        return lambda tag: playlists_for_tag(tag, s["tag_playlist_mode"], s["tag_playlist_map"], s["playlist_folder"])
+        m = self.playlist_mapping(library)
+        return lambda tag: playlists_for_tag(tag, m["mode"], m["map"], m["folder"])
 
     def settings_derived(self) -> dict[str, Any]:
         from .playlists import mapping_warning
 
         s = self.settings.all()
+        warnings = {lib: mapping_warning(m["mode"], m["map"]) for lib, m in s["playlist_mappings"].items()}
         return {
             "target": s["rekordbox_target"],
             # main chosen but writing to it not allowed: reads work, exports stop at the dry run
             "main_writes_locked": s["rekordbox_target"] == "main" and not s["allow_main_writes"],
             "target_db_path": self.db_path(),
-            "mapping_warning": mapping_warning(s["tag_playlist_mode"], s["tag_playlist_map"]),
+            "mapping_warning": warnings[s["rekordbox_target"]],  # the library in use
+            "mapping_warnings": warnings,  # per library
         }
 
     def list_items(
@@ -347,10 +356,10 @@ class Service:
             queue_add(self.store, tags=created)
         return {"created": created, "existing": [t for t in wanted if t in vocab], "tags": vocab + created}
 
-    def tag_playlists(self, tags: list[str]) -> list[dict[str, Any]]:
-        """Where each tag goes in rekordbox under the collection's mapping: ``[{tag, new, playlists}]``
-        (``new``: not in the tag list yet; ``playlists: []``: not exported)."""
-        vocab, rule = set(self.store.get_tags()), self.playlist_rule()
+    def tag_playlists(self, tags: list[str], library: str | None = None) -> list[dict[str, Any]]:
+        """Where each tag goes in rekordbox under ``library``'s mapping (default: the library in use):
+        ``[{tag, new, playlists}]`` (``new``: not in the tag list yet; ``playlists: []``: not exported)."""
+        vocab, rule = set(self.store.get_tags()), self.playlist_rule(library)
         return [{"tag": t, "new": t not in vocab, "playlists": rule(t)} for t in tags]
 
     def sync_tags(self, tags: list[str]) -> dict[str, Any]:
@@ -788,7 +797,7 @@ class Service:
         else:
             items = self.select_located(ids=ids, latest=latest, ctx=ctx, scan=scan)
             scan_stats = self.last_prepare
-        selection = build_selection(self.store, items, self.store.get_tags(), self.playlist_rule())
+        selection = build_selection(self.store, items, self.store.get_tags(), self.playlist_rule(target.kind))
         selection.skipped += missing
         progress = (lambda cur, tot, msg: ctx.progress(cur, tot, msg)) if ctx else None
         diff = export(
@@ -796,7 +805,7 @@ class Service:
             target,
             selection,
             dry_run=dry_run,
-            folder_name=self.settings.get("playlist_folder"),
+            folder_name=self.playlist_mapping(target.kind)["folder"],  # the library exported to: its own mapping
             file_meta=self.file_meta(selection.tracks),
             progress=progress,
             expect=expect,
@@ -809,7 +818,7 @@ class Service:
         elif confirm_token:
             with self.store.tx() as c:
                 c.execute("UPDATE confirm_tokens SET used_at = ? WHERE token = ?", (now_iso(), confirm_token))
-        diff["tag_playlists"] = self.tag_playlists(selection.tag_order)
+        diff["tag_playlists"] = self.tag_playlists(selection.tag_order, target.kind)
         diff["new_tags"] = [t["tag"] for t in diff["tag_playlists"] if t["new"]]
         if rows is not None:
             diff["rows"] = True
@@ -842,8 +851,8 @@ class Service:
         from .playlists import PlaylistError, Tree, key_of, name_to_parts
         from .rbguard import close_database
 
-        folder = self.settings.get("playlist_folder")
         db = self.read_target(target).open_read()
+        folder = self.playlist_mapping(target)["folder"]  # the library read: its own folder
         try:
             tree = Tree(db)
             out = []
@@ -866,7 +875,7 @@ class Service:
         selection = build_selection(self.store, items, self.store.get_tags(), self.playlist_rule())
         result = write_xml(
             selection,
-            self.settings.get("playlist_folder"),
+            self.playlist_mapping()["folder"],
             self.file_meta(selection.tracks),
             self.settings.xml_output_dir(),
         )

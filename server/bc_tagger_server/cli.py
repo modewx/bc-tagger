@@ -183,9 +183,9 @@ def cmd_xml(svc: Service, args: argparse.Namespace) -> int:
 def cmd_rb_status(svc: Service, args: argparse.Namespace) -> int:
     from .rbexport import read_back
 
-    folder = svc.settings.get("playlist_folder")
     target = svc.target()
-    keys = sorted({k for t in svc.store.get_tags() for k in svc.playlist_rule()(t)})
+    folder = svc.playlist_mapping(target.kind)["folder"]
+    keys = sorted({k for t in svc.store.get_tags() for k in svc.playlist_rule(target.kind)(t)})
     state = read_back(target, folder, keys)
     state["guard"] = target.check().to_dict()
     lines = [

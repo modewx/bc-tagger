@@ -317,3 +317,69 @@ def test_date_tie_break_prefers_the_copy_made_after_tagging():
     assert locate_item(item, FileIndex([old]), CFG)["best"]["path"] == old["path"]
     mp3 = row("/s/new mp3/03 Song.mp3", "Song", "Artist", "Record", 3, fmt="mp3-320", created=tagged + 86400)
     assert locate_item(item, FileIndex([old, mp3]), CFG)["best"]["path"] == old["path"]
+
+
+def test_strip_edition_drops_edition_qualifiers_only():
+    from bc_tagger_server.normalize import strip_edition
+
+    for title in ("Close Enemies (Bonus Digital)", "Close Enemies (Digital Bonus)", "Close Enemies (Bonus Track)",
+                  "Close Enemies (Bonus)", "Close Enemies [Bonus Track]", "Close Enemies (Bandcamp Exclusive)",
+                  "Close Enemies (Digital Exclusive)", "Close Enemies (Digital Only)", "Close Enemies (Explicit)",
+                  "Close Enemies (Remastered)", "Close Enemies (Remaster 2011)", "Close Enemies (2011 Remaster)",
+                  "Close Enemies - 2011 Remaster", "Close Enemies (CD Only Bonus Track)"):
+        assert strip_edition(title) == "Close Enemies", title
+    for title in ("Song (X Remix)", "Song (Edit)", "Song (Dub)", "Song (VIP)", "Song (Extended Mix)", "Song (Live)",
+                  "Song (Instrumental)", "Song (Rework)", "Song (Bootleg)", "Song (Version)", "Song (Bonus Remix)",
+                  "Song (Only You)", "Song (Digital)", "Song - Remix", "Bonus Track"):
+        assert strip_edition(title) == title, title  # a different recording, or not a qualifier at all
+    assert strip_edition("(Bonus)") == "(Bonus)"  # never to nothing
+
+
+def test_title_variants_compose_feat_and_edition():
+    from bc_tagger_server.matcher import _with_variants
+
+    titles, _ = _with_variants(["Glory to the Highest (feat. The Eternal) (Bonus Digital)"], ["Chino Amobi"])
+    assert "Glory to the Highest" in titles and "Glory to the Highest (feat. The Eternal)" in titles
+    titles, _ = _with_variants(["B1 Song (Bonus Track) (feat. X)"], [])
+    assert "Song" in titles
+
+
+CHINO = "/s/soulseek/complete/Eroica II_ Christian Nihilism (2025)"
+CHINO_FILES = [
+    row(f"{CHINO}/11 Aristides.aiff", "Aristides", "Chino Amobi", "Eroica II: Christian Nihilism", 11),
+    row(f"{CHINO}/15 Close Enemies.aiff", "Close Enemies", "Chino Amobi", "Eroica II: Christian Nihilism", 15),
+    row(f"{CHINO}/16 Pleiades.aiff", "Pleiades", "Chino Amobi", "Eroica II: Christian Nihilism", 16),
+    row(f"{CHINO}/17 Glory to the Highest.aiff", "Glory to the Highest", "Chino Amobi feat. Chichi The Eternal",
+        "Eroica II: Christian Nihilism", 17),
+]
+
+
+@pytest.mark.parametrize("title, track, file", [
+    ("Aristides", 11, "11 Aristides.aiff"),
+    ("Close Enemies (Bonus Digital)", 15, "15 Close Enemies.aiff"),
+    ("Pleiades (Bonus Digital)", 16, "16 Pleiades.aiff"),
+    ("Glory to the Highest (feat. The Eternal) (Bonus Digital)", 17, "17 Glory to the Highest.aiff"),
+])
+def test_bonus_digital_tracks_locate_like_the_rest_of_the_album(title, track, file):
+    """Chino Amobi, "Eroica II: Christian Nihilism": Bandcamp's "(Bonus Digital)" tracks against plainly tagged files."""
+    item = {"id": "t1", "artist": "Chino Amobi", "title": title, "album_title": "Eroica II: Christian Nihilism",
+            "track_num": track}
+    r = locate_item(item, FileIndex(CHINO_FILES), CFG)
+    assert r["status"] == "located" and r["best"]["path"] == f"{CHINO}/{file}" and r["best"]["confidence"] == 1.0
+
+
+def test_edition_qualifiers_on_the_file_side_too():
+    f = row("/s/Artist - Record/03 Song (Bonus Track).aiff", "Song (Bonus Track)", "Artist", "Record", 3)
+    item = {"id": "t1", "artist": "Artist", "title": "Song", "album_title": "Record", "track_num": 3}
+    r = locate_item(item, FileIndex([f]), CFG)
+    assert r["status"] == "located" and r["best"]["path"] == f["path"]
+
+
+@pytest.mark.parametrize("item_title, file_title", [
+    ("Song (X Remix)", "Song"), ("Song", "Song (Extended Mix)"), ("Song (Bonus Remix)", "Song"),
+    ("Song (Instrumental)", "Song (Bonus Track)"), ("Song (Live)", "Song (Remastered)"),
+])
+def test_version_qualifiers_still_mark_another_recording(item_title, file_title):
+    f = row(f"/s/Artist - Record/03 {file_title}.aiff", file_title, "Artist", "Record", 3)
+    item = {"id": "t1", "artist": "Artist", "title": item_title, "album_title": "Record", "track_num": 3}
+    assert locate_item(item, FileIndex([f]), CFG)["status"] != "located"

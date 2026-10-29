@@ -76,6 +76,11 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     #   "Name" = inside playlist_folder, "a/b" = path below playlist_folder, "/a/b" = from the root.
     "tag_playlist_mode": "auto",
     "tag_playlist_map": {},
+    # Per rekordbox library (PLAYLIST_LIBRARIES), the source of truth for the three above: {library: {"folder",
+    # "mode", "map", "saved": {<folder>: {"mode", "map"}}}}. An export to a library uses its own entry; the three
+    # keys above read (and, written without this one, edit) the entry of the library in use (rekordbox_target).
+    # A library missing here (settings from before) is built from them.
+    "playlist_mappings": {},
     "server_port": DEFAULT_PORT,
     "cookies_file": str(DEFAULT_COOKIES_FILE),
     "bandcamp_username": "herrasti",
@@ -132,6 +137,8 @@ DEFAULT_SETTINGS: dict[str, Any] = {
 
 # Keys the API refuses to change (they are safety-relevant or derived).
 READ_ONLY_KEYS: set[str] = set()
+PLAYLIST_LIBRARIES = ("test", "main")  # playlist_mappings' keys: more rekordbox libraries can join later
+FLAT_PLAYLIST_KEYS = {"playlist_folder", "tag_playlist_mode", "tag_playlist_map"}
 # Bumped when a stored default changes meaning; files from before are migrated on load.
 # 2: bandcamp_request_interval_s default 2.5 → 1.0.
 # 3: preview_cache_gb default 3 → 3.5.
@@ -207,7 +214,88 @@ def import_log_dir_problem(folder: Path, roots: list[str], resolve: bool = True)
     return None
 
 
-def _validate(merged: dict[str, Any]) -> dict[str, Any]:
+def _clean_playlist_map(mapping: Any, where: str) -> dict[str, list[str]]:
+    """``{tag: [playlist, ...]}``: a single name becomes a list, names are trimmed and checked, blanks and repeats
+    dropped."""
+    if not isinstance(mapping, dict):
+        raise SettingsError(f"{where} must be an object {{tag: [playlist, ...]}}")
+    clean_map: dict[str, list[str]] = {}
+    for tag, names in mapping.items():
+        if isinstance(names, str):
+            names = [names]
+        if not isinstance(names, list) or not all(isinstance(n, str) for n in names):
+            raise SettingsError(f"{where}[{tag!r}] must be a list of playlist names")
+        cleaned = []
+        for n in names:
+            n = n.strip()
+            if not n:
+                continue
+            try:
+                check_playlist_name(n)
+            except SettingsError as e:
+                raise SettingsError(f"{where}[{tag!r}]: {e}") from None
+            if n not in cleaned:
+                cleaned.append(n)
+        clean_map[str(tag)] = cleaned
+    return clean_map
+
+
+def _folder_name(value: Any, where: str) -> str:
+    if not isinstance(value, str) or not value.strip():
+        raise SettingsError(f"{where} must be a folder name (not empty)")
+    return value.strip()
+
+
+def _playlist_mode(value: Any, where: str) -> str:
+    if value not in ("auto", "custom"):
+        raise SettingsError(f"{where} must be 'auto' or 'custom'")
+    return value
+
+
+def _playlist_mappings(out: dict[str, Any], flat_edit: bool) -> dict[str, Any]:
+    """``playlist_mappings``, validated. A library missing from it (settings from before it existed) is built
+    from the flat keys; with ``flat_edit`` (a client wrote the flat keys, not this) they become the folder, mode and
+    map of the library in use."""
+    raw = out.get("playlist_mappings")
+    raw = {} if raw is None else raw
+    if not isinstance(raw, dict):
+        raise SettingsError("playlist_mappings must be an object {library: {folder, mode, map, saved}}")
+    unknown = set(raw) - set(PLAYLIST_LIBRARIES)
+    if unknown:
+        raise SettingsError(f"playlist_mappings: unknown libraries {sorted(unknown)} (known: {', '.join(PLAYLIST_LIBRARIES)})")
+    flat = {"folder": out["playlist_folder"], "mode": out["tag_playlist_mode"], "map": out["tag_playlist_map"]}
+    result: dict[str, Any] = {}
+    for lib in PLAYLIST_LIBRARIES:
+        where = f"playlist_mappings[{lib!r}]"
+        entry = raw.get(lib)
+        if entry is None:
+            entry = {**flat, "saved": {}}
+        elif not isinstance(entry, dict):
+            raise SettingsError(f"{where} must be an object {{folder, mode, map, saved}}")
+        elif flat_edit and lib == out["rekordbox_target"]:
+            entry = {**entry, **flat}
+        extra = set(entry) - {"folder", "mode", "map", "saved"}
+        if extra:
+            raise SettingsError(f"{where}: unknown keys {sorted(extra)}")
+        saved_raw = {} if entry.get("saved") is None else entry["saved"]
+        if not isinstance(saved_raw, dict):
+            raise SettingsError(f"{where}.saved must be an object {{folder: {{mode, map}}}}")
+        saved: dict[str, Any] = {}
+        for name, kept in saved_raw.items():
+            folder = _folder_name(name, f"{where}.saved: a folder name")
+            if not isinstance(kept, dict) or set(kept) - {"mode", "map"}:
+                raise SettingsError(f"{where}.saved[{folder!r}] must be an object {{mode, map}}")
+            saved[folder] = {"mode": _playlist_mode(kept.get("mode"), f"{where}.saved[{folder!r}].mode"),
+                             "map": _clean_playlist_map({} if kept.get("map") is None else kept["map"],
+                                                        f"{where}.saved[{folder!r}].map")}
+        result[lib] = {"folder": _folder_name(entry.get("folder"), f"{where}.folder"),
+                       "mode": _playlist_mode(entry.get("mode"), f"{where}.mode"),
+                       "map": _clean_playlist_map({} if entry.get("map") is None else entry["map"], f"{where}.map"),
+                       "saved": saved}
+    return result
+
+
+def _validate(merged: dict[str, Any], flat_edit: bool = False) -> dict[str, Any]:
     out = dict(merged)
     out["settings_version"] = SETTINGS_VERSION
     out["watch_roots"] = bool(out.get("watch_roots"))
@@ -319,27 +407,12 @@ def _validate(merged: dict[str, Any]) -> dict[str, Any]:
         raise SettingsError("allow_main_writes must be true or false")
     if not isinstance(out.get("rekordbox_main_db_path"), str) or not out["rekordbox_main_db_path"].strip():
         raise SettingsError("rekordbox_main_db_path must be a path")
-    if out.get("tag_playlist_mode") not in ("auto", "custom"):
-        raise SettingsError("tag_playlist_mode must be 'auto' or 'custom'")
-    mapping = out.get("tag_playlist_map")
-    if not isinstance(mapping, dict):
-        raise SettingsError("tag_playlist_map must be an object {tag: [playlist, ...]}")
-    clean_map: dict[str, list[str]] = {}
-    for tag, names in mapping.items():
-        if isinstance(names, str):
-            names = [names]
-        if not isinstance(names, list) or not all(isinstance(n, str) for n in names):
-            raise SettingsError(f"tag_playlist_map[{tag!r}] must be a list of playlist names")
-        cleaned = []
-        for n in names:
-            n = n.strip()
-            if not n:
-                continue
-            check_playlist_name(n)
-            if n not in cleaned:
-                cleaned.append(n)
-        clean_map[str(tag)] = cleaned
-    out["tag_playlist_map"] = clean_map
+    _playlist_mode(out.get("tag_playlist_mode"), "tag_playlist_mode")
+    out["tag_playlist_map"] = _clean_playlist_map(out.get("tag_playlist_map"), "tag_playlist_map")
+    out["playlist_mappings"] = _playlist_mappings(out, flat_edit)
+    in_use = out["playlist_mappings"][out["rekordbox_target"]]  # the flat keys mirror the library in use
+    out["playlist_folder"], out["tag_playlist_mode"] = in_use["folder"], in_use["mode"]
+    out["tag_playlist_map"] = copy.deepcopy(in_use["map"])
     pref = out.get("format_preference")
     if not isinstance(pref, list) or not all(isinstance(p, str) for p in pref):
         raise SettingsError("format_preference must be a list of strings")
@@ -399,7 +472,11 @@ class Settings:
             raise SettingsError(f"read-only settings: {sorted(blocked)}")
         with self._lock:
             changes = dict(changes)
-            merged = _validate({**self._fresh(), **changes})
+            fresh = self._fresh()
+            if isinstance(changes.get("playlist_mappings"), dict):  # per library: the ones not sent stay
+                changes["playlist_mappings"] = {**fresh["playlist_mappings"], **changes["playlist_mappings"]}
+            flat_edit = "playlist_mappings" not in changes and bool(changes.keys() & FLAT_PLAYLIST_KEYS)
+            merged = _validate({**fresh, **changes}, flat_edit)
             if "downloads_dir" in changes:
                 _check_downloads_dir(merged)
             if changes.keys() & {"import_log_dir", "owned_root", "not_owned_roots", "extra_roots", "downloads_dir"}:
