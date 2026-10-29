@@ -140,14 +140,36 @@ async function queuedOps() {
 }
 
 // POST /api/sync/items with the queued ops; a 422 with ops attached: the items again without them (membershipOps.js).
-function syncItems(body, ops, timeoutMs) {
+// The server's answer lists the items it ignored (`ignored`: the app deleted them, this extension hasn't yet): their
+// deletes are fetched and applied now.
+async function syncItems(body, ops, timeoutMs) {
   const post = (b) => api("/api/sync/items", { method: "POST", body: b, ...(timeoutMs ? { timeoutMs } : {}) });
-  return postWithOps(post, body, ops, { accept: acceptOps, drop: dropOps });
+  const res = await postWithOps(post, body, ops, { accept: acceptOps, drop: dropOps });
+  if (res && Array.isArray(res.ignored) && res.ignored.length) pullPendingDeletes().catch(() => {});
+  return res;
+}
+
+// Syncs under way, from reading the items to the server's answer. A pending delete is acked only after them: one
+// built before the item was deleted here would bring it back once the ack lifts the server's tombstone.
+const syncing = new Set();
+async function whileSyncing(fn) {
+  const run = Promise.resolve().then(fn);
+  const settled = run.catch(() => {});
+  syncing.add(settled);
+  try {
+    return await run;
+  } finally {
+    syncing.delete(settled);
+  }
 }
 
 // Membership changes made here ride on the item push (a new item and its collection together: the server would
 // otherwise put the item into the first collection), or go on their own; the server applies them after the items.
-async function pushPending() {
+function pushPending() {
+  return whileSyncing(pushBatch);
+}
+
+async function pushBatch() {
   const batch = pending;
   pending = { ids: new Set(), tags: false };
   // The items as they are now (an item changed again since is sent once, as it is).
@@ -183,6 +205,10 @@ async function pushPending() {
 export async function fullSync(reason, { force = false } = {}) {
   // Tracks the app deleted first: a full sync must never send them back.
   await pullPendingDeletes().catch((e) => console.warn("[sync] pending deletes failed", e.message));
+  return whileSyncing(() => sendAll(reason, force));
+}
+
+async function sendAll(reason, force) {
   const { items, tags } = await read((s) => ({ items: s.taggedItems, tags: s.tags }));
   const count = Object.keys(items).length;
   let full = true;
@@ -297,7 +323,10 @@ export async function pullPendingDeletes() {
     throw e;
   }
   if (!Array.isArray(list) || !list.length) return { deleted: 0 };
+  // Deleted here first, then any sync built before that has its answer, then the ack (so the next one can't carry
+  // them).
   await removeItems(list.map((d) => d.item_id).filter(Boolean));
+  await Promise.all([...syncing]);
   await api("/api/tagger/pending-deletes/ack", { method: "POST", body: { ids: list.map((d) => d.delete_id) } });
   await setStatus({ lastPendingDeletesAt: Date.now(), lastPendingDeletes: list.length });
   return { deleted: list.length };

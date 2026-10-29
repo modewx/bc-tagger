@@ -267,6 +267,12 @@ npm run test:e2e                         # Playwright e2e: own profile, server :
 
 ### 2026-10-28
 
+- **Merged Session A's server half of the deletions** (`36de763`: dry run, `delete_orphans`, tombstones, pending
+  deletes; 271 backend tests). The worker deletes locally, waits for any sync it built before that to be answered,
+  and only then acks (an older sync sent after the ack would bring the item back); a sync answer naming `ignored`
+  items (tombstoned) makes it fetch and apply the pending deletes at once. The two delete e2e tests pass on it
+  (3.9 s and 3.1 s).
+
 - **Remove from collection and Delete collection delete the tracks they leave in no collection; no confirmations
   in the extension** (user, 2026-10-28; contract in LOCAL_COLLECTION_PLAN.md, server half by Session A).
   - The app asks the server first (`dry_run`; only once the server has pending deletes, since an older one would
