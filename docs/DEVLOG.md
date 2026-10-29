@@ -267,6 +267,21 @@ npm run test:e2e                         # Playwright e2e: own profile, server :
 
 ### 2026-10-28
 
+- **"Now playing" tagger on album pages** (user: an annotator right below the player for whatever track is played).
+  - A box right after the player, above the buy block ("Now playing: 9. Holo Law", then the star and tags), for the
+    track the player has loaded (the first before any play). It follows the player's title link and title (what
+    Bandcamp's player changes on next, previous, a row's play and the end of a track; matched to the track through
+    the page's `trackinfo`) and its media events, 150 ms debounced. A tab in the background only notes a change and
+    redraws the box when it's shown or focused.
+  - It's that track's item, like its row: same id, same change through the worker. A star or tag in either shows in
+    the other at once, from the page's own state. Its star is `data-now-id` (the row's stays the only
+    `data-item-id`), its dropdown `#bct-now-tagger`. Single-track pages have no second box: theirs is below the
+    player already.
+  - e2e (1.4 s): the recorded album page (now with the player's title link, title and previous/next, as on
+    Bandcamp) and a stand-in for Bandcamp's player script: the box after the player and before the buy block; it
+    follows next, previous, a row's play and an `ended`; a star in it fills the row's, a tag picked in the row shows
+    in it, un-starring the row empties it.
+
 - **The tag box on a single's track page** (user: none on e.g. a one-track page, "no space to the right").
   - It wasn't there at all: a single (on no album) has no ".fromAlbum", and the content script read its innerHTML
     unguarded, so it stopped before making any widget (checked on the coordinator's saved copy of that page: the

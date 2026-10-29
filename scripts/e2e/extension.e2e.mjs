@@ -1312,6 +1312,69 @@ test("track page of a single (one-track player, no album): the tag box is below 
   }
 });
 
+test("album page: a now-playing tag box below the player follows the track it has loaded (next, previous, a row's play, the end of a track), the same item as that track's row (a star or a tag in either shows in both)", async () => {
+  const holo = "t3738475288";
+  const putBack = await tracksAside([holo]);
+  const page = await context.newPage();
+  try {
+    await page.goto("https://infiniteexpanse.bandcamp.com/album/synergy-trilogy");
+    await page.waitForSelector(".tagger-container.bct-now .chosen-container", { timeout: 30000 });
+    // Bandcamp's player, as far as the tagger sees it (the recorded page has no player script): it shows the loaded
+    // track's title and link, and moves on with next, previous, a row's play and the end of a track.
+    await page.evaluate(() => {
+      const tracks = [...document.querySelectorAll(".track_row_view .title a")].map((a) => ({ href: a.getAttribute("href"), title: a.textContent.trim() }));
+      const audio = document.body.appendChild(document.createElement("audio"));
+      let i = 0;
+      const show = (n) => {
+        i = Math.max(0, Math.min(n, tracks.length - 1));
+        const link = document.querySelector(".inline_player a.title_link");
+        link.setAttribute("href", tracks[i].href);
+        link.querySelector(".title").textContent = tracks[i].title;
+      };
+      document.querySelector(".nextbutton").parentElement.addEventListener("click", () => show(i + 1));
+      document.querySelector(".prevbutton").parentElement.addEventListener("click", () => show(i - 1));
+      document.querySelectorAll(".track_row_view .play-col a").forEach((a, n) => a.addEventListener("click", () => show(n)));
+      audio.addEventListener("ended", () => show(i + 1));
+      window.__ended = () => audio.dispatchEvent(new Event("ended"));
+    });
+    const now = () => page.evaluate(() => {
+      const box = document.querySelector(".tagger-container.bct-now");
+      return { label: box.querySelector(".bct-now-label").textContent, id: box.querySelector(".tag-button").dataset.nowId, after: box.previousElementSibling.classList.contains("inline_player"), before: box.nextElementSibling.classList.contains("tralbumCommands") };
+    });
+    const press = (sel) => page.locator(sel).dispatchEvent("click"); // (the recorded page's controls have no size)
+    const nowIs = (label) => page.waitForFunction((l) => (document.querySelector(".tagger-container.bct-now .bct-now-label") || {}).textContent === l, label, { timeout: 5000 });
+    assert.deepEqual(await now(), { label: "Now playing: 8. E2E stand-in track", id: "t3738475200", after: true, before: true });
+    await press(".nextbutton");
+    await nowIs("Now playing: 9. Holo Law");
+    await press(".prevbutton");
+    await nowIs("Now playing: 8. E2E stand-in track");
+    await press(".track_row_view:nth-child(2) .play-col .play_status");
+    await nowIs("Now playing: 9. Holo Law");
+    await press(".prevbutton");
+    await nowIs("Now playing: 8. E2E stand-in track");
+    await page.evaluate(() => window.__ended());
+    await nowIs("Now playing: 9. Holo Law");
+    assert.equal((await now()).id, holo);
+    // The same item as Holo Law's row: a star in the box fills the row's; a tag picked in the row shows in the box.
+    const rowStar = `.tag-button[data-item-id="${holo}"]`;
+    const boxStar = `.tag-button[data-now-id="${holo}"]`;
+    const filled = (sel) => page.$eval(sel, (b) => b.textContent.trim() === "★");
+    await page.click(boxStar);
+    await page.waitForFunction((s) => document.querySelector(s).textContent.trim() === "★", rowStar, { timeout: 5000 });
+    await page.click(`#tagger_${holo} + .chosen-container`);
+    const tag = await page.$eval(`#tagger_${holo} + .chosen-container .chosen-results li.active-result`, (li) => li.textContent.trim());
+    await page.click(`#tagger_${holo} + .chosen-container .chosen-results li.active-result`);
+    await page.waitForFunction((t) => [...document.querySelector("#bct-now-tagger").selectedOptions].some((o) => o.value === t), tag, { timeout: 5000 });
+    // Un-starred in the row (its last collection: deleted): the box's star empties too.
+    await page.click(rowStar);
+    await page.waitForFunction((s) => document.querySelector(s).textContent.trim() === "☆", boxStar, { timeout: 5000 });
+    assert.equal(await filled(rowStar), false);
+  } finally {
+    await page.close();
+    await putBack();
+  }
+});
+
 test("album page: the header widget is the album item; track rows never touch it (recorded album page)", async () => {
   const albumId = "a563830364"; // Synergy Trilogy (in the imported export)
   const trackId = "t3738475288"; // Holo Law, one of its tracks

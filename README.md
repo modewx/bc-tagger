@@ -166,6 +166,9 @@ server/bct serve     # local server + app on http://127.0.0.1:8765
   (the extension never asks: only the app confirms deletions). All's count is the tracks in any collection (with one collection, its
   count). New collection… makes it on the server (the app shows it at once; one made in the app reaches the extension through an open app tab, else at the next check). Starring works
   with the server off: the changes go when it's back. The built-in See Collection page shows the chosen collection.
+- **Now playing** (album pages): a tag box right below the player, for the track it has loaded, follows it (next,
+  previous, a row's play, the end of a track); it's the same track as its row, and a star or tag in either shows in
+  both.
 - **Copy timings** (popup) copies how long the last 100 tagger actions took (star, un-star, tags; on Bandcamp pages
   and both collection pages): to the screen, the wait before the write, the write and the push, with the page,
   its widgets and the Bandcamp tabs open. Paste it into a message when it's slow.

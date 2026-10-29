@@ -330,10 +330,18 @@ function setStarClass(tagButton) {
       : "";
 }
 const redrawStars = () =>
-  document.querySelectorAll(".tag-button[data-item-id]").forEach((b) => {
-    setStar(b, starred(b.dataset.itemId));
+  document.querySelectorAll(".tag-button[data-item-id], .tag-button[data-now-id]").forEach((b) => {
+    setStar(b, starred(b.dataset.itemId || b.dataset.nowId));
     setStarClass(b);
   });
+// Every widget of `id` (its row, and the now-playing box when it shows that track) as the page's state has it, so a
+// change made in one shows in the other at once: the stars, and with `tags` the dropdowns (all but `from`).
+function mirror(id, tags = null, from = null) {
+  document.querySelectorAll(`.tag-button[data-item-id="${id}"], .tag-button[data-now-id="${id}"]`).forEach((b) => setStar(b, starred(id)));
+  if (tags) {
+    document.querySelectorAll(`select.chosen-select[data-item-id="${id}"]`).forEach((sel) => sel !== from && $(sel).val(tags).trigger("chosen:updated"));
+  }
+}
 
 // The state of `ids` (default: every item here) from the worker; `force`: even if the version is the same.
 function pull(ids = null, force = false, done = null) {
@@ -370,6 +378,7 @@ function catchUp() {
   if (document.visibilityState !== "visible" || !page.ids.size) return;
   pull();
   pullTags();
+  if (nowPlaying.stale) showNowPlaying();
 }
 // Hidden or closing after changes here: the worker writes them now rather than after its short wait.
 function writeSoon() {
@@ -484,7 +493,9 @@ const loadWidgetParts = () =>
   widgetParts ||
   (widgetParts = new Promise((resolve) => $.get(chrome.runtime.getURL('/taggerTemplate.html'), (data) => pullTags(() => resolve(data)))));
 
-function createTagButton(element, itemUrl, trackdata) {
+// `opts.now`: the now-playing box (below an album's player); `opts.label`: a label before it; `opts.place(container)`:
+// where it goes.
+function createTagButton(element, itemUrl, trackdata, opts = {}) {
   const uniqueId = itemUrl;//hashCode(itemUrl);
 
   const container = document.createElement("div");
@@ -499,7 +510,9 @@ function createTagButton(element, itemUrl, trackdata) {
   tagButton.innerHTML = "☆";
 
   const taggedItem = page.items[uniqueId];
-  tagButton.dataset.itemId = uniqueId;
+  if (opts.now) tagButton.dataset.nowId = uniqueId;
+  else tagButton.dataset.itemId = uniqueId;
+  if (opts.now) container.classList.add("bct-now");
   tagButton.appendChild(star);
   container.appendChild(tagButton);
 
@@ -513,7 +526,8 @@ function createTagButton(element, itemUrl, trackdata) {
     // console.log(data)
     let taggerDiv = $('<div>')
     let tagger = $(data).find("select");
-    tagger.attr("id", `tagger_${uniqueId}`);
+    tagger.attr("id", opts.now ? "bct-now-tagger" : `tagger_${uniqueId}`);
+    tagger.attr("data-item-id", uniqueId);
     // $(data).append('<option>Bar</option>');
   //   chrome.runtime.sendMessage({ type: "getTags" }, (tags) => {
 
@@ -570,6 +584,7 @@ function createTagButton(element, itemUrl, trackdata) {
         page.items[uniqueId] = item;
         if (joins.length) page.member.set(uniqueId, new Set([...memberOf(uniqueId), ...joins]));
         setStar(tagButton, starred(uniqueId));
+        mirror(uniqueId, currentTags, tagger[0]);
         sendChange({ type: "addTaggedItem", item, collections: joins }, "tags", since);
       });
 
@@ -592,8 +607,18 @@ function createTagButton(element, itemUrl, trackdata) {
   
   
   
+  if (opts.label) {
+    const label = document.createElement("span");
+    label.className = "bct-now-label";
+    label.textContent = opts.label;
+    container.prepend(label);
+  }
+
   // element.appendChild(container);
-  if (albumPage) {
+  if (opts.place) {
+    opts.place(container);
+  }
+  else if (albumPage) {
     if (trackdata.tralbum_type == "t") {
       element.children[2].insertAdjacentElement("afterEnd", container);
     }
@@ -629,6 +654,7 @@ function createTagButton(element, itemUrl, trackdata) {
 
   tagButton.addEventListener("click", (event) => {
     event.stopPropagation();
+    Promise.resolve().then(() => mirror(uniqueId)); // its other widget, once the page's state has the change
 
     let tags = $(container).find(".chosen-select").chosen().val()
     // console.log("%%%%%%%%%%%%%%%%")
@@ -808,6 +834,62 @@ function extractTrackData(tralbum, album_data, item_url, art_url, album_artist=n
   }
 }
 
+// "Now playing" (album pages): a box right below the player for the track it has loaded (before any play, the first),
+// following it as it changes: next, previous, a row's play, the next track at the end of one. It's the same item as
+// that track's row (`mirror`). Read from the player's title link and title (what Bandcamp's player changes), and its
+// media events; a tab in the background only notes it, and catches up when shown or focused.
+const nowPlaying = { id: null, container: null, stale: false, tracks: [], data: new Map() };
+function playerTrackId() {
+  const tracks = nowPlaying.tracks;
+  const path = (url) => {
+    try {
+      return new URL(url, location.href).pathname;
+    } catch (e) {
+      return null;
+    }
+  };
+  const link = document.querySelector(".inline_player a.title_link");
+  const href = link && link.getAttribute("href");
+  if (href && href !== "#") {
+    const t = tracks.find((x) => x.title_link && path(x.title_link) === path(href));
+    if (t) return `t${t.track_id}`;
+  }
+  const title = ((document.querySelector(".inline_player .title") || {}).textContent || "").trim();
+  const t = title && tracks.find((x) => x.title === title);
+  if (t) return `t${t.track_id}`;
+  return nowPlaying.id || (tracks[0] ? `t${tracks[0].track_id}` : null);
+}
+function showNowPlaying() {
+  if (document.hidden) {
+    nowPlaying.stale = true;
+    return;
+  }
+  nowPlaying.stale = false;
+  const id = playerTrackId();
+  const player = document.querySelector("#trackInfoInner .inline_player");
+  if (!id || !player || !nowPlaying.data.has(id) || (id === nowPlaying.id && nowPlaying.container && nowPlaying.container.isConnected)) return;
+  nowPlaying.id = id;
+  if (nowPlaying.container) nowPlaying.container.remove();
+  const t = nowPlaying.tracks.find((x) => `t${x.track_id}` === id) || {};
+  nowPlaying.container = createTagButton(player, id, nowPlaying.data.get(id), {
+    now: true,
+    label: `Now playing: ${t.track_num != null ? `${t.track_num}. ` : ""}${t.title || ""}`,
+    place: (c) => player.insertAdjacentElement("afterend", c),
+  });
+}
+let nowTimer = null;
+const showNowPlayingSoon = () => {
+  clearTimeout(nowTimer);
+  nowTimer = setTimeout(showNowPlaying, 150);
+};
+function followPlayer() {
+  const player = document.querySelector("#trackInfoInner .inline_player");
+  if (!player) return;
+  new MutationObserver(showNowPlayingSoon).observe(player, { subtree: true, childList: true, characterData: true, attributes: true, attributeFilter: ["href"] });
+  ["loadstart", "play", "ended"].forEach((type) => document.addEventListener(type, showNowPlayingSoon, true));
+  showNowPlaying();
+}
+
 // New widgets for `entries` ([{element, id, trackdata}]): their items' state from the worker first (one message for
 // all of them), then the widgets; `done(containers)`.
 function addWidgets(entries, done = null) {
@@ -974,6 +1056,11 @@ function addWidgets(entries, done = null) {
     // Imports waiting for a Bandcamp page can be linked to this one.
     const linkTargets = albumPage || trackPage ? containers.map((container, i) => ({ container, item: entries[i].trackdata })) : [];
     setupImportLinks(linkTargets).catch((e) => console.warn("[bc-tagger] import links", e));
+    if (albumPage && Array.isArray(tralbum.trackinfo)) {
+      nowPlaying.tracks = tralbum.trackinfo;
+      entries.forEach((e) => e.trackdata.tralbum_type === "t" && nowPlaying.data.set(e.id, e.trackdata));
+      followPlayer();
+    }
   });
 }
 
