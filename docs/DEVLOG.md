@@ -267,6 +267,16 @@ npm run test:e2e                         # Playwright e2e: own profile, server :
 
 ### 2026-10-29
 
+- **Set file… on the collection's Located popup** (user: "the manual locate button for `Locate` popup in main
+  collection (not only in import)"). The import preview's search + Browse… form and folder browser moved into
+  `app/src/fileSetter.js`; both pages use it, each with its own `use(path)`.
+  - The collection calls A's `POST /api/matches/{id}/set-file` ({path}): the file becomes the item's confirmed one
+    and the item is located again. The popup closes, and the row updates.
+  - A file set by hand: the chip reads "✓ set manually" (its tooltip "Set manually: <path>"), the popup's header
+    "Located (set manually)", and **Back to automatic** calls `DELETE /api/matches/{id}/confirm`.
+  - Locate again, Wrong file, Confirm / Reject and the Download buttons stay.
+  - e2e: Set file by search, then by Browse, then Back to automatic on a collection item (the test's own music
+    folder); the import preview's Set file tests pass unchanged.
 - **Download owned missing refreshes ownership first** (user: five items bought today weren't downloaded, as the last
   Refresh ownership was from two days before). Both pages' button (collection and import preview):
   - first runs Refresh ownership (the extension when connected, else the server's cookie-file job), with "Download:

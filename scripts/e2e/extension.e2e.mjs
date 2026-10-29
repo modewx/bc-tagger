@@ -2989,6 +2989,83 @@ test("import preview: Set file → Browse from the music folders to a file; the 
   }
 });
 
+test("collection: Set file… by search, then by Browse; the chip says set manually; Back to automatic gives it back to the matcher (real server)", async () => {
+  const ITEM_SET = { id: "t1011914860", artist: "HHY & The Macumbas", title: "Ergot Glitter" };
+  fs.rmSync(E2E_MUSIC, { recursive: true, force: true });
+  const searched = path.join(E2E_MUSIC, "E2E Hand Picked.aiff");
+  writeAiff(searched, "E2E Hand Picked", "E2E Nobody", "E2E Nowhere");
+  const album = path.join(E2E_MUSIC, "Some Artist", "Some Album");
+  const browsed = path.join(album, "01 Browse Me.aiff");
+  writeAiff(browsed, "Browse Me", "Some Artist", "Some Album");
+  const before = await api("/api/settings").then((d) => d.settings || d);
+  const saved = await put({ extra_roots: [{ path: E2E_MUSIC, kind: "not_owned" }] });
+  assert.ok(!saved.detail, `settings: ${JSON.stringify(saved.detail)}`);
+  const app = await context.newPage();
+  const chip = `tr[data-key="${ITEM_SET.id}"] .col-located .chip`;
+  const chipStatus = () => app.$eval(chip, (c) => c.dataset.status);
+  const openSetFile = async () => {
+    await app.click(chip);
+    await app.click(".popover #setFile");
+    await app.waitForSelector(".popover .set-file-q");
+  };
+  try {
+    assert.notEqual(((await api(`/api/items/${ITEM_SET.id}`)).local || {}).status, "located", "not located to start with");
+    await app.goto(SERVER + "/");
+    await app.waitForFunction(() => document.querySelectorAll("#collectionTable tbody tr").length > 0);
+    await app.fill("#searchInput", ITEM_SET.title);
+    await app.waitForFunction((id) => document.querySelectorAll("#collectionTable tbody tr").length === 1 && document.querySelector(`tr[data-key="${id}"]`), ITEM_SET.id);
+    await app.click(chip);
+    assert.equal(await app.textContent(".popover #setFile"), "Set file…");
+    assert.ok(await app.$(".popover button:has-text('Locate')"), "Locate stays");
+    assert.equal(await app.$(".popover #backToAutomatic"), null, "nothing set by hand yet");
+    await app.keyboard.press("Escape");
+
+    // By search: the box starts with the item's artist and title.
+    await openSetFile();
+    assert.equal(await app.inputValue(".popover .set-file-q"), `${ITEM_SET.artist} ${ITEM_SET.title}`);
+    await app.fill(".popover .set-file-q", "e2e hand picked");
+    await app.click(".popover .set-file button:has-text('Search')");
+    await app.waitForSelector(".popover .set-file-results .pop-file");
+    await app.click(".popover .set-file-results .pop-file button.primary");
+    await app.waitForFunction((c) => (document.querySelector(c) || {}).dataset?.status === "located-manual", chip, { timeout: 30000 });
+    assert.equal(await app.$(".popover"), null, "the popup closed");
+    assert.equal(await app.textContent(chip), "✓ set manually");
+    assert.equal(await app.$eval(chip, (c) => c.title), `Set manually: ${searched}`);
+    let local = (await api(`/api/items/${ITEM_SET.id}`)).local;
+    assert.equal(local.manual, true);
+    assert.equal(local.best.path, searched);
+
+    // By Browse: from the music folders down to another file.
+    await app.click(chip);
+    assert.equal(await app.textContent(".popover .pop-head"), "Located (set manually)");
+    await app.click(".popover #setFile");
+    await app.click(".popover #browseFiles");
+    await app.waitForSelector(".popover #folderBrowser .fb-entry");
+    await app.click(".popover .fb-crumbs button:has-text('Music folders')");
+    await app.click(`.popover .fb-dir[data-path="${E2E_MUSIC}"]`);
+    await app.click(`.popover .fb-dir[data-path="${path.join(E2E_MUSIC, "Some Artist")}"]`);
+    await app.click(`.popover .fb-dir[data-path="${album}"]`);
+    await app.click(`.popover .fb-file[data-path="${browsed}"]`);
+    await app.waitForFunction((c) => /Browse Me\.aiff$/.test((document.querySelector(c) || {}).title || ""), chip, { timeout: 30000 });
+    assert.equal(await chipStatus(), "located-manual");
+    assert.equal((await api(`/api/items/${ITEM_SET.id}`)).local.best.path, browsed);
+
+    // Back to automatic: the matcher decides again (neither file is this track).
+    await app.click(chip);
+    await app.click(".popover #backToAutomatic");
+    await app.waitForFunction((c) => !/-manual$/.test((document.querySelector(c) || {}).dataset?.status || "-manual"), chip, { timeout: 30000 });
+    local = (await api(`/api/items/${ITEM_SET.id}`)).local;
+    assert.ok(!local.manual, "no longer set by hand");
+    assert.notEqual(local.status, "located");
+    assert.equal(await chipStatus(), local.status, "the chip shows the matcher's result");
+    assert.notEqual(await app.textContent(chip), "✓ set manually");
+  } finally {
+    await put({ extra_roots: [], ...("last_browse_dir" in before ? { last_browse_dir: before.last_browse_dir || "" } : {}) });
+    fs.rmSync(E2E_MUSIC, { recursive: true, force: true });
+    await app.close();
+  }
+});
+
 // --- Collection: the checkbox column and bulk actions -----------------------------------
 
 test("collection: with rows selected, Locate / Export / Download act on them; with none, on the rows shown", async () => {

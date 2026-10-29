@@ -85,8 +85,9 @@ sync.
   - **One connection per tab:** Chrome allows 6 connections to the server across all tabs, and each open page's live
     updates hold one. A page uses a single stream, closes it while its tab is hidden, and catches up when shown.
     The collection loads without waiting for the extension, and says "Loading collection…" until its rows are in.
-  - The Located popover: candidates, Locate again, **Download File** for owned items that aren't on the drive, and
-    **Download Full Release** when a track's album or EP is owned. Downloads start at once, several releases at a
+  - The Located popover: candidates, Locate again, **Set file…** (pick the file yourself: search the music folders
+    or Browse…, as on the import preview; then **Back to automatic** undoes it), **Download File** for owned items that
+    aren't on the drive, and **Download Full Release** when a track's album or EP is owned. Downloads start at once, several releases at a
     time (Settings → Downloads → Parallel downloads, default 4). Each row shows its progress, and a retry shows its
     reason (amber).
 - **Settings → Import:**

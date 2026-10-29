@@ -8,6 +8,7 @@ import { runExport } from "./exportFlow";
 import { sourceOf } from "./statusFilter";
 import { downloadFileTitle, downloadFlow, fullReleaseOf, stateLabel, trackDownloads, troubled } from "./downloads";
 import { streamUrl, usePreviews } from "./previews";
+import { setFileForm } from "./fileSetter";
 
 const LOCAL_RANK = { located: 0, candidates: 1, missing: 2, unknown: 3 };
 const OWNED_RANK = { owned: 0, not_owned: 1, unknown: 2 };
@@ -184,6 +185,24 @@ export function appColumns(ctx) {
     ctx.page().refreshRow(key);
   }
 
+  // Set file… (by hand): the server makes it the item's confirmed file and locates the item again. With no path:
+  // back to automatic (the hand-set file is forgotten, the matcher decides again).
+  async function setFile(key, path) {
+    closePopover();
+    busy[key] = path ? "setting the file…" : "locating…";
+    ctx.page().refreshRow(key);
+    try {
+      if (path) await apiJson(`/api/matches/${encodeURIComponent(key)}/set-file`, { method: "POST", body: { path } });
+      else await apiJson(`/api/matches/${encodeURIComponent(key)}/confirm`, { method: "DELETE" });
+      ctx.statusEl().textContent = path ? `${key}: set to ${basename(path)}` : `${key}: back to automatic`;
+    } catch (e) {
+      ctx.statusEl().textContent = `${path ? "Set file" : "Back to automatic"} failed: ${e.message}`;
+    }
+    delete busy[key];
+    await ctx.page().reload();
+    ctx.page().refreshRow(key);
+  }
+
   function busyNote(cell, key) {
     if (!busy[key]) return false;
     const note = el("span", trouble[key] ? "busy-note warn-note" : "busy-note", busy[key]);
@@ -220,7 +239,7 @@ export function appColumns(ctx) {
     openPopover(anchor, (pop) => {
       const files = locatedFiles(local);
       const heads = {
-        located: files.length > 1 ? `Located: ${files.length} files` : "Located",
+        located: local.manual ? "Located (set manually)" : files.length > 1 ? `Located: ${files.length} files` : "Located",
         candidates: "Possible matches: confirm the right one",
         missing: "Not found in the local folders",
         unknown: "Not located yet",
@@ -240,7 +259,19 @@ export function appColumns(ctx) {
         closePopover();
         locate(key);
       });
+      const set = el("button", "", "Set file…");
+      set.id = "setFile";
+      set.title = "Pick this item's file yourself: search your music folders, or browse them";
+      set.addEventListener("click", () => {
+        foot.remove();
+        setFileForm(pop, {
+          query: [item.artist, item.title].filter(Boolean).join(" "),
+          local,
+          use: (path) => setFile(key, path),
+        });
+      });
       foot.appendChild(again);
+      foot.appendChild(set);
       // Only what can work: nothing for items not owned; the full release when
       // the track's album or EP is owned.
       if (downloadable(item)) {
@@ -263,6 +294,13 @@ export function appColumns(ctx) {
           foot.appendChild(full);
         }
       }
+      if (local.manual) {
+        const auto = el("button", "", "Back to automatic");
+        auto.id = "backToAutomatic";
+        auto.title = "Forget the file set by hand and let the matcher find it again";
+        auto.addEventListener("click", () => setFile(key, null));
+        foot.appendChild(auto);
+      }
       pop.appendChild(foot);
     });
   }
@@ -278,7 +316,8 @@ export function appColumns(ctx) {
       const t = local.tracks || (local.best && local.best.track_counts);
       label = files.length > 1 ? `✓ ${files.length} files` : `✓ ${fmtFormat(files[0] && files[0].format) || "file"}`;
       if (t && t.total) label = `✓ ${t.located}/${t.total}`;
-      title = files.map((f) => f.path).join("\n");
+      if (local.manual) label = "✓ set manually";
+      title = local.manual ? `Set manually: ${files.map((f) => f.path).join("\n")}` : files.map((f) => f.path).join("\n");
     } else if (local.status === "candidates") {
       label = `? ${(local.candidates || []).length}`;
       title = "Possible matches; click to confirm";
@@ -287,6 +326,7 @@ export function appColumns(ctx) {
       title = "Not found in the local folders";
     }
     const chip = el("button", `chip loc-${local.status}`, label);
+    chip.dataset.status = local.status + (local.manual ? "-manual" : "");
     chip.title = title;
     chip.addEventListener("click", () => locatedPopover(chip, key, item));
     cell.appendChild(chip);
