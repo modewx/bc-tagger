@@ -20,6 +20,7 @@ import { rememberImport } from "./openImport";
 import { downloadFileTitle, downloadFlow, fullReleaseOf, fullReleasesToggle, stateLabel, trackDownloads, troubled } from "./downloads";
 import { ownershipFirst, lastCheck, staleNote, challengeText, nothingText } from "./ownershipCheck";
 import { fileRow, setFileForm } from "./fileSetter";
+import { createBulkTagger } from "./bulkTagger";
 import { playableItem, sourceOf } from "./statusFilter";
 import { logNote } from "./importLogs";
 import { tickTargets } from "./rowTicks";
@@ -250,7 +251,22 @@ function renderLocations() {
   locations.open = wasOpen;
 }
 
+// "Tag N selected": the ticked rows' tags, in one request for them all (add_tags / remove_tags).
+let bulk = null;
+async function saveBulkTags({ add, remove, edits }) {
+  if (!edits.length) return "";
+  const rows = new Map(batch.rows.map((r) => [`r${r.n}`, r]));
+  edits.forEach(({ id, tags }) => rows.has(id) && (rows.get(id).tags = tags.slice()));
+  const changes = {};
+  if (add.length) changes.add_tags = add;
+  if (remove.length) changes.remove_tags = remove;
+  const res = await saves.save(edits.map((e) => rows.get(e.id).n), changes);
+  return res.ok ? `Saved (${edits.length} row${edits.length > 1 ? "s" : ""})` : `Not saved: ${res.error}`;
+}
+const tickedKeys = () => (batch && page ? batch.rows.filter((r) => r.checked).map((r) => `r${r.n}`).filter((k) => k in page.getItems()) : []);
+
 function renderInfo() {
+  if (bulk) bulk.refresh();
   if (!batch) return;
   title.textContent = `Import preview · ${batch.source || batch.id}`;
   renderNewTags();
@@ -1106,6 +1122,7 @@ async function discard(statusEl) {
       { id: "discardImport", label: "Discard", run: discard },
     ],
     onSort: () => keepView(),
+    onTagsEdited: () => bulk && bulk.refresh(),
     localPlayUrl,
     localFallbackUrl: originalOf,
     localUnavailable,
@@ -1138,6 +1155,8 @@ async function discard(statusEl) {
   // Use previews (top bar, by the player), as on the collection.
   const previews = previewToggle({ onChange: () => page.refreshLocalSources() });
   document.getElementById("playerArea").appendChild(previews.el);
+  bulk = createBulkTagger({ page, selected: tickedKeys, save: saveBulkTags });
+  document.getElementById("playerArea").appendChild(bulk.el);
   const table = document.getElementById("collectionTable");
   const scroller = el("div");
   scroller.id = "tableScroll";

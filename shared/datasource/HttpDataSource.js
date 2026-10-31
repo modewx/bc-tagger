@@ -128,6 +128,50 @@ export class HttpDataSource {
     }
   }
 
+  // Several items' tags in one go (the bulk tag box), as [{id, tags}]: the Bandcamp ones through the extension, as
+  // one change there (one write, one push to the server); `other` items in one server request (all or none). Without
+  // the extension, the Bandcamp ones are queued for it on the server, one request each (a few at a time).
+  // → {ok, queued: [ids], failed: {id: why}}
+  async setItemsTags(edits, meta = {}) {
+    const isOther = (id) => (this.sources && this.sources[id] === "other") || /^o[0-9a-f]+$/.test(id);
+    const out = { ok: true, queued: [], failed: {} };
+    const other = edits.filter((e) => isOther(e.id));
+    let bandcamp = edits.filter((e) => !isOther(e.id));
+    const jobs = [];
+    if (other.length) {
+      jobs.push(
+        apiJson("/api/tag-edits", { method: "POST", body: { edits: other } }).catch((e) => other.forEach((x) => (out.failed[x.id] = e.message)))
+      );
+    }
+    if (bandcamp.length && this.bridge.connected) {
+      try {
+        const r = await this.bridge.call("setItemsTags", { ...meta, edits: bandcamp });
+        // Not in the extension's collection (only on the server): a queued edit would be dropped there.
+        ((r && r.missing) || []).forEach((id) => (out.failed[id] = "this item isn't in the extension's collection"));
+        bandcamp = [];
+      } catch (e) {
+        console.warn("[tags] extension write failed, queueing on the server", e.message);
+      }
+    }
+    if (bandcamp.length) {
+      const left = bandcamp.slice();
+      const queue = async () => {
+        for (let e = left.shift(); e; e = left.shift()) {
+          try {
+            await apiJson("/api/tag-edits", { method: "POST", body: { id: e.id, tags: e.tags } });
+            out.queued.push(e.id);
+          } catch (err) {
+            out.failed[e.id] = err.message;
+          }
+        }
+      };
+      jobs.push(...Array.from({ length: Math.min(4, left.length) }, queue));
+    }
+    await Promise.all(jobs);
+    out.ok = !Object.keys(out.failed).length;
+    return out;
+  }
+
   // The extension's timing log: this page's time from an edit to the screen.
   noteTiming(opId, screenMs) {
     if (this.bridge.connected) this.bridge.call("timing", { opId, screenMs }).catch(() => {});

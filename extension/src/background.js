@@ -234,6 +234,25 @@ function updateItemTags(id, tags) {
   }, [id]);
 }
 
+// Several items' tags as one change (the local app's bulk tag box): one write, one push. Items not here are
+// reported back (`missing`), never created, and never counted as deleted.
+function updateItemsTags(edits) {
+  return change((s) => {
+    const items = s.taggedItems;
+    const missing = [];
+    const changed = [];
+    edits.forEach(({ id, tags }) => {
+      if (!items[id]) return void missing.push(id);
+      const next = Array.isArray(tags) ? tags : [];
+      if (!sameTags(items[id].tags, next)) items[id].modified_at = nowIso();
+      items[id].tags = next;
+      changed.push(id);
+    });
+    const result = { ok: true, missing };
+    return changed.length ? { changed, deleted: [], result } : { skip: true, result };
+  });
+}
+
 // What a page shows of its own items (`ids`): whether each is saved (and as what), the collections each is in, the
 // collection shown and the list. `since`: the version the page has; unchanged, one small answer.
 function pageState(ids, since) {
@@ -408,6 +427,11 @@ async function handleAppBridge(op, payload, sender) {
       const res = await updateItemTags(payload.id, payload.tags);
       if (!res.ok) throw new Error(res.reason || "not saved");
       return res;
+    }
+    case "setItemsTags": {
+      const edits = (Array.isArray(payload.edits) ? payload.edits : []).filter((e) => e && typeof e.id === "string");
+      noteAction(payload, "tags", edits.map((e) => e.id), sender);
+      return updateItemsTags(edits);
     }
     case "persistFiles":
       return updateItemFiles(payload.files);

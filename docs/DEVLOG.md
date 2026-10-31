@@ -317,6 +317,39 @@ npm run build:app && npm run build:dev   # the local app (served by the server a
 npm run test:e2e                         # Playwright e2e: own profile, server :8767, app in .e2e/app-dist
 ```
 
+### 2026-10-31
+
+- **Tag all selected** (user: "when selecting many tracks can you add a tagger input at the top right perhaps below
+  `global player` Use previews … that allows to tag all tracks selected … individual tagger inputs in tags column
+  should update too, should work in collection or import page"). `app/src/bulkTagger.js`, on both pages.
+  - **Where:** under the global player and Use previews: "Tag N selected" and a tag field like a row's (the
+    vocabulary, and an import's new tags). Hidden while nothing is ticked.
+  - **What it shows:** the tags every selected row has, as chips. "+N tags on some rows" (with their names on hover)
+    for the rest. "N of them hidden by the filter" when the filter hides some selected rows; those count too.
+  - **What it does:** a tag added there joins each selected row's tags, and one removed leaves each; every row keeps
+    its others. The rows' cells change at once, by id, with no reload: the page's new `setTagsLocally(edits)`
+    updates a built editor in place (once it's left, if in use) or the text shown until one is built. The box follows
+    ticks, row edits and live updates.
+  - **One save per change:**
+    - Collection, Bandcamp items: the extension's new bridge op `setItemsTags` applies them as one change in its
+      store (one write, one push). Items it doesn't have come back as `missing` and show as not saved; they're never
+      counted as deleted.
+    - Collection, server-owned "other" items: A's `POST /api/tag-edits {edits}`, all or none.
+    - Without the extension, the Bandcamp ones are queued on the server one request each (four at a time), since
+      A's batch form takes "other" items only.
+    - Import preview: A's `PUT /api/import/<id>/rows {ns, changes: {add_tags | remove_tags}}`, one request for the
+      rows. The row-save queue folds successive changes into each row's pending edit (a whole tag list takes them in;
+      changes add up), and a reload applies them to the row's tags.
+  - **Timings** (e2e, headless, normal CPU; 200 rows selected on the collection page, about 950 rows shown; three
+    runs):
+    - 84–107 ms from the Enter key to the frame with every cell changed (the extension's timing log, "screen");
+    - 124–152 ms until "Saved";
+    - in the worker, every time: one write of the items (36–43 ms) and one push to the server (35–50 ms, about
+      850 ms after, with the store's debounce).
+  - e2e: the collection (2 Bandcamp items and 1 "other": hidden with nothing ticked, the hidden-by-filter note, the
+    chips, add then remove, each row's own tags kept, one extension request); the import preview (one request each
+    way, saved through a reload); the 200-row timings (one write, one push).
+
 ### 2026-10-29
 
 - **A tag → playlist mapping per Target folder, per rekordbox library** (user: "each mapping should be able to be

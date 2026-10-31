@@ -89,6 +89,7 @@ const SHELL_HTML = `
  *                                          or a function giving them now (then page.refreshColumns())
  * @param {(item) => string|null} [opts.groupBy] a header row (e.g. a folder) above each group, in "#" order
  * @param {(keys) => void} [opts.onItemsUpdated] items changed in place (no re-render of the view)
+ * @param {(key) => void} [opts.onTagsEdited]  a row's tags were edited here (its own tag editor)
  * @param {() => string[]} [opts.newTags] tags offered beyond the vocabulary, highlighted (an import's new ones)
  * @param {string} [opts.columnsKey]        localStorage key for the shown/hidden columns (default: from colWidthKey)
  * @param {function} [opts.playable]        (item) -> false: nothing to play (no Bandcamp page, no local file)
@@ -689,6 +690,7 @@ export function createCollectionPage(opts) {
 
   function onTagsEdited(key, tags, wrap) {
     localTagEdits.set(key, { tags: tags.slice(), at: Date.now() });
+    if (opts.onTagsEdited) opts.onTagsEdited(key);
     Promise.resolve(ds.setItemTags(key, tags, timedEdit())).then((res) => {
       const pending = !!(res && res.queued);
       const failed = !!(res && res.ok === false);
@@ -1621,10 +1623,10 @@ export function createCollectionPage(opts) {
   // Point every live tag editor of `key` (in its row or docked in the top
   // bar) at the item's current tags: not while it's being typed in (then once
   // it's left), and no redraw when it already shows them.
-  function syncTagEditors(key) {
+  function syncTagEditors(key, found = null) {
     const item = allItems[key];
     if (!item) return 0;
-    const sels = document.querySelectorAll(`.tag-editor-wrap[data-key="${key}"] select.tag-editor`);
+    const sels = found || document.querySelectorAll(`.tag-editor-wrap[data-key="${key}"] select.tag-editor`);
     sels.forEach((sel) => {
       sel.parentElement.classList.toggle("tags-pending", !!item._tagsPending);
       whenChosenFree(sel, () => {
@@ -1634,6 +1636,46 @@ export function createCollectionPage(opts) {
       });
     });
     return sels.length;
+  }
+
+  // Several items' tags at once (the bulk tag box), by id, with no re-render: the items, then each row's Tags cell (a
+  // live editor in place, or once it's left; else the text shown until one is built). Kept over reloads like a row's
+  // own edit. Returns the edits that changed something.
+  function setTagsLocally(edits) {
+    const cells = new Map();
+    document.querySelectorAll("#collectionTable td.tags-cell").forEach((c) => c._key && cells.set(c._key, c));
+    const live = new Map(); // key -> its editors' selects (its row's, or the one docked in the top bar)
+    document.querySelectorAll(".tag-editor-wrap[data-key] select.tag-editor").forEach((sel) => {
+      const k = sel.parentElement.dataset.key;
+      live.set(k, [...(live.get(k) || []), sel]);
+    });
+    const done = [];
+    edits.forEach(({ id, tags }) => {
+      const item = allItems[id];
+      if (!item || sameTags(item.tags, tags)) return;
+      item.tags = tags.slice();
+      localTagEdits.set(id, { tags: tags.slice(), at: Date.now() });
+      done.push({ id, tags: item.tags });
+      if (live.has(id)) syncTagEditors(id, live.get(id));
+      const text = cells.has(id) && cells.get(id).querySelector(":scope > span");
+      if (text) text.textContent = tags.length ? tags.join(", ") : "—";
+    });
+    return done;
+  }
+
+  // What saving those edits came to, per id ({pending} queued for the extension, {error} not saved).
+  function tagsSaved(results) {
+    Object.entries(results || {}).forEach(([id, r]) => {
+      const item = allItems[id];
+      if (!item) return;
+      if (r.error) localTagEdits.delete(id);
+      item._tagsPending = !!r.pending;
+      document.querySelectorAll(`.tag-editor-wrap[data-key="${id}"]`).forEach((wrap) => {
+        wrap.classList.toggle("tags-pending", !!r.pending);
+        wrap.classList.toggle("tags-error", !!r.error);
+        wrap.title = r.error ? `Not saved: ${r.error}` : r.pending ? "Queued: the extension applies it on its next sync." : "";
+      });
+    });
   }
 
   // A player cell that is in use: the current track, a loaded Bandcamp embed
@@ -1775,6 +1817,11 @@ export function createCollectionPage(opts) {
       if (render) renderCollectionTable(currentView);
     },
     getSort: () => ({ key: sortColumn, dir: sortDir }),
+    setTagsLocally,
+    tagsSaved,
+    // The tags the editors offer: the vocabulary, and the new ones (opts.newTags, highlighted).
+    getVocabulary: () => ({ vocab: allTagsVocab, newTags: newTagsOf() }),
+    timedEdit, // an edit's {opId, page, widgets}, for the extension's timing log
     // opts.hideColumns changed: the columns shown again (a choice made in Columns ▾ stays).
     refreshColumns() {
       columns = allColumns.filter(isShown);

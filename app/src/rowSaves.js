@@ -12,6 +12,47 @@ const enc = encodeURIComponent;
 const same = (a, b) => JSON.stringify(a) === JSON.stringify(b);
 const transient = (e) => !e.status || e.status >= 500 || e.status === 408 || e.status === 429;
 
+// A row's pending edit with `changes` on top. Tags can be the whole list ({tags}) or a change to every row's own list
+// ({add_tags} / {remove_tags}, the bulk tag box: one request for all the rows): a whole list takes the changes into
+// itself; changes to changes add up (adding a tag takes it out of the removals, and the other way round).
+function merged(p, changes) {
+  const out = { ...p };
+  const add = changes.add_tags || [];
+  const remove = changes.remove_tags || [];
+  Object.entries(changes).forEach(([f, v]) => f !== "add_tags" && f !== "remove_tags" && (out[f] = v));
+  if ("tags" in changes) {
+    delete out.add_tags;
+    delete out.remove_tags;
+  }
+  if (!add.length && !remove.length) return out;
+  if (Array.isArray(out.tags)) {
+    out.tags = [...out.tags.filter((t) => !remove.includes(t)), ...add.filter((t) => !out.tags.includes(t))];
+    return out;
+  }
+  const adds = [...(out.add_tags || []).filter((t) => !remove.includes(t)), ...add.filter((t) => !(out.add_tags || []).includes(t))];
+  const removes = [...(out.remove_tags || []).filter((t) => !add.includes(t)), ...remove.filter((t) => !(out.remove_tags || []).includes(t))];
+  delete out.add_tags;
+  delete out.remove_tags;
+  if (adds.length) out.add_tags = adds;
+  if (removes.length) out.remove_tags = removes;
+  return out;
+}
+
+// The fields an edit touches, the three tag forms as one ("tags").
+const TAG_FIELDS = ["tags", "add_tags", "remove_tags"];
+const fields = (c) => [...new Set(Object.keys(c).map((f) => (TAG_FIELDS.includes(f) ? "tags" : f)))];
+
+// A row as the server sent it, with a pending edit on top (its tag changes applied to its tags).
+function applied(row, p) {
+  const { add_tags: add = [], remove_tags: remove = [], ...rest } = p;
+  Object.assign(row, rest);
+  if (add.length || remove.length) {
+    const tags = Array.isArray(row.tags) ? row.tags : [];
+    row.tags = [...tags.filter((t) => !remove.includes(t)), ...add.filter((t) => !tags.includes(t))];
+  }
+  return row;
+}
+
 /**
  * @param {string} batchId
  * @param {(s: {state: "saving"|"saved"|"retrying"|"failed", pending: number, error?: string, retryAt?: number}) => void} onState
@@ -49,7 +90,8 @@ export function createRowSaves(batchId, onState = () => {}) {
     else onState({ state: "saved", pending: 0 });
   }
 
-  // Rows `ns` are done with `changes`: saved, or (refused) dropped. A save() waiting on them hears it.
+  // Rows `ns` are done with `changes`: saved, or (refused) dropped. A save() waiting on them hears it once nothing
+  // it asked for is left to send for that row (later edits of the same fields add up into what's sent).
   function done(ns, changes, refused = null) {
     ns.forEach((n) => {
       const p = pending.get(n);
@@ -57,8 +99,9 @@ export function createRowSaves(batchId, onState = () => {}) {
         Object.keys(changes).forEach((f) => same(p[f], changes[f]) && delete p[f]);
         if (!Object.keys(p).length) pending.delete(n);
       }
+      const left = fields(pending.get(n) || {});
       waiters.forEach((w) => {
-        if (!w.left.has(n) || !Object.keys(w.changes).every((f) => same(w.changes[f], changes[f]))) return;
+        if (!w.left.has(n) || fields(w.changes).some((f) => left.includes(f))) return;
         w.left.delete(n);
         if (refused) w.error = refused.message;
       });
@@ -159,13 +202,13 @@ export function createRowSaves(batchId, onState = () => {}) {
   if (pending.size) setTimeout(run, 0); // left before the server had them: again
 
   return {
-    /** Save `changes` ({checked} / {tags}) for rows `ns`: resolves {ok: true} once the server has them, or
-     *  {ok: false, error} if it refused; while the server can't be reached it keeps trying. */
+    /** Save `changes` ({checked} / {tags} / {add_tags} / {remove_tags}) for rows `ns`: resolves {ok: true} once the
+     *  server has them, or {ok: false, error} if it refused; while the server can't be reached it keeps trying. */
     save(ns, changes) {
-      // An earlier save of the same rows and fields: superseded (only the latest goes).
-      waiters.forEach((w) => ns.forEach((n) => Object.keys(changes).some((f) => f in w.changes) && w.left.delete(n)));
+      // An earlier save of the same rows and fields: superseded (only the latest goes). Tags: any of the three.
+      waiters.forEach((w) => ns.forEach((n) => fields(changes).some((f) => fields(w.changes).includes(f)) && w.left.delete(n)));
       waiters = waiters.filter((w) => w.left.size || (w.resolve(w.error ? { ok: false, error: w.error } : { ok: true }), false));
-      ns.forEach((n) => pending.set(n, { ...(pending.get(n) || {}), ...changes }));
+      ns.forEach((n) => pending.set(n, merged(pending.get(n) || {}, changes)));
       persist();
       const p = new Promise((resolve) => waiters.push({ left: new Set(ns), changes, resolve, error: null }));
       run();
@@ -173,7 +216,7 @@ export function createRowSaves(batchId, onState = () => {}) {
     },
     /** The edits not saved yet, over rows just read from the server (so a reload doesn't undo them). */
     overlay(rows) {
-      rows.forEach((r) => pending.has(r.n) && Object.assign(r, pending.get(r.n)));
+      rows.forEach((r) => pending.has(r.n) && applied(r, pending.get(r.n)));
       return rows;
     },
     /** Everything saved now, or throws why not. */

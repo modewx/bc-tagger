@@ -14,6 +14,7 @@ import { ALL, chosenCollection, keepCollection, createCollectionsBar, listCollec
 import { confirmDialog } from "./dialog";
 import { downloadFlow, fullReleasesToggle } from "./downloads";
 import { refreshOwnership, ownershipFirst, lastCheck, staleNote, challengeText, nothingText } from "./ownershipCheck";
+import { createBulkTagger } from "./bulkTagger";
 import { startDevReload } from "./devReload";
 import { createStatusFilter, createSourceFilter, sourceOf, playableItem } from "./statusFilter";
 import { runExport } from "./exportFlow";
@@ -194,7 +195,22 @@ function buildPreviewsRun(statusEl, button) {
   return buildPreviews({ jobs, statusEl, button, target, what });
 }
 
+// "Tag N selected": every selected item's tags in one save (the Bandcamp ones as one change in the extension).
+let bulk = null;
+async function saveBulkTags({ edits }) {
+  if (!edits.length) return "";
+  const res = await ds.setItemsTags(edits, page.timedEdit());
+  const results = {};
+  edits.forEach(({ id }) => (results[id] = res.failed[id] ? { error: res.failed[id] } : { pending: res.queued.includes(id) }));
+  page.tagsSaved(results);
+  const failed = Object.entries(res.failed);
+  if (failed.length) return `Not saved for ${failed.length} of ${edits.length}: ${failed[0][1]}`;
+  if (res.queued.length) return `Queued for the extension: ${res.queued.length} (saved on its next sync)`;
+  return `Saved (${edits.length} track${edits.length > 1 ? "s" : ""})`;
+}
+
 function updateShownButtons() {
+  if (bulk) bulk.refresh();
   const sel = selectedIds().length;
   const shown = Object.keys(page.getView()).length;
   const loc = document.getElementById("locateShown");
@@ -590,6 +606,7 @@ async function refreshHealth() {
     },
     onItemsUpdated: () => updateShownButtons(), // e.g. a selected item got located
     onSort: keepSort,
+    onTagsEdited: () => bulk && bulk.refresh(),
   });
   restoreSort(false); // the first rows come in that order
 
@@ -610,6 +627,8 @@ async function refreshHealth() {
   // Use previews (top bar, by the player): the players take the new source, a playing one from the same moment.
   const previews = previewToggle({ onChange: () => page.refreshLocalSources() });
   document.getElementById("playerArea").appendChild(previews.el);
+  bulk = createBulkTagger({ page, selected: selectedIds, save: saveBulkTags });
+  document.getElementById("playerArea").appendChild(bulk.el);
   const exportHint = document.createElement("span");
   exportHint.id = "exportHint";
   exportHint.className = "export-hint";

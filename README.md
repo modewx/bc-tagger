@@ -39,6 +39,8 @@ sync.
       ownership); **Columns ▾**.
   - The selection is kept in this browser across pages and reloads.
   - So is the sort (the column and its direction), per collection: each one, and All, opens in the order it was left.
+  - **Tag N selected** (under the player, on this page and the import preview): the tags all selected rows have; a tag
+    added or removed there goes to (or leaves) every selected row, each keeping its own, in one save.
   - **Collections** (Phase 8; shown once the server has them): the dropdown at the top lists **All** (every track
     in a collection, once: the union, not a collection of its own) and then each collection, with its count; the choice is kept in this browser, and `?collection=<id|all>`
     opens one. **Create Collection** (a new, empty one), **Rename**, **Delete** (asks first; the tracks stay in other

@@ -4522,6 +4522,208 @@ for f in json.loads(sys.argv[3]):
   ]);
 }
 
+// --- Tag all selected ------------------------------------------------------------------
+// The box under the player: the tags every selected row has; a tag added or removed there goes to (or leaves) each
+// selected row, which keeps its others; the cells change at once and the change is saved in one go.
+
+const BULK_A = { id: "t1019188656", q: "Freak Like U" }; // must, electro, vocal, vocoder
+const BULK_B = { id: "t1024532747", q: "Tread Lightly" }; // must
+const itemsOf = (ids) => api(`/api/items?ids=${ids.join(",")}`).then((d) => (Array.isArray(d) ? d : d.items));
+// The tags a row's Tags cell shows: its editor's chips, or the text shown until the editor is built.
+const tagsCell = (page, id) => page.evaluate((id) => window.__cellTags(id), id);
+const cellTagsHelper = (page) =>
+  page.evaluate(() => {
+    window.__cellTags = (id) => {
+      const cell = document.querySelector(`tr[data-key="${id}"] td.tags-cell`);
+      if (!cell) return null;
+      if (cell.querySelector(".chosen-container")) return [...cell.querySelectorAll(".chosen-choices li.search-choice span")].map((s) => s.textContent);
+      const text = cell.textContent.trim();
+      return text === "—" ? [] : text.split(", ");
+    };
+  });
+
+// A server-owned "other" item (made by committing an import row that matches nothing, if there's none yet).
+async function anOtherItem() {
+  const list = await api("/api/items?source=other").then((d) => (Array.isArray(d) ? d : d.items || []));
+  if (list.length) return list[0];
+  const items = [{ line: 1, raw: "E2E Nobody - Never On Bandcamp", artist: "E2E Nobody", title: "Never On Bandcamp", tags: ["pool"] }];
+  const { batch_id } = await post("/api/import", { file: { format: "bc-tagger-import/1", source: "e2e-other.txt", items }, default_tags: [], name: "e2e-other" });
+  await waitFor(() => api(`/api/import/${batch_id}`).then((b) => b.status === "ready"), { what: "the batch", timeout: 30000 });
+  await post(`/api/import/${batch_id}/commit`, {});
+  return waitFor(() => api("/api/items?source=other").then((d) => (Array.isArray(d) ? d : d.items || [])[0]), { what: "the other item", timeout: 30000 });
+}
+
+// Pick `tag` in the box (typed, Enter), or take it out (its chip's ×).
+async function bulkAdd(page, tag) {
+  await page.click("#bulkTagger .chosen-choices .search-field input");
+  await page.keyboard.type(tag);
+  await page.keyboard.press("Enter");
+}
+const bulkRemove = (page, tag) =>
+  page.click(`#bulkTagger .chosen-choices li.search-choice:has(span:text-is("${tag}")) a.search-choice-close`);
+
+test("Tag all selected (collection): hidden with nothing ticked; with 3 rows ticked (2 Bandcamp, 1 other), a tag goes to each and leaves each, every row keeping its own; saved in the extension and on the server", async () => {
+  const other = await anOtherItem();
+  const ids = [BULK_A.id, BULK_B.id, other.id];
+  const before = Object.fromEntries((await itemsOf(ids)).map((it) => [it.id, it.tags || []]));
+  const vocab = await api("/api/tags");
+  const tag = vocab.find((t) => ids.every((id) => !before[id].includes(t)));
+  const app = await context.newPage();
+  await storageFirst(app, { remove: [...COLLECTION_STATE, "bc_app_collection"] });
+  const bridgeCalls = [];
+  try {
+    await app.goto(SERVER + "/");
+    await app.waitForFunction(() => document.querySelectorAll("#collectionTable tbody tr").length > 2 && !document.getElementById("loadingState"));
+    await cellTagsHelper(app);
+    assert.equal(await app.isHidden("#bulkTagger"), true, "nothing ticked: no box");
+    await app.evaluate(() => {
+      window.__bulkOps = [];
+      const post = window.postMessage.bind(window);
+      window.postMessage = (m, ...r) => (m && m.bcTagger === "request" && window.__bulkOps.push(m.op), post(m, ...r));
+    });
+    for (const [id, q] of [[BULK_A.id, BULK_A.q], [BULK_B.id, BULK_B.q], [other.id, other.title]]) {
+      await app.fill("#searchInput", q);
+      await app.waitForFunction((id) => document.querySelector(`tr[data-key="${id}"]`), id);
+      await app.check(`tr[data-key="${id}"] .row-check`);
+    }
+    // The filter shows one of them: the box says so.
+    assert.equal(await app.textContent("#bulkTitle"), "Tag 3 selected");
+    if (process.env.E2E_SHOTS) await app.locator("#topBar").screenshot({ path: path.join(process.env.E2E_SHOTS, "bulk-tagger.png") });
+    assert.match(await app.textContent("#bulkHidden"), /^2 of them hidden by the filter$/);
+    await app.fill("#searchInput", "");
+    await app.waitForFunction(() => document.getElementById("bulkHidden").textContent === "");
+    // What they all have, as chips; what only some have, as a count.
+    const common = before[BULK_A.id].filter((t) => ids.every((id) => before[id].includes(t)));
+    assert.deepEqual((await app.$$eval("#bulkTagger li.search-choice", (lis) => lis.map((li) => li.textContent.trim()))).sort(), common.sort());
+    assert.match(await app.textContent("#bulkSome"), /^\+\d+ tags? on some rows$/);
+
+    // Add: every cell at once; the extension (one request for both Bandcamp items) and the server.
+    await bulkAdd(app, tag);
+    await app.waitForFunction(([ids, t]) => ids.every((id) => window.__cellTags(id).includes(t)), [ids, tag]);
+    await app.waitForFunction(() => /^Saved \(3 tracks\)$/.test(document.getElementById("bulkState").textContent), null, { timeout: 15000 });
+    assert.deepEqual((await app.evaluate(() => window.__bulkOps)).filter((op) => op === "setItemsTags" || op === "setItemTags"), ["setItemsTags"], "one request to the extension");
+    for (const id of [BULK_A.id, BULK_B.id]) assert.deepEqual(await itemTags(id), [...before[id], tag], `the extension's ${id}`);
+    await waitFor(() => itemsOf(ids).then((its) => its.every((it) => it.tags.includes(tag))), { what: "the tag on the server" });
+    assert.deepEqual((await itemsOf([other.id]))[0].tags, [...before[other.id], tag]);
+
+    // Remove: gone from each, the others kept.
+    await bulkRemove(app, tag);
+    await app.waitForFunction(([ids, t]) => ids.every((id) => !window.__cellTags(id).includes(t)), [ids, tag]);
+    for (const id of ids) assert.deepEqual((await tagsCell(app, id)).slice().sort(), before[id].slice().sort(), `${id}'s cell`);
+    await waitFor(() => itemsOf(ids).then((its) => its.every((it) => !it.tags.includes(tag))), { what: "the tag gone on the server" });
+    for (const it of await itemsOf(ids)) assert.deepEqual(it.tags, before[it.id], `${it.id} keeps its own tags`);
+    for (const id of [BULK_A.id, BULK_B.id]) assert.deepEqual(await itemTags(id), before[id]);
+    // Nothing ticked again: no box.
+    await app.click("#clearSelection");
+    assert.equal(await app.isHidden("#bulkTagger"), true);
+  } finally {
+    await app.evaluate(() => localStorage.removeItem("bc_app_selection")).catch(() => {});
+    await app.close();
+  }
+});
+
+test("Tag all selected (import preview): the ticked rows get a tag and lose it, each keeping its own; one request for all of them", async () => {
+  const items = [
+    { line: 1, raw: "E2E Bulk - One", artist: "E2E Bulk", title: "One", tags: ["must"] },
+    { line: 2, raw: "E2E Bulk - Two", artist: "E2E Bulk", title: "Two", tags: ["pool", "drums"] },
+    { line: 3, raw: "E2E Bulk - Three", artist: "E2E Bulk", title: "Three", tags: ["must", "intro"] },
+  ];
+  const { batch_id: batchId } = await post("/api/import", { file: { format: "bc-tagger-import/1", source: "e2e-bulk.txt", items }, default_tags: [], name: "e2e-bulk" });
+  const page = await context.newPage();
+  const puts = [];
+  page.on("request", (r) => r.method() === "PUT" && r.url().endsWith(`/api/import/${batchId}/rows`) && puts.push(r.postDataJSON()));
+  const rowTags = async () => (await api(`/api/import/${batchId}`)).rows.map((r) => r.tags);
+  try {
+    await waitFor(() => api(`/api/import/${batchId}`).then((b) => b.status === "ready"), { what: "the batch", timeout: 30000 });
+    await page.goto(`${SERVER}/import/?batch=${batchId}`);
+    await page.waitForFunction(() => document.querySelectorAll("#collectionTable tbody tr[data-key]").length === 3);
+    await cellTagsHelper(page);
+    await page.uncheck("#selectAll");
+    await page.waitForFunction(() => document.getElementById("bulkTagger").hidden);
+    await page.check("#selectAll");
+    await page.waitForFunction(() => !document.getElementById("bulkTagger").hidden);
+    assert.equal(await page.textContent("#bulkTitle"), "Tag 3 selected");
+    assert.equal(await page.textContent("#bulkSome"), "+4 tags on some rows");
+    const before = await rowTags();
+    await waitFor(async () => !puts.length || (await page.textContent("#saveState")) === "Saved", { what: "the ticks saved" });
+    puts.length = 0;
+
+    await bulkAdd(page, "closer");
+    await page.waitForFunction(() => ["r0", "r1", "r2"].every((k) => window.__cellTags(k).includes("closer")));
+    await page.waitForFunction(() => /^Saved \(3 rows\)$/.test(document.getElementById("bulkState").textContent), null, { timeout: 15000 });
+    assert.deepEqual(puts, [{ ns: [0, 1, 2], changes: { add_tags: ["closer"] } }], "one request");
+    assert.deepEqual(await rowTags(), before.map((t) => [...t, "closer"]));
+
+    await bulkRemove(page, "closer");
+    await page.waitForFunction(() => ["r0", "r1", "r2"].every((k) => !window.__cellTags(k).includes("closer")));
+    await waitFor(async () => JSON.stringify(await rowTags()) === JSON.stringify(before), { what: "each row's own tags again" });
+    assert.deepEqual(puts[1], { ns: [0, 1, 2], changes: { remove_tags: ["closer"] } });
+    // A reload shows them as saved.
+    await page.reload();
+    await page.waitForFunction(() => document.querySelectorAll("#collectionTable tbody tr[data-key]").length === 3);
+    await cellTagsHelper(page);
+    assert.deepEqual(await tagsCell(page, "r1"), ["pool", "drums"]);
+  } finally {
+    await api(`/api/import/${batchId}`, { method: "DELETE" });
+    await page.close();
+  }
+});
+
+test("Tag all selected: 200 rows on the collection page change at once and are saved once (timings)", async () => {
+  const raw = await api("/api/items?source=bandcamp");
+  const bandcamp = (Array.isArray(raw) ? raw : raw.items).map((it) => it.id);
+  const inExtension = new Set(Object.keys((await storage("taggedItems")).taggedItems));
+  const ids = bandcamp.filter((id) => inExtension.has(id)).slice(0, 200);
+  assert.equal(ids.length, 200);
+  const vocab = await api("/api/tags");
+  const before = Object.fromEntries((await itemsOf(ids)).map((it) => [it.id, it.tags || []]));
+  const tag = vocab.find((t) => ids.every((id) => !before[id].includes(t))) || vocab[vocab.length - 1];
+  const sw = context.serviceWorkers()[0];
+  const app = await context.newPage();
+  await storageFirst(app, { remove: [...COLLECTION_STATE, "bc_app_collection"], set: { bc_app_selection: JSON.stringify(ids) } });
+  const send = (msg) => probe.evaluate((m) => new Promise((r) => chrome.runtime.sendMessage(m, r)), msg);
+  try {
+    await app.goto(SERVER + "/");
+    await app.waitForFunction(() => !document.getElementById("loadingState") && document.getElementById("bulkTitle").textContent === "Tag 200 selected");
+    await sleep(1500); // the page settled (lazy editors, the first pulls)
+    await cellTagsHelper(app);
+    // In the worker: its writes of the items, and its pushes to the server.
+    await sw.evaluate((tag) => {
+      self.__bulk = { writes: 0, pushes: 0 };
+      const area = chrome.storage.local;
+      const set = area.set.bind(area);
+      area.set = (values, ...rest) => (self.__bulk && values && "taggedItems" in values && self.__bulk.writes++, set(values, ...rest));
+      const f = self.fetch;
+      const ours = (u, init) => /\/api\/sync\/items/.test(String(u)) && String((init && init.body) || "").includes(JSON.stringify(tag));
+      self.fetch = (u, init, ...rest) => (self.__bulk && ours(u, init) && self.__bulk.pushes++, f(u, init, ...rest));
+    }, tag);
+    await app.click("#bulkTagger .chosen-choices .search-field input");
+    await app.keyboard.type(tag);
+    const t0 = Date.now();
+    await app.keyboard.press("Enter");
+    await app.waitForFunction(([ids, t]) => ids.every((id) => (window.__cellTags(id) || [t]).includes(t)), [ids, tag]);
+    const cellsMs = Date.now() - t0;
+    await app.waitForFunction(() => /^Saved \(200 tracks\)$/.test(document.getElementById("bulkState").textContent), null, { timeout: 20000 });
+    const savedMs = Date.now() - t0;
+    await waitFor(() => itemsOf(ids.slice(0, 5)).then((its) => its.every((it) => it.tags.includes(tag))), { what: "pushed", timeout: 20000 });
+    await sleep(2500); // past the store's write (400 ms after the change, at most 2 s)
+    const counts = await sw.evaluate(() => self.__bulk);
+    const line = (await send({ type: "getTimings" })).text.split("\n").reverse().find((l) => / tags +\| app /.test(l));
+    console.log(`bulk tag, 200 rows: cells ${cellsMs} ms after Enter (test side, with its polling), "Saved" ${savedMs} ms; worker: ${counts.writes} write(s) of the items, ${counts.pushes} push(es); timing log: ${line}`);
+    assert.equal(counts.writes, 1, "one write of the items");
+    assert.equal(counts.pushes, 1, "one push to the server");
+    const screen = Number((line.match(/screen (\d+) ms/) || [])[1]);
+    assert.ok(screen >= 0 && screen < 1000, `on screen: ${screen} ms`);
+    // Back as they were (one more bulk change).
+    await bulkRemove(app, tag);
+    await waitFor(() => itemsOf(ids.slice(0, 5)).then((its) => its.every((it) => !it.tags.includes(tag))), { what: "removed", timeout: 20000 });
+  } finally {
+    await sw.evaluate(() => delete self.__bulk).catch(() => {});
+    await app.evaluate(() => localStorage.removeItem("bc_app_selection")).catch(() => {});
+    await app.close();
+  }
+});
+
 test("Import from Files: folders prefilled with their dates, rows by folder under headers, a FLAC + AIFF pair is one row, duplicates unticked, the file shown; commit numbers the rows after everything", async () => {
   const base = path.join(E2E, "files-import");
   const coll = path.join(base, "Collection");

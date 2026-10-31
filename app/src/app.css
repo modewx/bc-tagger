@@ -253,3 +253,14 @@ button.chip:hover { filter: brightness(0.95); border-color: #bbb; }
 .import-collection-label[hidden] { display: none; }
 .import-collection { font: inherit; font-size: 13px; padding: 3px 4px; }
 .collection-name { width: 100%; box-sizing: border-box; font: inherit; padding: 6px 8px; }
+
+/* "Tag N selected" (both pages): under the player, for every selected row at once. */
+#bulkTagger { width: 340px; max-width: 48vw; box-sizing: border-box; border: 1px solid #c9d6f0; background: #f5f8ff; border-radius: 6px; padding: 6px 8px; }
+#bulkTagger[hidden] { display: none; }
+.bulk-head { display: flex; flex-wrap: wrap; gap: 2px 8px; align-items: baseline; font-size: 12px; margin-bottom: 4px; }
+.bulk-title { font-weight: 600; }
+.bulk-hidden { color: #8a6d00; }
+.bulk-some, .bulk-state { font-size: 11px; color: #666; margin-top: 3px; }
+.bulk-some { cursor: help; }
+.bulk-some:empty, .bulk-state:empty { display: none; }
+.bulk-state.err { color: #b00020; }
