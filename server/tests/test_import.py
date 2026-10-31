@@ -726,3 +726,63 @@ def test_a_bulk_row_update_is_all_or_nothing(svc, monkeypatch):
     monkeypatch.setattr(importer.json, "dumps", real)
     after = {r["n"]: r for r in importer.load_rows(svc.store, bid)}
     assert after == before  # none of the first 500 stayed changed
+
+
+def test_the_tag_all_box_adds_and_removes_and_rows_keep_their_own(svc):
+    batch = importer.create_batch(svc, {"format": "bc-tagger-import/1", "items": [
+        {"title": "A", "artist": "X", "tags": ["dub"]}, {"title": "B", "artist": "X", "tags": ["dub", "pool"]},
+        {"title": "C", "artist": "X", "tags": []}, {"title": "D", "artist": "X", "tags": ["pool"]}]}, ["must"])
+    bid = batch["batch_id"]
+    assert [r["tags"] for r in importer.load_rows(svc.store, bid)] == [["dub"], ["dub", "pool"], ["must"], ["pool"]]
+    events = []
+    svc.jobs.bus.publish = lambda event, data: events.append((event, data))
+    with TestClient(create_app(svc)) as c:
+        r = c.put(f"/api/import/{bid}/rows", json={"ns": [0, 1, 2, 3], "changes": {
+            "add_tags": ["deep", "dub", " deep "], "remove_tags": ["pool"]}})
+        assert r.status_code == 200, r.text
+        assert r.json() == {"updated": 4, "rows": [
+            {"n": 0, "checked": True, "tags": ["dub", "deep"]}, {"n": 1, "checked": True, "tags": ["dub", "deep"]},
+            {"n": 2, "checked": True, "tags": ["must", "deep", "dub"]}, {"n": 3, "checked": True, "tags": ["deep", "dub"]}]}
+        assert [d["phase"] for e, d in events if e == "import"] == ["rows"]  # one event for all
+        # a new tag: listed once, created at the commit (as for a row edit)
+        view = c.get(f"/api/import/{bid}").json()
+        assert view["new_tags"].count("deep") == 1 and "deep" not in svc.store.get_tags()
+        # a tag only one row has: only that row changes
+        r = c.put(f"/api/import/{bid}/rows", json={"ns": [0, 1, 2, 3], "changes": {"remove_tags": ["must"]}}).json()
+        assert [row["tags"] for row in r["rows"]] == [["dub", "deep"], ["dub", "deep"], ["deep", "dub"], ["deep", "dub"]]
+        # what the box added stays when the batch's default tags change
+        c.put(f"/api/import/{bid}/rows", json={"ns": [2], "changes": {"add_tags": ["must"]}})
+        importer.set_default_tags(svc, bid, [], to_all=False)
+        assert importer.load_rows(svc.store, bid)[2]["tags"] == ["deep", "dub", "must"]
+        # invalid: nothing written
+        before = importer.load_rows(svc.store, bid)
+        for changes, code in (({"tags": ["x"], "add_tags": ["y"]}, 400), ({"add_tags": ["x"], "remove_tags": ["x"]}, 400),
+                              ({"add_tags": "x"}, 422), ({"add_tags": [1]}, 422), ({"add": ["x"]}, 422)):
+            assert c.put(f"/api/import/{bid}/rows", json={"ns": [0], "changes": changes}).status_code == code, changes
+        assert c.put(f"/api/import/{bid}/rows", json={"ns": [0, 99], "changes": {"add_tags": ["x"]}}).status_code == 404
+        assert importer.load_rows(svc.store, bid) == before
+
+
+def test_a_batch_of_tag_edits_for_other_items_is_all_or_none(svc):
+    from bc_tagger_server.collection import other_get, other_put
+
+    for i in ("o1", "o2", "o3"):
+        other_put(svc.store, {"id": i, "kind": "track", "title": f"Other {i}", "artist": "C", "tags": ["dub"]})
+    events = []
+    svc.jobs.bus.publish = lambda event, data: events.append((event, data))
+    with TestClient(create_app(svc)) as c:
+        r = c.post("/api/tag-edits", json={"edits": [{"id": "o1", "tags": ["dub", "deep", "dub"]},
+                                                     {"id": "o2", "tags": []}, {"id": "o3", "tags": ["dub"]}]})
+        assert r.status_code == 200, r.text
+        assert r.json() == {"updated": 2, "items": [{"id": "o1", "tags": ["dub", "deep"]}, {"id": "o2", "tags": []},
+                                                    {"id": "o3", "tags": ["dub"]}]}
+        assert [d["id"] for e, d in events if e == "item"] == ["o1", "o2"]  # o3 unchanged: no event
+        assert other_get(svc.store, "o1")["tags"] == ["dub", "deep"] and other_get(svc.store, "o2")["tags"] == []
+        assert other_get(svc.store, "o1")["modified_at"] and other_get(svc.store, "o3").get("modified_at") is None
+        # one id that isn't an Other item: nothing is written
+        r = c.post("/api/tag-edits", json={"edits": [{"id": "o1", "tags": ["x"]}, {"id": "t3244411361", "tags": []}]})
+        assert r.status_code == 404 and "t3244411361" in r.json()["detail"]
+        assert other_get(svc.store, "o1")["tags"] == ["dub", "deep"]
+        assert c.post("/api/tag-edits", json={"edits": []}).status_code == 422
+        # the single form still works
+        assert c.post("/api/tag-edits", json={"id": "o3", "tags": ["pool"]}).json()["applied"] is True

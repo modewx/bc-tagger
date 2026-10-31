@@ -409,6 +409,22 @@ class Service:
             self.jobs.bus.publish("item", {"id": item_id})
         return {"edit_id": edit_id, "item_id": item_id, "tags": clean, "modified_at": stamp}
 
+    def set_other_tags_many(self, edits: list[tuple[str, list[str]]]) -> dict[str, Any]:
+        """A batch of server-owned ("other") items' tags, all in one transaction or none (404 naming the ids that
+        aren't Other items). One ``item`` event per item whose tags changed. ``{updated, items: [{id, tags}]}``."""
+        from fastapi import HTTPException
+
+        from .collection import other_set_tags_many
+
+        try:
+            tags, changed = other_set_tags_many(self.store, edits)
+        except KeyError as e:
+            ids = e.args[0]
+            raise HTTPException(404, f"not server-owned (other) items: {ids[:20]}") from None
+        for item_id in changed:
+            self.jobs.bus.publish("item", {"id": item_id})
+        return {"updated": len(changed), "items": [{"id": i, "tags": t} for i, t in tags.items()]}
+
     def pending_tag_edits(self) -> list[dict[str, Any]]:
         import json
 

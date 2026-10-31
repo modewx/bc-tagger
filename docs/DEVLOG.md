@@ -301,6 +301,13 @@ Tests never touch Bandcamp, the music drive or a real rekordbox library: Bandcam
     one at a time.
   - A second 429 ends the job as before. The bot check still stops at once.
 
+### 2026-10-31
+
+- **"Tag all selected" (user: "a tagger input at the top right … that allows to tag all tracks selected"):**
+  - Import rows can get a tag added or removed in one call, each row keeping its other tags.
+  - The app's own "other" items can have their tags set in one batch.
+  - Both are all-or-nothing.
+
 ## App and extension (`app/`, `extension/`, `shared/`, branch `claude/local-collection-ui-e8f6f6`)
 
 *(Session B's notes go here.)*
