@@ -268,6 +268,11 @@ without it count as earlier than any date (last when newest first). `modified_at
 import commits (new items, every merge, pending adds) and, on extension sync, when the tags changed and the
 extension's date isn't newer than the server's (unchanged tags keep the later date).
 
+`POST /api/tag-edits {id, tags}` edits one item (an `other` item at once; a Bandcamp item through the
+extension's queue). `{edits: [{id, tags}, …]}` sets many server-owned `other` items' tags in one transaction, all
+or none (404 naming the ids that aren't `other` items) → `{updated, items: [{id, tags}]}`; one `item` event per
+item whose tags changed (a batch of 200: up to 200, which the app coalesces into one re-read).
+
 ## rekordbox write guard
 
 Every write to a `master.db` goes through `bc_tagger_server/rbguard.py`. With the default target
@@ -480,9 +485,13 @@ now; this one isn't out yet". There's one download job at a time. Files go into 
 root; refused unless inside an owned root), in `download_format` (default `aiff-lossless`). Each release is
 indexed and its items and rows located as soon as the tool says it finished, while the run goes on (on a
 finisher thread, so reading the tool's output never waits on it); the job's `current`/`total` count finished
-releases. Bandcamp's bot check or a rate limit in the output, or the downloads drive going away (checked every
-second), ends the run at once (SIGTERM, then SIGKILL after 10 s); the releases not finished yet fail with that
-message and the result's `stopped` says why. The tool's parallel output ("[pool-1-thread-N] …", "Progresses:
+releases. Bandcamp's bot check in the output, or the downloads drive going away (checked every second), ends
+the run at once (SIGTERM, then SIGKILL after 10 s); the releases not finished yet fail with that message and the
+result's `stopped` says why. Bandcamp's first rate limit (HTTP 429) in a job backs off instead: the tool's
+threads busy at that moment finish their item, then the run ends; after `downloads.BACKOFF_S` (60 s; "Bandcamp
+is rate-limiting: waiting 60 s, then one at a time" on the job and the rows) the rest, and the ones that failed
+on the 429, go in one more run with `--jobs=1` (one more collection walk). A 429 in that run ends the job
+("Bandcamp is rate-limiting; try again later"). The tool's parallel output ("[pool-1-thread-N] …", "Progresses:
 [thread] x % || …") is tied to our releases by each thread's "Managing item N/M: <id> (p<sale id>)" line (the
 tool's `bc-tagger-item-id` branch since 2026-10-29), so retries and "Could not download item: …" before "Found
 release" belong to their release too. With an older tool, by the "Found release" title; if a title matches none
@@ -529,10 +538,13 @@ releases, into `test-downloads/` only.
 recorded answers only (tests and e2e; `server/tests/fixtures/`); `BC_TAGGER_BANDCAMP_OFFLINE=1` uses the
 server's own cache only.
 
-Many rows at once (select all): `PUT /api/import/<id>/rows {ns: [n, …], changes: {checked?, tags?}}` →
-`{updated, rows: [{n, checked, tags}]}`. Every row or none (one transaction, with the batch's counts), one `import`
-event `{phase: "rows", ns, current, total}`; an unknown `n` is a 404 before anything changes. `tags` become those
-rows' own list, as for one row.
+Many rows at once (select all): `PUT /api/import/<id>/rows {ns: [n, …], changes: {checked?, tags? | add_tags?,
+remove_tags?}}` → `{updated, rows: [{n, checked, tags}]}`. Every row or none (one transaction, with the batch's
+counts), one `import` event `{phase: "rows", ns, current, total}`; an unknown `n` is a 404 before anything changes.
+`tags` become those rows' own list, as for one row. `add_tags` / `remove_tags` (the "tag all selected" box): each
+row keeps its own tags, minus the removed, plus the added at the end, no repeats; a later default-tags switch
+never takes those back. `tags` with either, or a tag both added and removed, is a 400. New tags are created at
+the commit, as for a row edit (`new_tags` lists them meanwhile).
 
 Rows below the threshold keep up to three candidates to pick (`PUT …/rows/<n> {choose}`). A row the
 search misses can be linked from the extension to the Bandcamp page the user has open

@@ -51,6 +51,11 @@ class TagEditBody(BaseModel):
     tags: list[str]
 
 
+class TagEditsBody(BaseModel):
+    """Several edits at once: ``{edits: [{id, tags}, ...]}`` (server-owned "other" items, in one transaction)."""
+    edits: list[TagEditBody] = Field(min_length=1, max_length=20000)
+
+
 class AckBody(BaseModel):
     ids: list[int]
 
@@ -133,9 +138,11 @@ class CommitBody(BaseModel):
 
 
 class BulkRowChanges(BaseModel):
-    model_config = ConfigDict(extra="forbid")  # only these two apply to many rows at once
+    model_config = ConfigDict(extra="forbid")  # only these apply to many rows at once
     checked: Optional[bool] = None
     tags: Optional[list[str]] = None
+    add_tags: Optional[list[str]] = None  # each row keeps its own tags: these join them
+    remove_tags: Optional[list[str]] = None  # ... and these leave them (not with tags)
 
 
 class RowsBody(BaseModel):
@@ -342,7 +349,10 @@ def create_app(service: Service | None = None) -> FastAPI:
         return svc.sync_tags(body.tags)
 
     @app.post("/api/tag-edits")
-    def tag_edit(body: TagEditBody) -> dict:
+    def tag_edit(body: Union[TagEditsBody, TagEditBody]) -> dict:
+        """One edit ``{id, tags}``, or a batch ``{edits: [{id, tags}, ...]}`` of "other" items, all or none."""
+        if isinstance(body, TagEditsBody):
+            return svc.set_other_tags_many([(e.id, e.tags) for e in body.edits])
         return svc.queue_tag_edit(body.id, body.tags)
 
     @app.get("/api/tag-edits/pending")
@@ -443,7 +453,8 @@ def create_app(service: Service | None = None) -> FastAPI:
 
     @app.put("/api/import/{batch_id}/rows")
     def import_rows(batch_id: str, body: RowsBody) -> dict:
-        """``{ns, changes: {checked?, tags?}}`` → ``{updated, rows: [{n, checked, tags}]}``: all or none."""
+        """``{ns, changes: {checked?, tags? | add_tags?, remove_tags?}}`` → ``{updated, rows: [{n, checked, tags}]}``:
+        all or none."""
         return _import_call(imp.update_rows, svc, batch_id, body.ns, body.changes.model_dump(exclude_unset=True))
 
     @app.put("/api/import/{batch_id}/rows/{n}")

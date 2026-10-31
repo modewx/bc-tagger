@@ -107,15 +107,43 @@ def other_put(store: Store, item: dict, collection_id: int | None = None) -> dic
     return item
 
 
+def _clean_item_tags(tags: list[str]) -> list[str]:
+    return [t for t in dict.fromkeys(tags) if isinstance(t, str) and t.strip()]
+
+
 def other_set_tags(store: Store, item_id: str, tags: list[str]) -> dict | None:
     item = other_get(store, item_id)
     if item is None:
         return None
-    clean = [t for t in dict.fromkeys(tags) if isinstance(t, str) and t.strip()]
+    clean = _clean_item_tags(tags)
     if clean != item.get("tags"):
         item["modified_at"] = now_ms_iso()
     item["tags"] = clean
     return other_put(store, item)
+
+
+def other_set_tags_many(store: Store, edits: list[tuple[str, list[str]]]) -> tuple[dict[str, list[str]], list[str]]:
+    """Several Other items' tags in one transaction, every one or none (a ``KeyError`` lists ids that aren't
+    Other items; the last edit of an id wins). ``({id: tags}, [ids whose tags changed])``."""
+    wanted = {item_id: _clean_item_tags(tags) for item_id, tags in edits}
+    ids = list(wanted)
+    stamp, ts = now_ms_iso(), now_iso()
+    changed: list[str] = []
+    with store.tx() as c:
+        marks = ",".join("?" * len(ids))
+        found = {r["id"]: json.loads(r["data"])
+                 for r in c.execute(f"SELECT id, data FROM other_items WHERE id IN ({marks})", ids)}
+        missing = [i for i in ids if i not in found]
+        if missing:
+            raise KeyError(missing)
+        for item_id, tags in wanted.items():
+            item = found[item_id]
+            if tags == item.get("tags"):
+                continue
+            item.update(tags=tags, modified_at=stamp)
+            c.execute("UPDATE other_items SET data = ?, updated_at = ? WHERE id = ?", (json.dumps(item), ts, item_id))
+            changed.append(item_id)
+    return wanted, changed
 
 
 # -- pending adds (server -> extension) ------------------------------------------------------

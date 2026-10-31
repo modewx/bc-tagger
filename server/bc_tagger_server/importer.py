@@ -1036,17 +1036,24 @@ def update_row(svc, batch_id: str, n: int, changes: dict) -> dict:
 
 def update_rows(svc, batch_id: str, ns: list[int], changes: dict) -> dict:
     """Tick, untick or tag many rows at once (select-all over hundreds): every row or none, in one transaction
-    with the batch's counts, then one ``import`` event (``phase: "rows"``). ``changes``: ``checked`` and/or
-    ``tags`` (the rows' own list from then on, as for one row)."""
+    with the batch's counts, then one ``import`` event (``phase: "rows"``). ``changes``: ``checked``, and
+    ``tags`` (the rows' own list from then on, as for one row) or ``add_tags`` / ``remove_tags`` (each row keeps
+    its own tags, minus the removed, plus the added at the end; never the defaults' to take back). Tags new to
+    the vocabulary are created at the commit, as for a row edit (``new_tags`` lists them meanwhile)."""
     store = svc.store
     batch = load_batch(store, batch_id)
     if batch["status"] == "committed":
         raise ImportError_("the batch was already imported")
     if batch_id in svc.committing:
         raise ImportError_("the batch is being imported")
-    changes = {k: v for k, v in changes.items() if k in ("checked", "tags") and v is not None}
+    changes = {k: v for k, v in changes.items() if k in ("checked", "tags", "add_tags", "remove_tags") and v is not None}
     if not changes:
-        raise ImportError_("nothing to change: send checked and/or tags")
+        raise ImportError_("nothing to change: send checked, tags, add_tags or remove_tags")
+    if "tags" in changes and changes.keys() & {"add_tags", "remove_tags"}:
+        raise ImportError_("send tags (each row's whole list) or add_tags/remove_tags, not both")
+    add, remove = _clean_tags(changes.get("add_tags")), _clean_tags(changes.get("remove_tags"))
+    if set(add) & set(remove):
+        raise ImportError_(f"added and removed at once: {sorted(set(add) & set(remove))}")
     rows = load_rows(store, batch_id)
     by_n = {r["n"]: r for r in rows}
     wanted = list(dict.fromkeys(ns))
@@ -1058,6 +1065,11 @@ def update_rows(svc, batch_id: str, ns: list[int], changes: dict) -> dict:
         row = by_n[n]
         if tags is not None:
             row["tags"], row["default_added"] = list(tags), []
+        elif add or remove:
+            new = list(dict.fromkeys([t for t in row["tags"] if t not in remove] + add))
+            if new != row["tags"]:  # the user's choice now: a later defaults switch won't take these back
+                defaults = [t for t in _default_added(batch, row) if t not in add and t not in remove]
+                row["tags"], row["default_added"] = new, defaults
         if "checked" in changes:
             row["checked"] = bool(changes["checked"])
     _update_stats(store, batch, rows)

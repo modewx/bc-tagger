@@ -199,10 +199,11 @@ def _match_release(title: str, artist: str, releases: list[dict], taken: set[str
 
 def run_releases(settings, releases: list[dict], audio_format: str = "aiff-lossless", force: bool = False,
                  on_line: Callable[..., None] | None = None, jobs: int | None = None,
-                 on_done: Callable[[dict], None] | None = None, log_path: Path | None = None) -> dict[str, Any]:
+                 on_done: Callable[[dict], None] | None = None, log_path: Path | None = None,
+                 rate_limit: str = "stop") -> dict[str, Any]:
     """Download several releases in one downloader run, ``download_parallel`` at a time. ``releases``:
     ``[{release, title, artist}]``. Returns ``{"releases": {release: {outcome, ok, folder, files, errors, retries,
-    preorder}}, "stopped", "stop_error", "exit_code", "log_tail"}``; ``outcome``: downloaded | on_disk | cached |
+    preorder}}, "stopped", "stop_error", "backed_off", "exit_code", "log_tail"}``; ``outcome``: downloaded | on_disk | cached |
     not_in_collection | challenged | rate_limited | failed | unreported (the output never said what became of
     it), or unmatched (the output named a release we couldn't tie to this one; ``folders`` lists every release
     folder written). ``preorder``: its release date, for a preorder. Each thread's lines are tied to a release by
@@ -212,8 +213,12 @@ def run_releases(settings, releases: list[dict], audio_format: str = "aiff-lossl
     while the run goes on; it's called on the thread reading the tool's output, so it must be quick.
     Bandcamp's bot check or a rate limit in the output, or the downloads drive going away, ends the run at once
     (``stopped``: challenged | rate_limited | not_mounted, with the drive's message in ``stop_error``); releases
-    not finished by then get that outcome (failed, for the drive). ``log_path``: the run's output goes there as
-    it comes (redacted, without progress lines), after the command (without the cookies file)."""
+    not finished by then get that outcome (failed, for the drive). ``rate_limit="back_off"``: Bandcamp's first rate
+    limit doesn't end the run at once; the items being worked on (by the tool's threads busy at that moment) finish,
+    then the run ends (``backed_off``). The releases not finished by then, and the ones that failed on the rate
+    limit, come back ``rate_limited`` without an ``on_done``: the caller pauses and runs them again one at a time.
+    ``log_path``: the run's output is appended there as it comes (redacted, without progress lines), after the
+    command (without the cookies file)."""
     ids = [r["release"] for r in releases]
     cmd = release_command(settings, ids, audio_format, force, jobs)
     target, root = _downloads_root(settings)  # again: the drive may have gone since the job started
@@ -232,10 +237,12 @@ def run_releases(settings, releases: list[dict], audio_format: str = "aiff-lossl
     lines: list[str] = []
     stopped: dict[str, Any] = {}
     stop_lock, ended = threading.Lock(), threading.Event()
+    busy: dict[str, str | None] = {}  # thread -> the item it's on (from its "Managing item" line)
+    draining: set[str] | None = None  # back_off: the threads still finishing since Bandcamp first rate-limited
     log = None
     if log_path is not None:
         Path(log_path).parent.mkdir(parents=True, exist_ok=True)
-        log = open(log_path, "w", encoding="utf-8")  # noqa: SIM115 (closed below)
+        log = open(log_path, "a", encoding="utf-8")  # noqa: SIM115 (closed below); a job's second run appends
         log.write(f"# {time.strftime('%Y-%m-%d %H:%M:%S')}  {' '.join(shown(cmd))}\n")
         log.flush()
     proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
@@ -268,12 +275,24 @@ def run_releases(settings, releases: list[dict], audio_format: str = "aiff-lossl
                 "folder": folder, "files": files, "errors": st["errors"][-5:], "retries": st["retries"],
                 "preorder": st["preorder"]}
 
-    def finished(i: str, outcome: str) -> None:
+    def drained(thread: str | None) -> None:
+        """``thread`` is done with what it was on when Bandcamp first rate-limited: once all are, end the run."""
+        busy.pop(thread, None)
+        if draining is not None:
+            draining.discard(thread)
+            if not draining:
+                stop("backoff")
+
+    def finished(i: str, outcome: str, thread: str | None = None) -> None:
         st = state[i]
+        if outcome == "failed" and st["errors"] and _RATE_LIMIT.search(st["errors"][-1]):
+            outcome = "rate_limited"  # gave up on the rate limit (back_off: it goes again after the pause)
         st["outcome"] = outcome
-        if on_done and not st["reported"]:
+        if on_done and not st["reported"] and outcome != "rate_limited":
             st["reported"] = True
             on_done(result(i, outcome))
+        if thread is not None:
+            drained(thread)
 
     threading.Thread(target=guard, name="downloader-guard", daemon=True).start()
     try:
@@ -296,12 +315,19 @@ def run_releases(settings, releases: list[dict], audio_format: str = "aiff-lossl
             if log:
                 log.write(line + "\n")
                 log.flush()
+            m = _THREAD.match(line)
+            thread, msg = (m.group(1), m.group(2)) if m else ("main", line)
             if is_challenge(line) or "Client Challenge" in line:  # never retry past it: stop the run now
                 stop("challenged")
             elif _RATE_LIMIT.search(line):
-                stop("rate_limited")
-            m = _THREAD.match(line)
-            thread, msg = (m.group(1), m.group(2)) if m else ("main", line)
+                if rate_limit != "back_off":
+                    stop("rate_limited")
+                elif draining is None:  # the first one: let what's being worked on finish, then end the run
+                    draining = set(busy)
+                    say(None, "Bandcamp is rate-limiting: letting what's downloading finish, then waiting and going "
+                              "on one at a time", None)
+                    if not draining:
+                        stop("backoff")
             if (found := _FOUND.search(msg)) is not None:
                 if thread_release.get(thread):  # its "Managing item" line said which
                     say(thread_release[thread], "found", None)
@@ -317,6 +343,8 @@ def run_releases(settings, releases: list[dict], audio_format: str = "aiff-lossl
                 folders.append(msg.split("Release folder: ", 1)[1].strip())
             if (managing := _MANAGING.match(msg)) is not None:
                 rel = managing.group(1) if managing.group(1) in state else None
+                drained(thread)  # whatever it was on before is over
+                busy[thread] = rel
                 thread_release[thread] = rel  # else (an older tool) the next "Found release" says which
                 if rel:
                     taken.add(rel)
@@ -349,13 +377,13 @@ def run_releases(settings, releases: list[dict], audio_format: str = "aiff-lossl
                 say(rel, "downloading…", None)
             elif "successfully downloaded" in msg:
                 say(rel, "downloaded; unpacking done", 100.0)
-                finished(rel, "downloaded")
+                finished(rel, "downloaded", thread)
             elif "already exists on disk" in msg:
-                finished(rel, "on_disk")
+                finished(rel, "on_disk", thread)
             elif msg.startswith("Could not download item") or "is a preorder; skipping" in msg or _GONE in msg:
                 st["errors"].append(msg)
                 say(rel, msg[-200:], st["percent"])
-                finished(rel, "failed")
+                finished(rel, "failed", thread)
             else:
                 say(rel, msg[-200:], st["percent"])
         code = proc.wait()
@@ -369,6 +397,8 @@ def run_releases(settings, releases: list[dict], audio_format: str = "aiff-lossl
             log.close()
     text = "\n".join(lines)
     run_outcome = stopped.get("why")
+    if run_outcome == "backoff":  # ended for the pause: what didn't finish goes again
+        run_outcome = "rate_limited"
     if run_outcome is None and "None of the requested items are in the collection" in text:
         run_outcome = "not_in_collection"
     ignored = re.search(r"Ignoring \d+ already downloaded items", text) is not None
@@ -386,8 +416,10 @@ def run_releases(settings, releases: list[dict], audio_format: str = "aiff-lossl
         if outcome in ("failed", "unreported") and not st["errors"]:
             st["errors"] = [ln for ln in lines if "ERROR" in ln][-3:]  # the run's own errors, if any
         out[i] = result(i, outcome)
-    return {"releases": out, "folders": folders, "stray_errors": stray_errors[-5:], "stopped": stopped.get("why"),
-            "stop_error": stopped.get("error"), "exit_code": code, "log_tail": lines[-20:]}
+    why = stopped.get("why")
+    return {"releases": out, "folders": folders, "stray_errors": stray_errors[-5:],
+            "stopped": None if why == "backoff" else why, "stop_error": stopped.get("error"),
+            "backed_off": draining is not None, "exit_code": code, "log_tail": lines[-20:]}
 
 
 def run_release(settings, release_id: str, audio_format: str = "aiff-lossless", force: bool = False,

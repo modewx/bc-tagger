@@ -126,6 +126,7 @@ def test_a_bot_check_mid_run_ends_it_and_fails_the_rest(svc, tmp_path, monkeypat
     rel.write_text(json.dumps({**RELEASES, "a10": {**RELEASES["a10"], "fail": fail}}))
     args = tmp_path / "args.jsonl"
     monkeypatch.setenv("BC_TAGGER_STUB_ARGS", str(args))
+    monkeypatch.setattr(downloads, "BACKOFF_S", 0.01)  # a 429: one pause, then the rest one at a time
     started = time.monotonic()
     result = downloads.run(svc, ["t200", "t100", "a70", "t601"])
     assert time.monotonic() - started < 1.5  # not the stub's 2 s: it was stopped
@@ -135,7 +136,12 @@ def test_a_bot_check_mid_run_ends_it_and_fails_the_rest(svc, tmp_path, monkeypat
     for ref in ("t100", "a70", "t601"):
         assert items[ref]["state"] == "failed" and items[ref]["message"] == result["stopped"], ref
     assert [r["release"] for r in result["releases"]] == ["t200", "a10", "a70", "t601"]
-    assert len(args.read_text().splitlines()) == 1
+    runs = [json.loads(line) for line in args.read_text().splitlines()]
+    if fail == "challenge":
+        assert len(runs) == 1  # the bot check: at once, never a second run
+    else:  # the first 429 backed off; it came again in the one-at-a-time run
+        assert len(runs) == 2 and "--jobs=1" in runs[1]
+        assert [a for a in runs[1] if a.startswith("--item-id=")] == ["--item-id=a10", "--item-id=a70", "--item-id=t601"]
     assert not (tmp_path / "owned" / "Artist A").exists() and not (tmp_path / "owned" / "Stub Artist").exists()
 
 
@@ -517,3 +523,59 @@ def test_each_run_keeps_its_output(svc, tmp_path, monkeypatch):
     assert text.rstrip().endswith("# exit 0")
     kept = sorted(logs.glob("*.log"))
     assert len(kept) == downloads.KEEP_LOGS and path in kept and not (logs / "download-items-old5.log").exists()
+
+
+def _limited_job(svc, tmp_path, monkeypatch, fail):
+    """download_parallel 2: [Single, Album A] then [Look At Yourself, Song t601]; Album A's download page answers
+    429. The stub carries on 5 s after that group, so finishing fast means the server ended the run itself."""
+    svc.settings.update({"download_parallel": 2})
+    _more_owned(svc, "t601")
+    rel = tmp_path / "releases.json"
+    rel.write_text(json.dumps({**RELEASES, "a10": {**RELEASES["a10"], "fail": fail},
+                               "a70": {"artist": "Artist G", "title": "Look At Yourself", "year": 2020, "tracks": ["Look"]},
+                               "t601": {"artist": "Artist F", "title": "Song t601", "year": 2026, "tracks": ["Song t601"]}}))
+    args = tmp_path / "args.jsonl"
+    monkeypatch.setenv("BC_TAGGER_STUB_ARGS", str(args))
+    monkeypatch.setenv("BC_TAGGER_STUB_AFTER_STOP", "5")
+    monkeypatch.setattr(downloads, "BACKOFF_S", 0.01)
+    events, progress = [], []
+    monkeypatch.setattr(svc.jobs.bus, "publish", lambda kind, data: events.append((kind, data)))
+
+    class Ctx:
+        job = type("Job", (), {"id": "download-test"})()
+
+        def progress(self, cur, total, message):
+            progress.append(message)
+
+    started = time.monotonic()
+    result = downloads.run(svc, ["t200", "t100", "a70", "t601"], ctx=Ctx())
+    assert time.monotonic() - started < 4  # never waited out the stub's 5 s
+    runs = [json.loads(line) for line in args.read_text().splitlines()]
+    return result, runs, events, progress
+
+
+def test_a_first_429_backs_off_then_the_rest_go_one_at_a_time(svc, tmp_path, monkeypatch):
+    result, runs, events, progress = _limited_job(svc, tmp_path, monkeypatch, "rate_limit_once")
+    assert result["stopped"] is None
+    assert all(e["state"] == "done" and e["located"] for e in result["items"]), result["items"]
+    assert len(runs) == 2 and "--jobs=2" in runs[0] and "--jobs=1" in runs[1]
+    # Single was being downloaded when the 429 came: it finished in the first run; the rest went one at a time
+    assert [a for a in runs[1] if a.startswith("--item-id=")] == ["--item-id=a10", "--item-id=a70", "--item-id=t601"]
+    assert any(m.startswith("Bandcamp is rate-limiting: letting what's downloading finish") for m in progress)
+    waiting = "Bandcamp is rate-limiting: waiting 0.01 s, then one at a time"
+    assert waiting in progress
+    assert {d["ref"] for k, d in events if k == "download" and d["message"] == waiting} == {"t100", "a70", "t601"}
+    log = Path(result["log"]).read_text()  # both runs, one after the other
+    assert "Status=429" in log and [ln for ln in log.splitlines() if ln.startswith("# ") and "--jobs=1" in ln]
+    assert len([ln for ln in log.splitlines() if ln.startswith("# exit")]) == 2
+
+
+def test_a_second_429_after_backing_off_ends_the_job(svc, tmp_path, monkeypatch):
+    result, runs, events, progress = _limited_job(svc, tmp_path, monkeypatch, "rate_limit_page")
+    items = by_ref(result)
+    assert result["stopped"] == downloads.MESSAGES["rate_limited"]
+    assert items["t200"]["state"] == "done" and items["t200"]["located"]
+    for ref in ("t100", "a70", "t601"):
+        assert items[ref]["state"] == "failed" and items[ref]["message"] == result["stopped"], ref
+    assert len(runs) == 2 and "--jobs=1" in runs[1]
+    assert not (tmp_path / "owned" / "Artist G").exists() and not (tmp_path / "owned" / "Artist F").exists()

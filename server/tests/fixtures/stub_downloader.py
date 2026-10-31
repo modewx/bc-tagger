@@ -4,7 +4,8 @@ Run by the server instead of the jar when ``BC_TAGGER_DOWNLOADER_STUB=<this file
 jar's lines and writes ``<folder>/<artist>/<year> - <title>/NN <track>.aiff`` with tags.
 
 ``BC_TAGGER_STUB_RELEASES=<json file>``: ``{"a123": {"artist", "title", "year", "tracks": [..],
-"fail": "not_in_collection"|"challenge"|"rate_limit"|"error"|"page_error"|"page_challenge"|"exception"|"silent",
+"fail": "not_in_collection"|"challenge"|"rate_limit"|"error"|"page_error"|"page_challenge"|"exception"|"silent"
+|"rate_limit_page"|"rate_limit_once",
 "retry_error": "<exception text>", "retry_wait": s, "preorder": "<release date>", "out": [tracks out now]}}``;
 unknown ids get a generic release. Like the tool since 2026-10-29, "Managing item N/M: <id> (p<sale id>)" says
 which item a thread's next lines are about (``BC_TAGGER_STUB_OLD=1``: the older "Managing item N/M").
@@ -12,7 +13,11 @@ which item a thread's next lines are about (``BC_TAGGER_STUB_OLD=1``: the older 
 item: Could not perform task after 3 retries (last: …)"); ``page_challenge``: its download page is Bandcamp's
 bot check (the tool gives up that item, then carries on after ``BC_TAGGER_STUB_AFTER_STOP``); ``exception``:
 the thread hits an unexpected exception after "Found release"; ``silent``: nothing more is said about it after
-"Managing item". ``preorder``: without ``--preorders`` it's skipped; with it, only the ``out`` tracks come. ``retry_error``: that release's first attempt fails with it part way and is
+"Managing item". ``preorder``: without ``--preorders`` it's skipped; with it, only the ``out`` tracks come.
+``rate_limit_page``: its download page answers 429 (retried, then "Could not download item: … Status=429"), and
+the stub waits ``BC_TAGGER_STUB_AFTER_STOP`` after that group before going on, so only the server ending the run
+keeps the next group from being written; ``rate_limit_once``: the same in the first run only (a marker file
+next to the releases JSON), then it downloads. ``retry_error``: that release's first attempt fails with it part way and is
 retried; ``retry_wait``: seconds to wait after "Retrying (1/3)." (the other releases have started by then).
 ``BC_TAGGER_STUB_DELAY=<seconds>``: wait that long before writing (to see progress in a UI).
 ``BC_TAGGER_STUB_RETRY=1``: every release's first attempt fails ("Read timed out") and is retried.
@@ -110,10 +115,23 @@ def main() -> int:
             group.remove(i)
         thread = {i: (f"pool-1-thread-{k + 1}" if jobs > 1 else None) for k, i in enumerate(group)}
         names, folders = {}, {}
-        gone = set()
+        gone, limited = set(), False
         for n, i in enumerate(group, start + 1):
             rel, t = rels[i], thread[i]
             log(f"Managing item {n}/{len(todo)}" + ("" if os.environ.get("BC_TAGGER_STUB_OLD") else f": {i} (p{i[1:]})"), t)
+            once = Path(os.environ.get("BC_TAGGER_STUB_RELEASES") or folder / "x").parent / f".stub-429-{i}"
+            if rel.get("fail") == "rate_limit_page" or (rel.get("fail") == "rate_limit_once" and not once.exists()):
+                if rel["fail"] == "rate_limit_once":
+                    once.touch()
+                status = '"org.jsoup.HttpStatusException: HTTP error fetching URL. Status=429"'
+                for k in range(1, 4):
+                    log(f"Error while trying: {status}.", t)
+                    log(f"Retrying ({k}/3).", t)
+                log(f"Error while trying: {status}.", t)
+                log(f"Could not download item: Could not perform task after 3 retries (last: {status[1:-1]}).", t)
+                gone.add(i)
+                limited = True
+                continue
             if rel.get("fail") == "page_error":
                 for k in range(1, 4):
                     log('Error while trying: "java.lang.NullPointerException: null".', t)
@@ -178,6 +196,8 @@ def main() -> int:
             if "p" + i[1:] not in cache:
                 with cache_file.open("a") as f:
                     f.write("p" + i[1:] + "\n")
+        if limited:  # carries on like a tool that didn't notice
+            time.sleep(float(os.environ.get("BC_TAGGER_STUB_AFTER_STOP", "2")))
     return 0
 
 
