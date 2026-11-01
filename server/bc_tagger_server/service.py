@@ -1077,6 +1077,17 @@ class Service:
         batch["job_id"] = job.id
         return batch, job
 
+    def start_add_folders(self, batch_id: str, folders: Any):
+        """Add folders to an open import batch (scan, rows, look up the new rows): a job, after the batch's running
+        one if it has one. Returns (job, whether it waits for that one)."""
+        from . import filesimport, importer
+
+        folders, busy = filesimport.prepare_add(self, batch_id, folders)
+        job = self.jobs.submit("import-add", lambda ctx: filesimport.add_folders(self, batch_id, folders, ctx))
+        if not busy:  # otherwise the batch shows its running job until this one starts
+            importer.set_job(self, batch_id, job)
+        return job, busy
+
     def start_relocate(self, batch_id: str, rows: Any = "missing", scan: str | None = "quick"):
         from . import importer
 

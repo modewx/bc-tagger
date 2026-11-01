@@ -589,7 +589,8 @@ import: rows, review, commit, log (`source: "files"`), `modified_at` and "#".
   drive, is refused (400) before anything is written.
 - **Scanning (the job):** each folder gets a quick scan, recorded under the configured root that holds it. Then
   it takes the indexed audio files under the folder created (birthtime, else mtime) on or after `since` (a
-  `YYYY-MM-DD` local date or an ISO date-time).
+  `YYYY-MM-DD` local date or an ISO date-time). `since: null` (or missing, or `"all"`) takes every file under the
+  folder; the batch's `folders` then show `since: null`.
 - **One row per track:** files in the same release folder with the same name, or the same disc, track and
   title, are one track; the row uses the file `format_preference` ranks first and lists the others in
   `file.formats`.
@@ -617,6 +618,49 @@ default_tags: ["pool"], lookup}`: the owned root and the not-owned `complete` ro
 that folder's last files-import (remembered when one is created), else 7 days ago. It only reads, and never
 touches the music drive: `mounted` comes from the mount table and `exists` is the same value. A missing folder
 is reported when the import starts.
+
+### Folders dropped on the page
+
+The browser never gives a dropped folder's path, only its name and its files' relative paths and sizes. Two calls
+turn that into rows:
+
+`POST /api/fs/find-folder {name, files: [{rel, size}], count?, batch_id?}` → `{matches: [{path, source,
+audio_files}], ms, sources, timed_out}`. `files` is a sample (up to 200; audio files first), `count` the number of
+audio files the browser saw. A folder matches only if it has that name and every sampled file at that path with
+that size. It searches read only, about 2 s at most, and only when called:
+
+1. **the index:** folders whose indexed files end in `/<name>/<rel>` (an unplugged drive's are skipped);
+2. **Spotlight:** `mdfind` for folders of that name (1 s timeout; left out of `sources` when it fails);
+3. **a walk**, only when neither found it or Spotlight failed: breadth first, at most 4 folders deep, from the
+   batch's folders and their parents, `last_browse_dir`, the folders of earlier files imports and their parents,
+   the configured roots, `~/Music`, `~/Downloads`, `~/Desktop`, `~/Documents` and the home folder's other
+   folders. `timed_out` says it ran out of time.
+
+Every match is returned (two copies: the page asks which), those holding `count` audio files first;
+`audio_files` is null when counting took too long. Hidden folders and `~/Library` are never looked in. A `~` in a
+path found on disk is a folder's real name: only paths from the settings have `~` expanded. A bad sample (a name
+with `/`, a `rel` with `..` or a leading `/`, no files) is a 400.
+
+`POST /api/import/<id>/folders {folders: [{path, since?}]}` → `{job_id, queued}` adds folders to an open batch of
+any kind (JSON or files, server or browser lookups). The job (`import-add`):
+
+- checks each folder as above (400 before anything is written); `path` must be absolute and is used as it is;
+- scans them like a files import (`since` null: every file) and skips tracks the batch already has (a row's
+  file in any format, or the file a row is located to);
+- appends the rows, numbered after the batch's (`line` after the highest, `n` after the last), with the
+  batch's default tags; adds the folders to `folders` (a folder it already has keeps the earlier `since`) and
+  remembers them like a files import does; records `added_folders: [{at, folders, found, rows, already, scan}]`;
+- looks up only the new rows. Server lookups run in the job; for browser lookups the batch goes back to step
+  `browser` and the page's lookups take the new rows (if they're running, they simply pick them up);
+- rows from files follow the files-import rules in any batch: duplicates start unchecked, location updates are
+  listed and applied at commit.
+
+While it scans, the batch's step is `adding` (`import` events with `phase: "adding"`, then `resolving` for the
+server lookups, then `done`); afterwards the batch is as it was (ready, or back to its browser lookups). If the
+scan fails (the drive went away), nothing is added, the batch keeps its state and its `error` says why. A batch
+with a running job takes the add after it (`queued: true`; the batch shows its running job until the add starts).
+409 for a batch that's committed, committing, interrupted (resume it first) or stopped with an error; 404 for an
+unknown batch.
 
 ### Import rows straight to rekordbox
 

@@ -67,11 +67,27 @@ class OwnershipBody(BaseModel):
 
 
 class FilesImportBody(BaseModel):
-    folders: list[dict[str, Any]]  # [{path, since: "YYYY-MM-DD" | ISO date-time}]
+    folders: list[dict[str, Any]]  # [{path, since: "YYYY-MM-DD" | ISO date-time | null or "all" (every file)}]
     default_tags: list[str] = Field(default_factory=list)
     default_tags_all: bool = False
     lookup: Literal["server", "browser"] = "server"
     name: Optional[str] = None
+
+
+class AddFoldersBody(BaseModel):
+    folders: list[dict[str, Any]] = Field(max_length=100)  # [{path, since: "YYYY-MM-DD" | null (every file)}]
+
+
+class FolderFile(BaseModel):
+    rel: str = Field(max_length=4096)  # relative to the dropped folder, "/"-separated
+    size: int = Field(ge=0)
+
+
+class FindFolderBody(BaseModel):
+    name: str = Field(max_length=1024)
+    files: list[FolderFile] = Field(max_length=200)  # a sample, audio files first
+    count: Optional[int] = None  # audio files the browser saw (may be capped)
+    batch_id: Optional[str] = None
 
 
 class RevealLogBody(BaseModel):
@@ -422,6 +438,20 @@ def create_app(service: Service | None = None) -> FastAPI:
             raise HTTPException(400, str(e)) from e
         return {"batch_id": batch["batch_id"], "job_id": job.id, "estimate": batch["estimate"]}
 
+    @app.post("/api/import/{batch_id}/folders")
+    def import_add_folders(batch_id: str, body: AddFoldersBody) -> dict:
+        """Add folders (dropped on the page, found with ``/api/fs/find-folder``) to an open batch of any kind: a job
+        that scans them, appends their rows and looks up only those. 409 when the batch can't take them now."""
+        try:
+            job, queued = svc.start_add_folders(batch_id, body.folders)
+        except KeyError as e:
+            raise HTTPException(404, f"unknown import batch: {e}") from e
+        except imp.ImportConflict as e:
+            raise HTTPException(409, str(e)) from e
+        except imp.ImportError_ as e:
+            raise HTTPException(400, str(e)) from e
+        return {"job_id": job.id, "queued": queued}
+
     from . import importlog
 
     @app.get("/api/import/logs")
@@ -613,6 +643,17 @@ def create_app(service: Service | None = None) -> FastAPI:
             raise HTTPException(403, str(e)) from e
         except FileNotFoundError as e:
             raise HTTPException(404, str(e)) from e
+
+    @app.post("/api/fs/find-folder")
+    def fs_find_folder(body: FindFolderBody) -> dict:
+        """Where a folder dropped on the page is (the browser gives only its name and its files' relative paths and
+        sizes): every folder of that name holding those files. Read only, about 2 s at most."""
+        from .findfolder import BadSample, find
+
+        try:
+            return find(svc, body.name, [(f.rel, f.size) for f in body.files], body.count, body.batch_id)
+        except BadSample as e:
+            raise HTTPException(400, str(e)) from e
 
     @app.get("/api/index/search")
     def index_search(q: str = "", limit: int = 20) -> list[dict]:
