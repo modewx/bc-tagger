@@ -47,6 +47,15 @@ class ImportError_(ValueError):
     pass
 
 
+class ImportConflict(ImportError_):
+    """Not possible in the batch's current state (HTTP 409)."""
+
+
+def _from_files(batch: dict) -> bool:
+    """A files import, or a batch folders were added to: it has rows from files."""
+    return batch.get("kind") == "files" or bool(batch.get("folders"))
+
+
 def _clean_tags(tags) -> list[str]:
     return [t.strip() for t in dict.fromkeys(tags or []) if isinstance(t, str) and t.strip()]
 
@@ -248,7 +257,7 @@ def _refresh_stats(store, batch: dict, rows: list[dict] | None = None) -> dict:
 def _update_stats(store, batch: dict, rows: list[dict]) -> None:
     """The batch's counts (and a files batch's location updates) from ``rows``, not saved."""
     batch["stats"] = compute_stats(batch, rows)
-    if batch.get("kind") == "files" and batch["status"] != "committed":
+    if _from_files(batch) and batch["status"] != "committed":
         batch["location_updates"] = location_updates(store, batch, rows)
         batch["stats"]["location_updates"] = len(batch["location_updates"])
 
@@ -265,10 +274,10 @@ def _location_state(store, item_id: str) -> str | None:
 
 
 def location_updates(store, batch: dict, rows: list[dict]) -> list[dict]:
-    """Files imports: collection items the batch's files match that aren't located yet (and weren't located by
-    hand). The commit locates them to those files whether or not their row is checked (the checkbox is
-    only about tags). ``[{item_id, path, release_dir, kind, n, line, title, artist, checked}]``."""
-    if batch.get("kind") != "files":
+    """Files imports (and folders added to a batch): collection items the batch's files match that aren't located
+    yet (and weren't located by hand). The commit locates them to those files whether or not their row is checked
+    (the checkbox is only about tags). ``[{item_id, path, release_dir, kind, n, line, title, artist, checked}]``."""
+    if not _from_files(batch):
         return []
     out: list[dict] = []
     seen: set[str] = set()
@@ -440,10 +449,11 @@ def _pinned(row: dict) -> bool:
 
 
 def _uncheck_duplicates(batch: dict, rows: list[dict]) -> None:
-    """Files imports: rows already in the collection start unchecked (once: the user may tick them)."""
-    if batch.get("kind") != "files":
-        return
+    """Rows from files (files imports, folders added to a batch): those already in the collection start unchecked
+    (once: the user may tick them)."""
     for row in rows:
+        if not (batch.get("kind") == "files" or row.get("file")):
+            continue
         if row.get("duplicate") and not row.get("duplicate_unchecked") and not row.get("committed"):
             row.update(checked=False, duplicate_unchecked=True)
 
@@ -857,6 +867,8 @@ def _finish_browser(svc, batch: dict) -> None:
 
     def finish(ctx):
         b = load_batch(svc.store, batch_id)
+        if b.get("phase") != "locating":  # rows added meanwhile reopened the lookups: their end locates
+            return {"batch_id": batch_id, "skipped": f"the batch is {b['status']} ({b.get('phase')})"}
         rows = load_rows(svc.store, batch_id)
         _uncheck_duplicates(b, rows)
         if b.get("kind") != "files":
@@ -929,7 +941,7 @@ def get_batch(svc, batch_id: str) -> dict:
         vocab = set(svc.store.get_tags())  # "uncreated_tags" is the older name of the same list)
         batch["new_tags"] = [t for t in dict.fromkeys(t for r in rows for t in r.get("tags") or []) if t not in vocab]
         batch["uncreated_tags"] = batch["new_tags"]
-    if batch.get("kind") == "files" and batch["status"] != "committed":  # live: items may have been located since
+    if _from_files(batch) and batch["status"] != "committed":  # live: items may have been located since
         batch["location_updates"] = location_updates(svc.store, batch, rows)
         batch["stats"] = {**(batch.get("stats") or {}), "location_updates": len(batch["location_updates"])}
     return {**batch, **live, "logs": batch.get("logs") or [], "rows": rows}
@@ -1408,7 +1420,7 @@ def _commit(svc, batch: dict, earlier: set[int] = frozenset(), collection_id: in
     # files imports: not-yet-located collection items the files match are located to them, checked or not
     result["location_updates"] = apply_location_updates(svc, location_updates(store, batch, rows))
     result["located_items"] = sum(u["applied"] for u in result["location_updates"])
-    if batch.get("kind") == "files":  # from now on the batch shows what was applied
+    if _from_files(batch):  # from now on the batch shows what was applied
         batch["location_updates"] = result["location_updates"]
     used_tags: list[str] = []
     located_now: list[str] = []  # items this commit located (SSE "item" once the commit is done)

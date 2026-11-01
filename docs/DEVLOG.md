@@ -307,6 +307,16 @@ Tests never touch Bandcamp, the music drive or a real rekordbox library: Bandcam
   - Import rows can get a tag added or removed in one call, each row keeping its other tags.
   - The app's own "other" items can have their tags set in one batch.
   - Both are all-or-nothing.
+- **Folders dragged from Finder onto an import:**
+  - The browser only gives a dropped folder's name and its files' relative paths and sizes. The server finds the
+    folder from that, read only, in about 2 s: the index first, then Spotlight, then a short walk of the likely
+    places. A folder counts only if it holds every sampled file at the same size.
+  - On real data, a find took 75–460 ms (the index lookup about 11 ms over 42k files, Spotlight about 80 ms). A
+    name that's nowhere stops at the 2 s budget.
+  - A found folder can be added to an open import of any kind. Its tracks get rows after the existing ones, files
+    the import already has are skipped, and only the new rows are looked up.
+  - A files import can take every file in a folder (`since: null`), not only recent ones.
+  - The user's home has a real folder named `~`; paths found on disk are never treated as the home folder.
 
 ## App and extension (`app/`, `extension/`, `shared/`, branch `claude/local-collection-ui-e8f6f6`)
 
