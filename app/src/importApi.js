@@ -157,8 +157,9 @@ export const startFileImport = ({ folders, lookup = "server", defaultTags = [], 
     method: "POST",
     body: { folders, lookup, default_tags: defaultTags, default_tags_all: defaultTagsAll },
   });
-// More folders into an open import (dropped on the preview): every file of each; a job of the batch (→ {job_id}).
-// 409 when the import is imported already, or busy.
+// More folders into an open import (dropped on the preview): every file of each; a job of the batch (→ {job_id,
+// queued}: queued, it waits for the batch's running job). 409 when the import is imported (or importing),
+// interrupted or failed; 400 for a folder it can't use.
 export const addImportFolders = (id, paths) =>
   apiJson(`/api/import/${enc(id)}/folders`, { method: "POST", body: { folders: paths.map((path) => ({ path, since: null })) } });
 

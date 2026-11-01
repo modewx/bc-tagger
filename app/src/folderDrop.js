@@ -3,7 +3,9 @@
 //
 // - A dropped folder's absolute path isn't given to the page: the server finds it (POST /api/fs/find-folder) by
 //   its name and a sample of its audio files (path inside it and size; dropWalk.js). Several dropped folders are
-//   looked for at once. Found once: used. In several places: a small chooser. Not found: the folder picker.
+//   looked for at once. Found once: used. In several places: a small chooser, in the server's order (the copies
+//   with all the files first). Not found (or the search ran out of time): the folder picker. No audio files in
+//   it: said, nothing looked for.
 // - A drop that carries the paths as text (file:// URLs in text/uri-list, or an absolute path) uses them as they
 //   are. Files instead of folders: "Drop a folder".
 // - Click (or Enter): the folder picker, from the folder last browsed (settings' last_browse_dir).
@@ -142,10 +144,22 @@ export function createFolderDrop({ id, onFolders, findContext = () => ({}) }) {
     };
     if (f.path) return f.path;
     let matches;
+    let stopped = false;
     try {
       const w = await walkFolder(f.entry);
+      if (!w.files.length && !w.capped) {
+        set(`No audio files in “${f.name}”`, true);
+        return null;
+      }
+      if (!w.files.length) {
+        set(`Couldn't read “${f.name}” in time`, true);
+        const p = await pick(`Couldn't read “${f.name}” in time: pick it, or Cancel.`);
+        if (p) set(`Picked “${f.name}”`);
+        return p;
+      }
       const r = await apiJson("/api/fs/find-folder", { method: "POST", body: { name: f.name, files: w.files, count: w.count, ...findContext() } });
       matches = (r && r.matches) || [];
+      stopped = !!(r && r.timed_out);
     } catch (e) {
       set(e.status === 404 || e.status === 405 ? `This server can't find dropped folders yet: pick “${f.name}”` : `Couldn't look for “${f.name}”: ${e.message}`, true);
       const p = await pick(`Pick “${f.name}”:`);
@@ -157,8 +171,9 @@ export function createFolderDrop({ id, onFolders, findContext = () => ({}) }) {
       return matches[0].path;
     }
     if (!matches.length) {
-      set(`Couldn't find “${f.name}” on this Mac`, true);
-      const p = await pick(`Couldn't find “${f.name}” on this Mac: pick it, or Cancel.`);
+      const why = stopped ? `Stopped searching for “${f.name}” before finding it` : `Couldn't find “${f.name}” on this Mac`;
+      set(why, true);
+      const p = await pick(`${why}: pick it, or Cancel.`);
       if (p) set(`Picked “${f.name}”`);
       return p;
     }

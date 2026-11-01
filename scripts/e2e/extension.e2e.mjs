@@ -4914,6 +4914,8 @@ const DROP_MUSIC = path.join(DROP_BASE, "Music");
 const DROP_A = path.join(DROP_MUSIC, "E2E Drop A - Old And New");
 const DROP_B = path.join(DROP_MUSIC, "E2E Drop B - Second");
 const DROP_C = path.join(DROP_MUSIC, "E2E Drop C - Once");
+const DROP_D = path.join(DROP_MUSIC, "E2E Drop D - Browser"); // looked up in the browser only (never before)
+const DROP_E = path.join(DROP_MUSIC, "E2E Drop E - Browser Base");
 function dropFixture() {
   fs.rmSync(DROP_BASE, { recursive: true, force: true });
   writeFixtureFiles([
@@ -4922,6 +4924,8 @@ function dropFixture() {
     { path: path.join(DROP_B, "01 Bee.aiff"), title: "Bee", artist: "E2E Drop B", album: "Second", track: 1, days: 90 },
     { path: path.join(DROP_B, "CD2", "01 Deep Bee.aiff"), title: "Deep Bee", artist: "E2E Drop B", album: "Second", track: 2, days: 90 },
     { path: path.join(DROP_C, "01 Sea.aiff"), title: "Sea", artist: "E2E Drop C", album: "Once", track: 1, days: 5 },
+    { path: path.join(DROP_D, "01 Dee.aiff"), title: "Dee", artist: "E2E Drop D Nobody", album: "Browser", track: 1, days: 5 },
+    { path: path.join(DROP_E, "01 Ease.aiff"), title: "Ease", artist: "E2E Drop E Nobody", album: "Browser Base", track: 1, days: 5 },
   ]);
 }
 // The roots the server may list and import from: the fixture's.
@@ -5065,7 +5069,7 @@ test("Drop folders (Settings → Import from Files): lit while dragging; a dropp
   }
 });
 
-test("Drop folders (import preview): the + box by the player; a dropped folder's files join the open import in one job, the rows come in, ticks and sort kept; busy: said; hidden once imported", async () => {
+test("Drop folders (import preview): the + box by the player; a dropped folder's files join the open import in one job (queued: said), the rows come in, ticks and sort kept; again: nothing new; a 409: said; hidden once imported", async () => {
   dropFixture();
   const restore = await dropRoots();
   const { batch_id: batchId } = await post("/api/import/files", { folders: [{ path: DROP_A, since: null }], default_tags: ["pool"], default_tags_all: true, name: "e2e-drop" });
@@ -5093,10 +5097,24 @@ test("Drop folders (import preview): the + box by the player; a dropped folder's
     await page.waitForFunction(() => /▼/.test(document.querySelector("#collectionTable thead th.col-title").textContent));
     if (process.env.E2E_SHOTS) await page.locator("#topBar").screenshot({ path: path.join(process.env.E2E_SHOTS, "drop-import-topbar.png") });
 
+    // What the box says, every line (each one replaces the text node).
+    await page.evaluate(() => {
+      window.__dropSaid = [];
+      new MutationObserver((recs) => recs.forEach((r) => r.addedNodes.forEach((n) => window.__dropSaid.push(n.textContent)))).observe(
+        document.getElementById("folderDropStatus"),
+        { childList: true }
+      );
+    });
+    // The server's answer as if the batch had a job running (the add waits for it).
+    await page.route(`**/api/import/${batchId}/folders`, async (route) => {
+      const res = await route.fetch();
+      route.fulfill({ response: res, body: JSON.stringify({ ...(await res.json()), queued: true }) });
+    }, { times: 1 });
     await dropPaths(page, "#folderDrop", [DROP_B]);
-    await page.waitForFunction(() => /^(Adding “E2E Drop B - Second”|Added)/.test(document.getElementById("folderDropStatus").textContent));
     await page.waitForFunction(() => document.querySelectorAll("#collectionTable tbody tr[data-key]").length === 4, null, { timeout: 60000 });
     await page.waitForFunction(() => document.getElementById("folderDropStatus").textContent === "Added 2 rows from “E2E Drop B - Second”", null, { timeout: 30000 });
+    const said = await page.evaluate(() => window.__dropSaid);
+    assert.ok(said.includes("Queued after the current step"), JSON.stringify(said));
     assert.deepEqual(adds, [{ folders: [{ path: DROP_B, since: null }] }], "one add, every file");
     assert.deepEqual((await titles()).slice().sort(), ["Bee", "Deep Bee", "New", "Old"]);
     assert.equal(await page.isChecked(`tr[data-key="${old}"] .row-check`), false, "Old still unticked");
@@ -5107,12 +5125,16 @@ test("Drop folders (import preview): the + box by the player; a dropped folder's
     assert.deepEqual(batch.rows.find((r) => r.title === "Old").checked, false);
     assert.deepEqual(batch.rows.find((r) => r.title === "Deep Bee").tags, ["pool"], "the batch's default tags");
 
-    // Busy (or imported meanwhile): the server's answer, in the box.
+    // A folder the import has: nothing new (the server skips its tracks).
+    await dropPaths(page, "#folderDrop", [DROP_A]);
+    await page.waitForFunction(() => document.getElementById("folderDropStatus").textContent === "Nothing new in “E2E Drop A - Old And New”: 2 already in this import", null, { timeout: 30000 });
+    assert.equal((await titles()).length, 4);
+    // Interrupted (or imported meanwhile): the server's answer, in the box.
     await page.route(`**/api/import/${batchId}/folders`, (route) =>
-      route.fulfill({ status: 409, contentType: "application/json", body: JSON.stringify({ detail: "This import is busy: try again when it's done" }) })
+      route.fulfill({ status: 409, contentType: "application/json", body: JSON.stringify({ detail: "the lookups were interrupted: resume them first" }) })
     );
     await dropPaths(page, "#folderDrop", [DROP_C]);
-    await page.waitForFunction(() => document.getElementById("folderDropStatus").textContent === "Not added: This import is busy: try again when it's done");
+    await page.waitForFunction(() => document.getElementById("folderDropStatus").textContent === "Not added: the lookups were interrupted: resume them first");
     assert.ok(await page.$eval("#folderDropStatus", (s) => s.classList.contains("err")));
     await page.unroute(`**/api/import/${batchId}/folders`);
     assert.equal((await titles()).length, 4);
@@ -5127,6 +5149,43 @@ test("Drop folders (import preview): the + box by the player; a dropped folder's
     await page.waitForFunction(() => document.querySelectorAll("#collectionTable tbody tr[data-key]").length === 4);
     assert.equal(await page.isHidden("#folderDrop"), true);
   } finally {
+    await api(`/api/import/${batchId}`, { method: "DELETE" }).catch(() => {});
+    await restore();
+    await page.close();
+  }
+});
+
+test("Drop folders (import preview, Look up in my browser): the added rows take the batch back to its browser lookups, which the preview runs through the extension; then they're located and the batch is ready (recorded answers)", async () => {
+  dropFixture();
+  const restore = await dropRoots();
+  const answers = browserAnswers();
+  await context.route(BANDCAMP_HOSTS, answers.handler);
+  const { batch_id: batchId } = await post("/api/import/files", { folders: [{ path: DROP_E, since: null }], lookup: "browser", default_tags: ["pool"], name: "e2e-drop-browser" });
+  const page = await context.newPage();
+  const step = () => api(`/api/import/${batchId}`).then((b) => b.step);
+  try {
+    await waitFor(async () => ["browser", "ready"].includes(await step()), { what: "the scan", timeout: 30000 });
+    assert.equal(await step(), "browser", "its rows wait for the browser");
+    // Opened at that step, the preview runs them.
+    await page.goto(`${SERVER}/import/?batch=${batchId}`);
+    await page.waitForFunction(() => /extension connected/.test(document.getElementById("navExt").textContent));
+    await waitFor(async () => (await step()) === "ready", { what: "the first lookups done", timeout: 60000 });
+    const firstAsked = answers.seen.length;
+    assert.ok(firstAsked > 0, "looked up through the extension");
+    await page.waitForFunction(() => document.querySelectorAll("#collectionTable tbody tr[data-key]").length === 1);
+
+    await dropPaths(page, "#folderDrop", [DROP_D]);
+    await page.waitForFunction(() => /looking them up in your browser…$/.test(document.getElementById("folderDropStatus").textContent), null, { timeout: 30000 });
+    await page.waitForFunction(() => document.getElementById("folderDropStatus").textContent === "Added 1 row from “E2E Drop D - Browser”", null, { timeout: 60000 });
+    assert.ok(answers.seen.length > firstAsked, `the new row looked up in the browser (${answers.seen.length - firstAsked} requests)`);
+    assert.ok(answers.seen.every((s) => s.method === "POST" || s.recorded), "only searches, or recorded pages");
+    const batch = await api(`/api/import/${batchId}`);
+    assert.equal(batch.step, "ready");
+    const dee = batch.rows.find((r) => r.title === "Dee");
+    assert.ok(dee && dee.match && dee.match.status && dee.match.status !== "pending", `Dee looked up: ${JSON.stringify(dee && dee.match).slice(0, 200)}`);
+    await page.waitForFunction(() => document.querySelectorAll("#collectionTable tbody tr[data-key]").length === 2);
+  } finally {
+    await context.unroute(BANDCAMP_HOSTS, answers.handler);
     await api(`/api/import/${batchId}`, { method: "DELETE" }).catch(() => {});
     await restore();
     await page.close();

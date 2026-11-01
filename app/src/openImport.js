@@ -29,12 +29,13 @@ export async function openImports() {
   return (await listBatches()).filter((b) => !b.committed);
 }
 
-// "progress" (looking up / locating), "interrupted" (the server restarted
+// "progress" (adding folders / looking up / locating), "interrupted" (the server restarted
 // during the lookups: resumable), "mapping" (unknown tags to map), "review"
 // (the preview), "committing", "committed" or "error". From the server's
 // `step`, or (older servers) from the status and stats.
 const STEPS = {
   browser: "browser",
+  adding: "progress", // folders dropped on the preview: scanning them
   resolving: "progress",
   locating: "progress",
   interrupted: "interrupted",
@@ -66,7 +67,7 @@ export function stepLabel(batch, live) {
     case "progress": {
       const p = live || batch.progress || {};
       const count = p.total ? ` ${p.current || 0}/${p.total}` : total ? ` (${total} rows)` : "";
-      const what = batch.step === "locating" ? "locating files" : "looking up";
+      const what = batch.step === "locating" ? "locating files" : batch.step === "adding" ? "adding folders" : "looking up";
       return `Import: ${p.message || `${what}${count}`}…`;
     }
     case "interrupted":

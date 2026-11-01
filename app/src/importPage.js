@@ -16,7 +16,8 @@ import { originalOf, previewToggle } from "./previews";
 import { openPopover, closePopover } from "./popover";
 import { createTags, mapTagsUrl, getBatch, updateRow, commitBatch, discardBatch, resumeLookups, setDefaultTags, relocateRows, relocateRow, rowToItem, matchSource, bandcampSearchUrl, openOnBandcampUrl, cleanBandcampUrl, addImportFolders } from "./importApi";
 import { statsLine } from "./importTab";
-import { rememberImport } from "./openImport";
+import { rememberImport, stepOf } from "./openImport";
+import { runBrowserLookups, lookupsText } from "./browserLookups";
 import { downloadFileTitle, downloadFlow, fullReleaseOf, fullReleasesToggle, stateLabel, trackDownloads, troubled } from "./downloads";
 import { ownershipFirst, lastCheck, staleNote, challengeText, nothingText } from "./ownershipCheck";
 import { fileRow, setFileForm } from "./fileSetter";
@@ -265,8 +266,17 @@ async function saveBulkTags({ add, remove, edits }) {
   const res = await saves.save(edits.map((e) => rows.get(e.id).n), changes);
   return res.ok ? `Saved (${edits.length} row${edits.length > 1 ? "s" : ""})` : `Not saved: ${res.error}`;
 }
-// Folders dropped on (or picked in) the box by the player: one job adds every file of them to this import; their
-// rows come in when it's done (ticks, sort and tags as they were).
+// What's going on, shown instead of the batch's step line while it lasts (adding folders, browser lookups).
+let procLine = null;
+function showProc(text) {
+  procLine = text;
+  if (text) proc.textContent = text;
+  else renderInfo();
+}
+
+// Folders dropped on (or picked in) the box by the player: one job adds every file of them to this import (after
+// the batch's running job, if it has one); their rows come in when it's done (ticks, sort and tags as they were).
+// The new rows are looked up like the rest: by the server in the job, or back to the browser lookups (run here).
 let drop = null;
 async function addFolders(paths) {
   const before = batch ? batch.rows.length : 0;
@@ -277,15 +287,54 @@ async function addFolders(paths) {
   } catch (e) {
     return { text: e.status === 404 || e.status === 405 ? "This server can't add folders to an import yet." : `Not added: ${e.message}`, err: true };
   }
-  const job = await jobs.watch(res.job_id, (j) => {
-    proc.textContent = `Adding ${name}: ${progressText(j)}`;
-    drop.say(proc.textContent);
-  });
+  const say = (text) => {
+    showProc(text);
+    drop.say(text);
+  };
+  say(res.queued ? "Queued after the current step" : `Adding ${name}…`);
+  const job = await jobs.watch(res.job_id, (j) => j.status !== "queued" && say(`Adding ${name}: ${progressText(j)}`));
+  showProc(null);
   await page.reload();
   renderInfo();
   if (job.status === "error") return { text: `Not added: ${job.error || "error"}`, err: true };
-  const added = batch.rows.length - before;
-  return `Added ${added} row${added === 1 ? "" : "s"} from ${name}`;
+  const r = job.result || {};
+  const added = typeof r.added === "number" ? r.added : batch.rows.length - before;
+  if (batch && stepOf(batch) === "browser") {
+    drop.say(`Added ${added} row${added === 1 ? "" : "s"} from ${name}; looking them up in your browser…`);
+    await driveBrowser();
+  }
+  const already = r.already ? `; ${r.already} already in this import` : "";
+  return added || !r.already ? `Added ${added} row${added === 1 ? "" : "s"} from ${name}${already}` : `Nothing new in ${name}: ${r.already} already in this import`;
+}
+
+// Look up in my browser: rows added to such a batch take it back to its browser lookups; this page runs them
+// through the extension (as the Import tab does), then follows the locating the server starts after them.
+let driving = false;
+async function driveBrowser() {
+  if (driving || !batch || stepOf(batch) !== "browser") return;
+  driving = true;
+  let keep = false; // the line stays: why they stopped
+  try {
+    if (!(await bridge.connect(1500))) {
+      showProc("The new rows are looked up in your browser: open this page in the Chrome profile that has the Bc Tagger extension (connected).");
+      return;
+    }
+    const st = await runBrowserLookups(batchId, bridge, (s) => showProc(lookupsText(s)));
+    if (st.state === "stopped" || st.state === "paused") keep = true; // the banner says what to do
+    else {
+      const b = await getBatch(batchId);
+      const jobId = (b.job && b.job.id) || b.job_id;
+      if (b.status === "resolving" && jobId) await jobs.watch(jobId, (j) => showProc(`Locating files: ${progressText(j)}`));
+    }
+  } catch (e) {
+    showProc(`Lookups in your browser stopped: ${e.message}`);
+    keep = true;
+  } finally {
+    driving = false;
+  }
+  if (!keep) showProc(null);
+  await page.reload();
+  renderInfo();
 }
 const tickedKeys = () => (batch && page ? batch.rows.filter((r) => r.checked).map((r) => `r${r.n}`).filter((k) => k in page.getItems()) : []);
 
@@ -358,7 +407,9 @@ function renderInfo() {
   }
   const hint = document.getElementById("transferHint");
   if (hint) hint.textContent = checked > located ? `${checked - located} not located ${checked - located > 1 ? "are" : "is"} skipped` : "";
-  proc.textContent = batch.committed
+  proc.textContent = procLine
+    ? procLine
+    : batch.committed
     ? `Imported${batch.committed_at ? " " + new Date(batch.committed_at).toLocaleString() : ""}.`
     : batch.status === "error"
     ? `Import failed: ${batch.error || "unknown error"}`
@@ -1192,7 +1243,7 @@ async function discard(statusEl) {
   scroller.appendChild(table);
   events.on("job", (j) => {
     if (batch && j && j.id === batch.job_id) {
-      proc.textContent = `Processing: ${progressText(j)}`;
+      if (!procLine) proc.textContent = `Processing: ${progressText(j)}`;
       if (j.status === "done" || j.status === "error") page.reload().then(renderInfo);
     }
   });
@@ -1203,5 +1254,6 @@ async function discard(statusEl) {
   restoreView();
   events.start(); // after the rows: the stream holds a connection for good
   renderInfo();
+  driveBrowser(); // rows added earlier, still to look up in the browser
   nav.setHealth(await apiJson("/api/health").catch(() => null));
 })();

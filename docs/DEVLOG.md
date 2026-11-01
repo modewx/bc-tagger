@@ -359,6 +359,39 @@ npm run test:e2e                         # Playwright e2e: own profile, server :
   - e2e: the collection (2 Bandcamp items and 1 "other": hidden with nothing ticked, the hidden-by-filter note, the
     chips, add then remove, each row's own tags kept, one extension request); the import preview (one request each
     way, saved through a reload); the 200-row timings (one write, one push).
+- **Drop folders here (or click)** (user: a drag-and-drop box with a big "+", so folders dragged from Finder keep
+  adding to an import, at the top of the import page by the player, and the same at the top of Import from Files'
+  Folders). `app/src/folderDrop.js` (the box), `app/src/dropWalk.js` (what a drop holds), on A's `2e63ac3`.
+  - **The box:** low (about 38 px), so the import page's sticky top bar doesn't grow; it sits right after the player
+    area there, and is hidden once the import is imported. It lights up while something is dragged over the window.
+    A drop off the box is stopped, so the browser doesn't open the file and leave the page; the box says where to
+    drop. Clicking it opens the folder picker at `last_browse_dir`.
+  - **Finding a dropped folder:** the browser gives a page a dropped folder's name, never its path. The page walks it
+    breadth first (`readEntries` batches until an empty one) for up to 25 audio files as `{rel, size}` (sizes from
+    `entry.file()`; nothing is read or uploaded), counting its audio files up to 5,000 or for 1 s. A's
+    `POST /api/fs/find-folder` finds it from that. Several dropped folders are looked for at once, each showing
+    "Finding “X”…" at once. One match: used. Several: a chooser in A's order (the copies with all the files first),
+    with Another folder… and Skip it. None: "Couldn't find “X” on this Mac" ("Stopped searching for “X” before
+    finding it" when the search timed out), then the folder picker. No audio files in it: said, nothing looked for.
+    A drop carrying paths as text (file:// URLs in `text/uri-list`, or absolute paths) uses them as they are. Files
+    instead of folders: "Drop a folder (not files)".
+  - **Import preview:** one `POST /api/import/<id>/folders` for all the folders, `since: null` (every file). Queued
+    behind the batch's running job: "Queued after the current step". Progress shows in the page's process line and
+    in the box, then "Added N rows from “X”" (with how many were already in the import; a folder it has gives
+    "Nothing new"). The rows come in with the reload at the end, the ticks, sort and tags as they were. A 409
+    (imported, interrupted, failed) shows the server's reason.
+  - **Look up in my browser** batches: the added rows take the batch back to step `browser`. The preview now runs the
+    browser lookups itself (as the Import tab does), after an add and when it's opened at that step, then follows the
+    server's locating.
+  - **Import from Files:** each dropped or picked folder becomes a row with **all files** ticked (the date off), sent
+    as `since: null`. A folder already listed isn't added twice; empty rows are replaced. A row without all files
+    still needs its date.
+  - Tests: unit (8, a fake entry tree: batches, breadth first, the sample, the cap and time budget, hidden and
+    unreadable entries, the text paths); e2e (4): Settings (lit while dragging, a drop that misses, a row with all
+    files once, a file refused, Start import sends `since: null` and gets the 60-day-old file), the preview (one add,
+    queued said, ticks and sort kept, the top bar the same height, a folder it has gives nothing new, a 409, hidden
+    once imported), browser lookups after an add (recorded answers), and find-folder routed (two at once in parallel,
+    the chooser, not found then the picker, click and Escape).
 
 ### 2026-10-29
 
