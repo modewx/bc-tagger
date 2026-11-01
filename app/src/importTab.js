@@ -1,7 +1,9 @@
 // Settings → Import: pick a bc-tagger-import/1 file, choose default tags,
 // start the import (the server resolves rows on Bandcamp and locates them),
 // then map unknown tags and continue to the preview page. Or Import from
-// Files: folders, each with an "added since" date; then straight to the preview.
+// Files: folders, each with an "added since" date (or all its files); then
+// straight to the preview. Folders dropped from Finder on the + box come in
+// with all files.
 // An import stays open on the server until it's imported or discarded:
 // coming back here (or reloading) picks it up at its step (#import/<id>).
 
@@ -10,6 +12,7 @@ import { pageEvents } from "../../shared/datasource/serverEvents";
 import { Jobs, progressText, resultText } from "./jobs";
 import { listBatches, getBatch, startImport, applyTagMap, discardBatch, resumeLookups, startFileImport, fileImportDefaults, dateInputValue } from "./importApi";
 import { folderPicker } from "./folderPicker";
+import { createFolderDrop } from "./folderDrop";
 import { rememberImport, rememberedImport, stepLabel, stepOf, stepUrl } from "./openImport";
 import { runBrowserLookups, lookupsText } from "./browserLookups";
 import { renderPastImports } from "./importLogs";
@@ -86,7 +89,7 @@ export function createImportTab(container, { bridge } = {}) {
   // The progress (and mapping step) sit under whichever import started: the file's or the folders'.
   const jsonRun = el("div", { class: "field" }, start, progress);
 
-  // Import from Files: folder rows (path, Browse…, added since, ×), Default tags (pool), the lookup choice.
+  // Import from Files: folder rows (path, Browse…, added since or all files, ×), Default tags (pool), the lookup choice.
   let folders = [];
   let remembered = {}; // path -> its last Import from Files
   let filesTags = null;
@@ -108,7 +111,14 @@ export function createImportTab(container, { bridge } = {}) {
       path.value = f.path;
       const since = el("input", { type: "date", class: "folder-since", title: "Files added on or after this day" });
       since.value = f.since || "";
+      since.disabled = !!f.all;
       since.addEventListener("change", () => (f.since = since.value));
+      const all = el("input", { type: "checkbox", class: "folder-all" });
+      all.checked = !!f.all;
+      all.addEventListener("change", () => {
+        f.all = all.checked;
+        since.disabled = f.all;
+      });
       // A folder imported before starts from its last run.
       const setPath = (p) => {
         f.path = path.value = p;
@@ -145,6 +155,7 @@ export function createImportTab(container, { bridge } = {}) {
           path,
           browse,
           el("label", { class: "since-label" }, "added since ", since),
+          el("label", { class: "folder-all-label", title: "Every audio file in the folder, whatever its date" }, all, "all files"),
           del,
           warn ? el("span", { class: "help err folder-warn" }, warn) : ""
         ),
@@ -155,6 +166,22 @@ export function createImportTab(container, { bridge } = {}) {
   addFolder.addEventListener("click", () => {
     folders.push({ path: "", since: weekAgo() });
     renderFolders();
+  });
+  // Dropped from Finder (or picked): a row each, with all files; a folder already listed isn't added twice, and an
+  // empty row is taken by the first.
+  const norm = (p) => String(p || "").trim().replace(/(.)\/+$/, "$1");
+  const filesDrop = createFolderDrop({
+    id: "importFilesDrop",
+    onFolders: async (paths) => {
+      const have = new Set(folders.map((f) => norm(f.path)).filter(Boolean));
+      const fresh = paths.map(norm).filter((p) => p && !have.has(p));
+      if (!fresh.length) return paths.length === 1 ? "Already in the list" : "Already in the list, all of them";
+      folders = folders.filter((f) => norm(f.path));
+      fresh.forEach((p) => folders.push({ path: p, since: remembered[p] ? dateInputValue(remembered[p]) : weekAgo(), all: true }));
+      renderFolders();
+      const skipped = paths.length - fresh.length;
+      return `Added ${fresh.length === 1 ? "a folder" : `${fresh.length} folders`} (all files)${skipped ? `; ${skipped} already in the list` : ""}`;
+    },
   });
 
   container.append(
@@ -206,7 +233,7 @@ export function createImportTab(container, { bridge } = {}) {
           "collection show as duplicates, unticked. A Bandcamp link in a file's tags matches it directly; the rest are " +
           "looked up. Nothing is added until you click Import selected in the preview."
       ),
-      el("div", { class: "field" }, el("label", { class: "field-label" }, "Folders"), folderList, addFolder, filesInfo),
+      el("div", { class: "field" }, el("label", { class: "field-label" }, "Folders"), filesDrop.el, folderList, addFolder, filesInfo),
       el(
         "div",
         { class: "field" },
@@ -304,10 +331,10 @@ export function createImportTab(container, { bridge } = {}) {
 
   // Import from Files: the server picks the files, looks them up, then the preview (no mapping step).
   filesStart.addEventListener("click", async () => {
-    const chosen = folders.map((f) => ({ path: f.path.trim(), since: f.since })).filter((f) => f.path);
+    const chosen = folders.map((f) => ({ path: f.path.trim(), since: f.all ? null : f.since })).filter((f) => f.path);
     filesInfo.className = "help err";
     if (!chosen.length) return (filesInfo.textContent = "Add a folder first.");
-    if (chosen.some((f) => !f.since)) return (filesInfo.textContent = "Pick an “added since” date for every folder.");
+    if (folders.some((f) => f.path.trim() && !f.all && !f.since)) return (filesInfo.textContent = "Pick an “added since” date for every folder (or tick all files).");
     filesInfo.className = "help";
     filesInfo.textContent = "";
     filesStart.disabled = true;

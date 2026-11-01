@@ -151,12 +151,16 @@ export const getBatch = (id) => apiJson(`/api/import/${enc(id)}`).then(normBatch
 export const startImport = (file, name, defaultTags, defaultTagsAll = false, lookup = "server") =>
   apiJson("/api/import", { method: "POST", body: { file, name, default_tags: defaultTags, default_tags_all: defaultTagsAll, lookup } });
 // Import from Files (Phase 7): audio files added to these folders since a date
-// each; folders: [{path, since: "YYYY-MM-DD"}] (→ {batch_id, job_id, estimate}).
+// each; folders: [{path, since: "YYYY-MM-DD" | null}] (null: every file) (→ {batch_id, job_id, estimate}).
 export const startFileImport = ({ folders, lookup = "server", defaultTags = [], defaultTagsAll = false }) =>
   apiJson("/api/import/files", {
     method: "POST",
     body: { folders, lookup, default_tags: defaultTags, default_tags_all: defaultTagsAll },
   });
+// More folders into an open import (dropped on the preview): every file of each; a job of the batch (→ {job_id}).
+// 409 when the import is imported already, or busy.
+export const addImportFolders = (id, paths) =>
+  apiJson(`/api/import/${enc(id)}/folders`, { method: "POST", body: { folders: paths.map((path) => ({ path, since: null })) } });
 
 // "YYYY-MM-DD" in local time, from a date or ISO string ("" when there's none).
 export function dateInputValue(v) {
@@ -177,6 +181,7 @@ export async function fileImportDefaults() {
     folders: (d.folders || []).map((f) => ({
       path: f.path || "",
       since: dateInputValue(f.since || f.last_run),
+      all: f.all === true || f.since === "all", // every file, whatever its date
       mounted: f.mounted !== false,
       exists: f.exists !== false,
     })),

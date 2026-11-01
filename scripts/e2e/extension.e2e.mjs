@@ -4904,6 +4904,309 @@ test("Import from Files: folders prefilled with their dates, rows by folder unde
   }
 });
 
+// --- Drop folders: the + box (import preview's top bar, Settings → Import from Files) -----------------------------
+// A test can't drag a real folder from Finder: the drops here carry the folder's path as a file:// URL (as another
+// app's drag can), or fake directory entries (what Chrome gives the page for a Finder folder) with the server's
+// find-folder answered by a route.
+
+const DROP_BASE = path.join(E2E, "drop-folders");
+const DROP_MUSIC = path.join(DROP_BASE, "Music");
+const DROP_A = path.join(DROP_MUSIC, "E2E Drop A - Old And New");
+const DROP_B = path.join(DROP_MUSIC, "E2E Drop B - Second");
+const DROP_C = path.join(DROP_MUSIC, "E2E Drop C - Once");
+function dropFixture() {
+  fs.rmSync(DROP_BASE, { recursive: true, force: true });
+  writeFixtureFiles([
+    { path: path.join(DROP_A, "01 Old.aiff"), title: "Old", artist: "E2E Drop A", album: "Old And New", track: 1, days: 60 },
+    { path: path.join(DROP_A, "02 New.aiff"), title: "New", artist: "E2E Drop A", album: "Old And New", track: 2, days: 1 },
+    { path: path.join(DROP_B, "01 Bee.aiff"), title: "Bee", artist: "E2E Drop B", album: "Second", track: 1, days: 90 },
+    { path: path.join(DROP_B, "CD2", "01 Deep Bee.aiff"), title: "Deep Bee", artist: "E2E Drop B", album: "Second", track: 2, days: 90 },
+    { path: path.join(DROP_C, "01 Sea.aiff"), title: "Sea", artist: "E2E Drop C", album: "Once", track: 1, days: 5 },
+  ]);
+}
+// The roots the server may list and import from: the fixture's.
+async function dropRoots() {
+  const before = await api("/api/settings").then((d) => d.settings || d);
+  await put({ owned_root: DROP_MUSIC, not_owned_roots: [], downloads_dir: "" });
+  return () => put({ owned_root: before.owned_root, not_owned_roots: before.not_owned_roots, downloads_dir: before.downloads_dir || "" });
+}
+
+// Drag events carrying `paths` as file:// URLs, onto `selector` (dragenter, dragover, drop).
+const dropPaths = (page, selector, paths, types = ["dragenter", "dragover", "drop"]) =>
+  page.evaluate(
+    ([sel, uris, types]) => {
+      const dt = new DataTransfer();
+      dt.setData("text/uri-list", uris.join("\r\n"));
+      const target = document.querySelector(sel);
+      return types.map((type) => {
+        const ev = new DragEvent(type, { bubbles: true, cancelable: true, dataTransfer: dt });
+        target.dispatchEvent(ev);
+        return ev.defaultPrevented;
+      });
+    },
+    [selector, paths.map((p) => "file://" + encodeURI(p)), types]
+  );
+
+// A drop of fake Finder folders (directory entries, as webkitGetAsEntry gives them): [{name, files: [[rel, size]]}],
+// or a file ({name, file: true}).
+const dropEntries = (page, selector, folders) =>
+  page.evaluate(
+    ([sel, folders]) => {
+      const file = (name, size) => ({ name, isFile: true, isDirectory: false, file: (ok) => setTimeout(() => ok({ size }), 0) });
+      const dir = (name, children) => ({
+        name,
+        isFile: false,
+        isDirectory: true,
+        createReader() {
+          let given = false;
+          return {
+            readEntries(ok) {
+              const batch = given ? [] : children;
+              given = true;
+              setTimeout(() => ok(batch), 0); // as Chrome: later
+            },
+          };
+        },
+      });
+      const build = (name, files) => {
+        const spec = {};
+        files.forEach(([rel, size]) => {
+          const parts = rel.split("/");
+          let at = spec;
+          parts.slice(0, -1).forEach((p) => (at = at[p] = at[p] || {}));
+          at[parts[parts.length - 1]] = size;
+        });
+        const make = (n, s) => dir(n, Object.entries(s).map(([k, v]) => (typeof v === "object" ? make(k, v) : file(k, v))));
+        return make(name, spec);
+      };
+      const entries = folders.map((f) => (f.file ? file(f.name, 1) : build(f.name, f.files)));
+      const dt = { types: ["Files"], items: entries.map((e) => ({ kind: "file", webkitGetAsEntry: () => e })), files: [], getData: () => "" };
+      const ev = new Event("drop", { bubbles: true, cancelable: true });
+      Object.defineProperty(ev, "dataTransfer", { value: dt });
+      document.querySelector(sel).dispatchEvent(ev);
+    },
+    [selector, folders]
+  );
+const filesOf = (dir) => {
+  const out = [];
+  const walk = (d, rel) =>
+    fs.readdirSync(d, { withFileTypes: true }).forEach((e) => (e.isDirectory() ? walk(path.join(d, e.name), `${rel}${e.name}/`) : out.push([rel + e.name, fs.statSync(path.join(d, e.name)).size])));
+  walk(dir, "");
+  return out;
+};
+
+test("Drop folders (Settings → Import from Files): lit while dragging; a dropped folder is a row with all files, once; files: \"Drop a folder\"; a drop that misses does nothing; Start import takes every file", async () => {
+  dropFixture();
+  const restore = await dropRoots();
+  const page = await context.newPage();
+  const bodies = [];
+  page.on("request", (r) => r.method() === "POST" && new URL(r.url()).pathname === "/api/import/files" && bodies.push(r.postDataJSON()));
+  let batchId = null;
+  const rows = () =>
+    page.$$eval("#importFolders .folder-row", (rs) =>
+      rs.map((r) => ({ path: r.querySelector(".folder-path").value, all: r.querySelector(".folder-all").checked, dateOff: r.querySelector(".folder-since").disabled }))
+    );
+  const status = () => page.textContent("#importFilesDropStatus");
+  try {
+    await page.goto(SERVER + "/settings/#import");
+    await page.waitForFunction(() => document.querySelectorAll("#importFolders .folder-row").length > 0);
+    await page.waitForSelector("#importFilesDrop");
+    assert.equal(await page.textContent("#importFilesDrop"), "+Drop folders here (or click)");
+    const shown = (await rows()).length;
+    // Lit while something is dragged over the window; a drop off the box is stopped (no tab opening the file).
+    await dropPaths(page, "body", [DROP_A], ["dragenter"]);
+    assert.ok(await page.$eval("#importFilesDrop", (b) => b.parentElement.classList.contains("dragging")), "lit");
+    if (process.env.E2E_SHOTS) await page.locator("#sec_import_files").screenshot({ path: path.join(process.env.E2E_SHOTS, "drop-settings-lit.png") });
+    assert.deepEqual(await dropPaths(page, "body", [DROP_A], ["dragover", "drop"]), [true, true], "dragover and drop stopped off the box");
+    assert.equal(await page.$eval("#importFilesDrop", (b) => b.parentElement.classList.contains("dragging")), false);
+    assert.equal(await status(), "Drop folders on the + box");
+    assert.equal((await rows()).length, shown, "nothing added");
+
+    // On the box: a row, all files (no date).
+    await dropPaths(page, "#importFilesDrop", [DROP_A]);
+    await page.waitForFunction(() => /^Added a folder \(all files\)$/.test(document.getElementById("importFilesDropStatus").textContent));
+    const added = (await rows()).find((r) => r.path === DROP_A);
+    assert.deepEqual(added, { path: DROP_A, all: true, dateOff: true });
+    // Again (with a trailing slash): not twice.
+    await dropPaths(page, "#importFilesDrop", [DROP_A + "/"]);
+    await page.waitForFunction(() => document.getElementById("importFilesDropStatus").textContent === "Already in the list");
+    assert.equal((await rows()).filter((r) => r.path === DROP_A).length, 1);
+    // A file: not a folder.
+    await dropPaths(page, "#importFilesDrop", [path.join(DROP_A, "02 New.aiff")]);
+    await page.waitForFunction(() => document.getElementById("importFilesDropStatus").textContent === "Drop a folder (not files)");
+    assert.ok(await page.$eval("#importFilesDropStatus", (s) => s.classList.contains("err")));
+    if (process.env.E2E_SHOTS) await page.locator("#sec_import_files").screenshot({ path: path.join(process.env.E2E_SHOTS, "drop-settings.png") });
+    // "all files" off: the date again (and needed, as before).
+    const i = (await rows()).findIndex((r) => r.path === DROP_A);
+    await page.uncheck(`#importFolders .folder-row[data-i="${i}"] .folder-all`);
+    assert.equal(await page.isDisabled(`#importFolders .folder-row[data-i="${i}"] .folder-since`), false);
+    await page.$eval(`#importFolders .folder-row[data-i="${i}"] .folder-since`, (d) => ((d.value = ""), d.dispatchEvent(new Event("change"))));
+    // Only this folder.
+    while ((await rows()).length > 1) {
+      const j = (await rows()).findIndex((r) => r.path !== DROP_A);
+      await page.click(`#importFolders .folder-row[data-i="${j}"] .folder-del`);
+    }
+    await page.click("#importFilesStart");
+    assert.match(await page.textContent("#importFilesInfo"), /^Pick an “added since” date for every folder \(or tick all files\)\.$/);
+    assert.equal(bodies.length, 0);
+    await page.check('#importFolders .folder-row[data-i="0"] .folder-all');
+    // Start import: every file of it, the 60 days old one too.
+    await page.click("#importFilesStart");
+    await page.waitForURL(/\/import\/\?batch=imp-/, { timeout: 90000 });
+    batchId = new URL(page.url()).searchParams.get("batch");
+    assert.deepEqual(bodies[0].folders, [{ path: DROP_A, since: null }]);
+    await page.waitForFunction(() => document.querySelectorAll("#collectionTable tbody tr[data-key]").length === 2);
+    const titles = await page.$$eval("#collectionTable tbody tr[data-key] .col-title", (t) => t.map((x) => x.textContent.trim()));
+    assert.deepEqual(titles.sort(), ["New", "Old"]);
+  } finally {
+    if (batchId) await api(`/api/import/${batchId}`, { method: "DELETE" }).catch(() => {});
+    await restore();
+    await page.close();
+  }
+});
+
+test("Drop folders (import preview): the + box by the player; a dropped folder's files join the open import in one job, the rows come in, ticks and sort kept; busy: said; hidden once imported", async () => {
+  dropFixture();
+  const restore = await dropRoots();
+  const { batch_id: batchId } = await post("/api/import/files", { folders: [{ path: DROP_A, since: null }], default_tags: ["pool"], default_tags_all: true, name: "e2e-drop" });
+  const page = await context.newPage();
+  const adds = [];
+  page.on("request", (r) => r.method() === "POST" && r.url().endsWith(`/api/import/${batchId}/folders`) && adds.push(r.postDataJSON()));
+  const titles = () => page.$$eval("#collectionTable tbody tr[data-key] .col-title", (t) => t.map((x) => x.textContent.trim()));
+  const keyOf = (title) =>
+    page.evaluate((t) => [...document.querySelectorAll("#collectionTable tbody tr[data-key]")].find((tr) => tr.querySelector(".col-title").textContent.trim() === t).dataset.key, title);
+  try {
+    await waitFor(() => api(`/api/import/${batchId}`).then((b) => b.status === "ready"), { what: "the batch", timeout: 30000 });
+    await page.goto(`${SERVER}/import/?batch=${batchId}`);
+    await page.waitForFunction(() => document.querySelectorAll("#collectionTable tbody tr[data-key]").length === 2);
+    await page.waitForSelector("#folderDrop");
+    assert.equal(await page.evaluate(() => document.getElementById("folderDrop").parentElement.previousElementSibling.id), "playerArea", "next to the player");
+    const barHeight = await page.$eval("#topBar", (b) => b.getBoundingClientRect().height);
+    const boxHeight = await page.$eval("#folderDrop", (b) => b.getBoundingClientRect().height);
+    assert.ok(boxHeight <= 44, `low: ${boxHeight}px`);
+    // Old unticked, Title descending: as they were after the drop.
+    const old = await keyOf("Old");
+    await page.uncheck(`tr[data-key="${old}"] .row-check`);
+    await waitFor(() => api(`/api/import/${batchId}`).then((b) => b.rows.find((r) => r.title === "Old").checked === false), { what: "the tick saved" });
+    await page.click("#collectionTable thead th.col-title");
+    await page.click("#collectionTable thead th.col-title");
+    await page.waitForFunction(() => /▼/.test(document.querySelector("#collectionTable thead th.col-title").textContent));
+    if (process.env.E2E_SHOTS) await page.locator("#topBar").screenshot({ path: path.join(process.env.E2E_SHOTS, "drop-import-topbar.png") });
+
+    await dropPaths(page, "#folderDrop", [DROP_B]);
+    await page.waitForFunction(() => /^(Adding “E2E Drop B - Second”|Added)/.test(document.getElementById("folderDropStatus").textContent));
+    await page.waitForFunction(() => document.querySelectorAll("#collectionTable tbody tr[data-key]").length === 4, null, { timeout: 60000 });
+    await page.waitForFunction(() => document.getElementById("folderDropStatus").textContent === "Added 2 rows from “E2E Drop B - Second”", null, { timeout: 30000 });
+    assert.deepEqual(adds, [{ folders: [{ path: DROP_B, since: null }] }], "one add, every file");
+    assert.deepEqual((await titles()).slice().sort(), ["Bee", "Deep Bee", "New", "Old"]);
+    assert.equal(await page.isChecked(`tr[data-key="${old}"] .row-check`), false, "Old still unticked");
+    assert.equal(await page.isChecked(`tr[data-key="${await keyOf("Bee")}"] .row-check`), true, "the new rows ticked");
+    assert.match(await page.textContent("#collectionTable thead th.col-title"), /▼/, "the sort kept");
+    assert.ok((await page.$eval("#topBar", (b) => b.getBoundingClientRect().height)) <= barHeight + 2, "the top bar didn't grow");
+    const batch = await api(`/api/import/${batchId}`);
+    assert.deepEqual(batch.rows.find((r) => r.title === "Old").checked, false);
+    assert.deepEqual(batch.rows.find((r) => r.title === "Deep Bee").tags, ["pool"], "the batch's default tags");
+
+    // Busy (or imported meanwhile): the server's answer, in the box.
+    await page.route(`**/api/import/${batchId}/folders`, (route) =>
+      route.fulfill({ status: 409, contentType: "application/json", body: JSON.stringify({ detail: "This import is busy: try again when it's done" }) })
+    );
+    await dropPaths(page, "#folderDrop", [DROP_C]);
+    await page.waitForFunction(() => document.getElementById("folderDropStatus").textContent === "Not added: This import is busy: try again when it's done");
+    assert.ok(await page.$eval("#folderDropStatus", (s) => s.classList.contains("err")));
+    await page.unroute(`**/api/import/${batchId}/folders`);
+    assert.equal((await titles()).length, 4);
+
+    // Imported: no box.
+    await page.route(new RegExp(`/api/import/${batchId}$`), async (route) => {
+      const res = await route.fetch();
+      const b = await res.json();
+      route.fulfill({ response: res, body: JSON.stringify({ ...b, committed_at: new Date().toISOString() }) });
+    });
+    await page.reload();
+    await page.waitForFunction(() => document.querySelectorAll("#collectionTable tbody tr[data-key]").length === 4);
+    assert.equal(await page.isHidden("#folderDrop"), true);
+  } finally {
+    await api(`/api/import/${batchId}`, { method: "DELETE" }).catch(() => {});
+    await restore();
+    await page.close();
+  }
+});
+
+test("Drop folders: Finder folders are found by the server from their files, several at once; in several places: the chooser; nowhere: the folder picker; click: the picker (find-folder routed)", async () => {
+  dropFixture();
+  const restore = await dropRoots();
+  const page = await context.newPage();
+  const finds = [];
+  await page.route("**/api/fs/find-folder", async (route) => {
+    const body = route.request().postDataJSON();
+    finds.push({ body, at: Date.now() });
+    await sleep(400);
+    const matches =
+      body.name === "E2E Twice"
+        ? [{ path: DROP_A, audio_files: 2 }, { path: DROP_B, audio_files: 2 }]
+        : body.name === "E2E Once"
+        ? [{ path: DROP_C, audio_files: 1 }]
+        : [];
+    route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ matches, ms: 3, sources: ["e2e"] }) });
+  });
+  const paths = () => page.$$eval("#importFolders .folder-row .folder-path", (p) => p.map((x) => x.value));
+  const status = () => page.textContent("#importFilesDropStatus");
+  try {
+    await page.goto(SERVER + "/settings/#import");
+    await page.waitForFunction(() => document.querySelectorAll("#importFolders .folder-row").length > 0);
+    const shown = (await paths()).filter(Boolean).length;
+
+    // Two at once: looked for together; one found, one in two places (the chooser).
+    await dropEntries(page, "#importFilesDrop", [
+      { name: "E2E Once", files: [["01 Sea.aiff", 1234], ["cover.jpg", 9], [".DS_Store", 1]] },
+      { name: "E2E Twice", files: [["01 Bee.aiff", 2000], ["CD2/01 Deep Bee.aiff", 3000]] },
+    ]);
+    assert.equal(await status(), "Finding “E2E Once”… · Finding “E2E Twice”…", "at once");
+    await page.waitForSelector("#importFilesDropPanel .fd-choice");
+    assert.equal(finds.length, 2);
+    assert.ok(Math.abs(finds[0].at - finds[1].at) < 300, `in parallel (${finds[1].at - finds[0].at} ms apart; each answered after 400 ms)`);
+    const byName = Object.fromEntries(finds.map((f) => [f.body.name, f.body]));
+    assert.deepEqual(byName["E2E Once"], { name: "E2E Once", files: [{ rel: "01 Sea.aiff", size: 1234 }], count: 1 });
+    assert.deepEqual(byName["E2E Twice"], { name: "E2E Twice", files: [{ rel: "01 Bee.aiff", size: 2000 }, { rel: "CD2/01 Deep Bee.aiff", size: 3000 }], count: 2 });
+    assert.match(await page.textContent("#importFilesDropPanel .fd-note"), /^“E2E Twice” is in 2 places: which one\?$/);
+    assert.deepEqual(
+      await page.$$eval("#importFilesDropPanel .fd-choice", (b) => b.map((x) => [x.dataset.path, x.querySelector(".fd-count").textContent])),
+      [[DROP_A, "2 audio files"], [DROP_B, "2 audio files"]]
+    );
+    if (process.env.E2E_SHOTS) await page.locator("#sec_import_files").screenshot({ path: path.join(process.env.E2E_SHOTS, "drop-chooser.png") });
+    await page.click(`#importFilesDropPanel .fd-choice[data-path="${DROP_B}"]`);
+    await page.waitForFunction(() => /^Added 2 folders \(all files\)/.test(document.getElementById("importFilesDropStatus").textContent));
+    assert.ok((await paths()).includes(DROP_C) && (await paths()).includes(DROP_B));
+    assert.equal(await page.isHidden("#importFilesDropPanel"), true);
+
+    // Nowhere on this Mac: said, then the picker (from the music folders) to point at it.
+    await dropEntries(page, "#importFilesDrop", [{ name: "E2E Nowhere", files: [["01 Ghost.flac", 77]] }]);
+    await page.waitForFunction(() => document.getElementById("importFilesDropStatus").textContent === "Couldn't find “E2E Nowhere” on this Mac");
+    await page.waitForSelector("#importFilesDropPanel .folder-picker");
+    assert.match(await page.textContent("#importFilesDropPanel .fd-note"), /^Couldn't find “E2E Nowhere” on this Mac: pick it, or Cancel\.$/);
+    await page.click("#importFilesDropPanel .fp-crumb");
+    await page.click(`#importFilesDropPanel .fp-dir[data-path="${DROP_MUSIC}"]`);
+    await page.click(`#importFilesDropPanel .fp-dir[data-path="${DROP_A}"]`);
+    await page.waitForFunction((p) => document.querySelector("#importFilesDropPanel .fp-use").title === p, DROP_A);
+    await page.click("#importFilesDropPanel .fp-use");
+    await page.waitForFunction(() => document.getElementById("importFilesDropStatus").textContent === "Added a folder (all files)");
+    assert.equal((await paths()).filter(Boolean).length, shown + 3);
+    // A file from Finder: not a folder; nothing looked for.
+    await dropEntries(page, "#importFilesDrop", [{ name: "01 Track.flac", file: true }]);
+    assert.equal(await status(), "Drop a folder (not files)");
+    assert.equal(finds.length, 3);
+    // Click: the picker; Escape closes it.
+    await page.click("#importFilesDrop");
+    await page.waitForSelector("#importFilesDropPanel .folder-picker");
+    await page.keyboard.press("Escape");
+    assert.equal(await page.isHidden("#importFilesDropPanel"), true);
+  } finally {
+    await restore();
+    await page.close();
+  }
+});
+
 // New tags (not in the vocabulary) in an import: kept on the rows, offered to every row,
 // highlighted, and created when the rows are imported.
 test("import preview: a row's new tag is never dropped (edits, reloads), other rows can add it, it's highlighted, and Import selected creates it", async () => {

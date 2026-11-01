@@ -103,14 +103,21 @@ sync.
     named by date and time): **View** shows it, and **Show in Finder** shows the file.
   - **Past imports** on the Import tab lists the logs, newest first, with their counts.
 - **Settings → Import → Import from Files:** folders (by default the Collection and the downloads `complete`
-  folder), each with an "added since" date that starts from its last run. Default tags are `pool`, with the same
-  lookup choice.
+  folder), each with an "added since" date that starts from its last run, or **all files**. Default tags are
+  `pool`, with the same lookup choice.
+  - **Drop folders here (or click):** folders dragged from Finder onto the **+** box become rows with all files
+    (a folder already listed isn't added twice). Clicking it opens the folder picker. The browser doesn't tell the
+    page where a dropped folder is, so the server finds it by its name and a sample of its audio files (their paths
+    inside it and sizes; nothing is read or uploaded). Found in several places: pick one. Not found: "Couldn't find
+    it on this Mac", then the folder picker.
   - One row per track file (a FLAC + AIFF pair counts once), already located, folder by folder, oldest release
     first.
   - Tracks already in the collection show as duplicates, unticked.
   - **Locations to update (N):** collection items that aren't located yet get these files on Import selected,
     whether or not their rows are ticked.
-- **Import preview:** **Select all** / **Select new only** (everything not already in the collection), and
+- **Import preview:** the same **+** box by the player (until the import is imported): folders dropped on it (or
+  picked) join this import with all their files, in one job; their rows come in when it's done, the ticks, sort and
+  tags as they were. **Select all** / **Select new only** (everything not already in the collection), and
   **Transfer to rekordbox** sends the ticked rows' files to rekordbox (playlists from their tags, the usual dry run
   and confirm) without adding them to the collection. Its count, like Export Selected to RB's, is the located rows;
   the hint next to it says how many aren't located (skipped). The dialog shows where each tag goes.

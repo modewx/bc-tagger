@@ -14,13 +14,15 @@ import { buildNav } from "./nav";
 import { sourceColumn, localPlayUrl, localDuration, localUnavailable } from "./columns";
 import { originalOf, previewToggle } from "./previews";
 import { openPopover, closePopover } from "./popover";
-import { createTags, mapTagsUrl, getBatch, updateRow, commitBatch, discardBatch, resumeLookups, setDefaultTags, relocateRows, relocateRow, rowToItem, matchSource, bandcampSearchUrl, openOnBandcampUrl, cleanBandcampUrl } from "./importApi";
+import { createTags, mapTagsUrl, getBatch, updateRow, commitBatch, discardBatch, resumeLookups, setDefaultTags, relocateRows, relocateRow, rowToItem, matchSource, bandcampSearchUrl, openOnBandcampUrl, cleanBandcampUrl, addImportFolders } from "./importApi";
 import { statsLine } from "./importTab";
 import { rememberImport } from "./openImport";
 import { downloadFileTitle, downloadFlow, fullReleaseOf, fullReleasesToggle, stateLabel, trackDownloads, troubled } from "./downloads";
 import { ownershipFirst, lastCheck, staleNote, challengeText, nothingText } from "./ownershipCheck";
 import { fileRow, setFileForm } from "./fileSetter";
 import { createBulkTagger } from "./bulkTagger";
+import { createFolderDrop } from "./folderDrop";
+import { baseName } from "./dropWalk";
 import { playableItem, sourceOf } from "./statusFilter";
 import { logNote } from "./importLogs";
 import { tickTargets } from "./rowTicks";
@@ -263,11 +265,34 @@ async function saveBulkTags({ add, remove, edits }) {
   const res = await saves.save(edits.map((e) => rows.get(e.id).n), changes);
   return res.ok ? `Saved (${edits.length} row${edits.length > 1 ? "s" : ""})` : `Not saved: ${res.error}`;
 }
+// Folders dropped on (or picked in) the box by the player: one job adds every file of them to this import; their
+// rows come in when it's done (ticks, sort and tags as they were).
+let drop = null;
+async function addFolders(paths) {
+  const before = batch ? batch.rows.length : 0;
+  const name = paths.length === 1 ? `“${baseName(paths[0])}”` : `${paths.length} folders`;
+  let res;
+  try {
+    res = await addImportFolders(batchId, paths);
+  } catch (e) {
+    return { text: e.status === 404 || e.status === 405 ? "This server can't add folders to an import yet." : `Not added: ${e.message}`, err: true };
+  }
+  const job = await jobs.watch(res.job_id, (j) => {
+    proc.textContent = `Adding ${name}: ${progressText(j)}`;
+    drop.say(proc.textContent);
+  });
+  await page.reload();
+  renderInfo();
+  if (job.status === "error") return { text: `Not added: ${job.error || "error"}`, err: true };
+  const added = batch.rows.length - before;
+  return `Added ${added} row${added === 1 ? "" : "s"} from ${name}`;
+}
 const tickedKeys = () => (batch && page ? batch.rows.filter((r) => r.checked).map((r) => `r${r.n}`).filter((k) => k in page.getItems()) : []);
 
 function renderInfo() {
   if (bulk) bulk.refresh();
   if (!batch) return;
+  if (drop) drop.setHidden(!!batch.committed);
   title.textContent = `Import preview · ${batch.source || batch.id}`;
   renderNewTags();
   renderLocations();
@@ -1157,6 +1182,9 @@ async function discard(statusEl) {
   document.getElementById("playerArea").appendChild(previews.el);
   bulk = createBulkTagger({ page, selected: tickedKeys, save: saveBulkTags });
   document.getElementById("playerArea").appendChild(bulk.el);
+  drop = createFolderDrop({ id: "folderDrop", onFolders: addFolders, findContext: () => ({ batch_id: batchId }) });
+  drop.setHidden(!batch || !!batch.committed);
+  document.getElementById("playerArea").after(drop.el);
   const table = document.getElementById("collectionTable");
   const scroller = el("div");
   scroller.id = "tableScroll";
